@@ -30,7 +30,7 @@ says so in its SPDX-License-Identifier line and carries its own copyright
 notice.
 
 - port/threadx: the files derived from the Xtensa port of Eclipse ThreadX
-  (see README.md, "What comes from where") are under the MIT License,
+  (see port/threadx/ORIGIN.md) are under the MIT License,
   Copyright (c) Microsoft Corporation, Cadence Design Systems and Eclipse
   ThreadX contributors.
 

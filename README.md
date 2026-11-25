@@ -9,8 +9,8 @@ comes from ThreadX's FreeRTOS compatibility layer).  The board boots through ESP
 bootloader, built from the same sources.
 
 Status: **runs on a XIAO ESP32S3** (ESP32-S3R8, chip revision v0.2), executing
-from flash at 240 MHz, with an interactive shell on the USB console.  See
-[Bring-up checklist](#bring-up-checklist) for what has been observed.
+from flash at 240 MHz, with an interactive shell on the USB console and on
+UART0.
 
 | | |
 |---|---|
@@ -207,171 +207,27 @@ What ESP-IDF's application start-up does and this firmware does not:
 bootloader/     build of ESP-IDF's second-stage bootloader
 cmake/          toolchain file (downloads the compiler), upstream fetch
 partitions.csv  partition table
-script/         flash tool (and its tests, which need no board)
+script/         flash tool
 ldscript/       linker script
 shell/common/   shell engine and commands, copied from rp2040-connect
 shell/port/     this board's part of the shell
 lib/            upstream sources, fetched by CMake; read-only, not tracked
-port/           board and start-up code
+port/           board and start-up code, and port/esp_compat: what the
+                Espressif sources expect from parts of ESP-IDF that are not built
 port/threadx/   ThreadX architecture port
 src/            application
 ```
 
-## What comes from where
-
-The rule is to take code from esp-hal-3rdparty wherever it can be compiled
-as it is, and to write only what connects it to ThreadX and to this board.
-
-**esp-hal-3rdparty, unmodified**
-
-| Source | Role |
-|---|---|
-| `xtensa/xtensa_vectors.S` | Exception/interrupt vectors, window handlers, interrupt dispatch, coprocessor exception |
-| `xtensa/xtensa_context.S` | `_xt_context_save/restore`, coprocessor save/restore/release |
-| `xtensa/xtensa_intr.c`, `xtensa_intr_asm.S` | Handler tables, `xt_set_interrupt_handler()`, `xt_ints_on/off()` |
-| `xtensa/esp32s3/libxt_hal.a` | Xtensa HAL (window spill, extra-state save) |
-| `esp_system/port/arch/xtensa/panic_handler_asm.S` | `_xt_panic` |
-| `esp_hal_wdt/wdt_hal_iram.c` | Watchdog control (interrupt watchdog, RTC watchdog) |
-| `esp_system/port/soc/esp32s3/highint_hdl.S` | `xt_highint4`: the interrupt watchdog's level-4 interrupt into `panicHandler` |
-| `bootloader/subproject/main/bootloader_start.c`, `bootloader_support/`, and what they need of `efuse`, `esp_rom`, `esp_hw_support`, `log`, `hal` | The second-stage bootloader, with ESP-IDF's own linker scripts |
-| `esp_app_format/esp_app_desc.c` | The application descriptor the bootloader expects at the start of the image |
-| `partition_table/gen_esp32part.py`, `check_sizes.py` | Partition table generation and size checks |
-| `esp_timer/src/esp_timer.c`, `esp_timer_impl_common.c`, `esp_timer_impl_systimer.c`, `esp_timer_init.c`, with `esp_hal_systimer/systimer_hal.c` and `esp_hw_support/port/esp32s3/systimer.c` | esp_timer: timers and the microsecond uptime clock |
-| `esp_hw_support/intr_alloc.c`, `esp_hw_support/port/esp32s3/esp_cpu_intr.c` | Interrupt allocator (`esp_intr_alloc()`) |
-| `esp_hw_support/periph_ctrl.c` | Reference-counted peripheral clock gates |
-| `esp_hw_support/port/esp32s3/rtc_clk.c`, `esp_hw_support/regi2c_ctrl.c`, `esp_hal_regi2c/esp32s3/rom.regi2c.ld` | CPU clock |
-| `esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c` | Work-arounds for ROM cache bugs |
-| `esp_rom/patches/esp_rom_sys.c` + ROM | `esp_rom_printf`, console channel, ticks-per-us |
-| `esp_hal_uart/uart_hal.c`, `soc/esp32s3/gpio_periph.c` | UART0 and its pins |
-| LL headers of `esp_hal_gpio`, `esp_hal_usb`, `esp_hal_uart`, `hal` | GPIO, USB Serial/JTAG, UART, eFuse |
-| `soc/`, `esp_rom/` linker scripts | Peripheral and ROM symbol addresses |
-
-**ESP-IDF, unmodified**
-
-The mirror lacks three directories the bootloader cannot be built without:
-`esp_image_verify` (the image loader), `esp_bootloader_format` and
-`esp_mspi/include`.  They are fetched from ESP-IDF itself, at the commit the
-mirror was generated from, into `lib/esp-idf`.
-
-Espressif's Xtensa layer is the RTOS-neutral half of what ESP-IDF's FreeRTOS
-port is built on.  It calls the RTOS through the names in `xtensa_rtos.h`,
-which `port/threadx/inc/xtensa_rtos.h` maps to ThreadX.
-
-**ThreadX**
-
-`lib/threadx/common` is the kernel, and
-`utility/execution_profile_kit/tx_execution_profile.c` accounts the run time of
-threads, interrupt handlers and idle; both are built unmodified.
-`utility/rtos_compatibility_layers/FreeRTOS/tx_freertos.c` provides the
-FreeRTOS API for ESP-IDF code, also unmodified (one warning option for a
-const mismatch) and configured by
-`port/esp_compat/freertos/include/FreeRTOSConfig.h`: FreeRTOS priority p is
-ThreadX priority 31 - p, and the objects it creates come from its own byte
-pool.  Its thread `txfr_idle_task` frees deleted tasks.  The kit is
-told about interrupt entry through a hook Espressif's dispatcher already has
-(`CONFIG_PM_TRACE`), which `port/threadx/inc/xtensa_rtos.h` maps to
-`_tx_execution_isr_enter`.  The upstream Xtensa port
-(`lib/threadx/ports/xtensa/xcc`) is **not built**: it brings its own copy of
-the Xtensa layer, written for the Cadence toolchain.  Its ThreadX-specific
-files were copied to `port/threadx/` and adapted to Espressif's layer.  The
-"Origin" column says which files those are and which are new here:
-
-| File | Origin | State |
-|---|---|---|
-| `src/tx_thread_context_save.S`, `tx_thread_context_restore.S`, `tx_thread_schedule.S`, `tx_thread_stack_build.S`, `tx_thread_system_return.S` | upstream | Verbatim copies |
-| `inc/tx_api_asm.h` | upstream | Verbatim copy |
-| `src/tx_timer_interrupt.S` | upstream | One symbol renamed (`_xt_tick_divisor`) |
-| `inc/tx_port.h` | upstream | Interrupt lockout and `_xt_coproc_release()` adapted; see the note at the top of the file |
-| `src/tx_initialize_low_level.c`, `tx_thread_interrupt_control.c` | upstream | Rewritten for the layer's API and GCC |
-| `src/tx_clib_newlib.c` | new | Replaces upstream `tx_clib_lock.c`, which does not build against Espressif's newlib.  Per-thread `_reent`, `__retarget_lock_*` on `TX_MUTEX`, `_sbrk_r`. |
-| `src/tx_port_asm.S` | new | Coprocessor save-area lookup (taken from upstream `xtensa_coproc_handler.S`), exception hook, interrupt stack |
-| `src/tx_port_offset_check.c` | new | Build-time check of the TCB offsets the assembly uses.  The upstream Xtensa port has no such check; the name follows the one upstream's Cortex-R ports use. |
-| `inc/tx_user.h` | new | Kernel options: 1 kHz tick, timers processed in the tick interrupt, and the per-thread pointer the shell's kernel layer needs |
-| `inc/xtensa_rtos.h` | new | Maps the layer's RTOS callouts to ThreadX; the tick goes through the board's `board_tick_interrupt()`, which feeds the interrupt watchdog (upstream has a file of the same name for its own copy of the layer) |
-| `inc/freertos/xtensa_rtos.h` | new | Include-path shim for `panic_handler_asm.S` |
-
-**rp2040-connect**
-
-`shell/common/` holds the 62 files of rp2040-connect's `common/` directory
-(commit `72f3485`) that this firmware uses, at the same relative paths: the
-shell engine, the generic commands, and the Zephyr-compatibility kernel layer
-they are written against.  Most are byte-identical copies;
-`shell/ORIGIN.md` lists them, the changes, and their licences (MIT,
-Apache-2.0 for the parts derived from Zephyr, BSD-3-Clause for getopt and
-fnmatch).  `shell/port/` is this board's side of that code: the console
-transport, the kernel port header, the log back end, the realtime clock, the
-fault record, and the commands only the board can answer (`version`, `free`,
-`ps`).
-
-**This project** (`port/`)
-
-| File | Role |
-|---|---|
-| `startup.c` | Application start-up after the bootloader |
-| `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: `freertos/` (the `freertos/*.h` headers ESP-IDF code includes, on ThreadX's FreeRTOS layer, with ESP-IDF's additions: spinlock critical sections, `xTaskCreatePinnedToCore()`, stack sizes in bytes, `xQueueGenericSend()`), `heap_caps.c` (`heap_caps_malloc()` and `heap_caps_calloc()` on newlib's heap), and small stand-in headers for `esp_sleep` and `esp_mspi` |
-| `board.c` | LED, clock readback, uptime, console on USB Serial/JTAG and UART0 (receive interrupts, UART transmit interrupt and queue), device ID, restart, reset reason |
-| `watchdog.c` | The interrupt watchdog (started by the first tick, fed by every tick), and the watchdogs of the fault path and the restart |
-| `syscalls.c` | newlib fd 0-2 on the console; once the shell runs, stdout and stderr go through the shell's console layer |
-| `panic.c` | Fatal errors (`xt_unhandled_exception`, `panicHandler` including the interrupt watchdog, ThreadX's stack check, `_exit`): register dump, record kept across the restart in `.noinit`, restart |
-| `include/sdkconfig.h` | The `CONFIG_` symbols the compiled sources need, shared by the bootloader and the application |
+The rule is to take code from Espressif wherever it can be compiled as it
+is, and to write only what connects it to ThreadX and to this board.
+`CMakeLists.txt` and `bootloader/CMakeLists.txt` list every upstream file
+that is built, with the pinned commits; each file under `port/` says in its
+header what it is for.  Files copied from elsewhere, and what was changed in
+them, are recorded in [`port/threadx/ORIGIN.md`](port/threadx/ORIGIN.md)
+(the ThreadX port) and [`shell/ORIGIN.md`](shell/ORIGIN.md) (the shell);
+licences are in [`LICENSE`](LICENSE).
 
 The C library is usable from threads and from `tx_application_define()`, not
 from interrupt handlers (output written from one bypasses the shell's console
 layer and goes to the port directly).  The same goes for the FPU and the vector extension:
 using a coprocessor in an interrupt handler ends in a panic.
-
-## Bring-up checklist
-
-Everything below has been observed on the board with the current image over
-USB.  On UART0 the boot logs, the shell in both directions, a burst of output
-larger than the transmit queue, the fault dump with its restart, `reboot` and
-`bootsel` have been observed too, and so has flashing through a PL2303
-adapter (`app-flash` at 115200 and at 460800 baud, and `flash`, each without
-a button and back in the firmware 5 to 10 s later).  In the order a failure
-would show up:
-
-1. After `flash`, the ROM log is followed by the bootloader's
-   (`boot: ESP-IDF ... 2nd stage bootloader`, the partition table, the image
-   segments, `Loaded app from partition at offset 0x10000`) and then the
-   banner.  Nothing after the ROM's `entry` line: the bootloader.  Nothing
-   after `Loaded app`: `_start`.  A reset about 9 s after boot: the RTC
-   watchdog was not turned off.
-2. The banner shows the configured clock (240 MHz).
-3. The prompt appears and `help` lists the commands.  Banner but no prompt:
-   the first context switch, the tick interrupt, or the receive interrupt.
-4. `uptime` twice: seconds and ticks advance together (1 tick = 1 ms).
-5. `ps` lists `txfr_idle_task`, `esp_timer`, `console`, `(idle)` and
-   `(interrupts)`; the CPU column
-   adds up to about 100% and rises for `console` when the shell is kept busy.
-   `date` advances with `uptime`.
-6. `id` prints the MAC address esptool reports.
-7. `devmem 0` ends in a register dump and a restart by itself; the banner
-   then shows the record, `fault` shows it again, and after a `reboot`
-   `fault` says there was none.  Writing 0 to the first word of a thread's
-   stack (`devmem <address of session_stack> 32 0`) ends the same way with
-   `Stack overflow in thread "console"`.  `reboot` comes back
-   to the banner, `bootsel` lets esptool connect, `dmesg` still shows the
-   lines of earlier boots after a `reboot`, and `app-flash` alone updates the
-   firmware.
-8. The LED blinks at 1 Hz (esp_timer: the SYSTIMER alarm interrupt and the
-   esp_timer task).  With temporary code, a FreeRTOS task blocked on a queue
-   that a 1 s esp_timer callback feeds prints at intervals of 1000000 us
-   within 10 us, shows in `ps`, and is gone from it after `vTaskDelete()`.
-9. The interrupt watchdog, with temporary code: a thread that keeps
-   interrupts masked, or an interrupt handler that does not return, ends in
-   `*** Interrupt watchdog: no tick for 300 ms` and a restart, and `fault`
-   names the thread and the PC.  With every level masked
-   (`tx_interrupt_control(15)`) the ROM log shows `rst:0x8 (TG1WDT_SYS_RST)`
-   and the banner `Fatal error: interrupt watchdog reset`.  Idle, nothing
-   restarts.
-
-Every unhandled exception, including kernel and double exceptions, a thread's
-stack overflow, a tick that stalls for 300 ms (the interrupt watchdog) and
-`_exit()` print a register dump through the ROM printf,
-keep a record in RAM that survives the reset, and restart the board.  The
-handler runs from RAM and seals the record before it reads flash, so the
-record survives even when the flash mapping is what failed (the dump itself
-goes through console code in flash).  Not exercised on the board: `_exit()`,
-a break instruction, a second fault inside the handler, and a handler that
-hangs (it stops the interrupt watchdog and arms the RTC watchdog for 2 s, so
-that the board still restarts).
