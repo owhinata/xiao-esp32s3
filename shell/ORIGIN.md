@@ -8,7 +8,7 @@ here (no driver, network, Telnet, sensor, Pico SDK or test file).
 
 `shell/port/` is written for this board and is not a copy.
 
-To compare with the original (only the modified file below should differ):
+To compare with the original (only the modified files below should differ):
 
 ```sh
 diff -r shell/common /path/to/rp2040-connect/common | grep -v '^Only in /path/to'
@@ -16,11 +16,12 @@ diff -r shell/common /path/to/rp2040-connect/common | grep -v '^Only in /path/to
 
 ## Copied files
 
-All 60 files are byte-identical to the original, except one:
+All 60 files are byte-identical to the original, except two:
 
 | File | Change |
 |---|---|
 | `compat/include/priorities.h` | `APP_STACK_SHELL` is wrapped in `#ifndef`, as the file already does for `APP_STACK_SENSOR_SHELL` and three others, so that `shell/port/priorities_os.h` can set the shell thread's stack for this CPU. |
+| `shell/kernel_shell.c` | Texts that named RP2040 specifics now name this board's: the help of `id` (the factory MAC address instead of the flash's ID), the clock in `uptime` (SYSTIMER instead of TIMER), and the help and message of `bootsel` (the ROM download mode instead of BOOTSEL and the RPI-RP2 drive), with the two comments that explain them. No code change. |
 
 By licence, as each file's `SPDX-License-Identifier` line says (paths
 relative to `shell/common/`; headers without a directory are in

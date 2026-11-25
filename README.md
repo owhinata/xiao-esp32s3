@@ -62,27 +62,26 @@ XIAO ESP32S3: ThreadX 6.5.2, CPU clock 240000000 Hz, 1000 ticks/s
 
 xiao:~$ help
 Available commands:
-  bootsel  : Restart into the USB bootloader (BOOTSEL)
+  bootsel  : Restart into the ROM download mode (for esptool)
   devmem   : Read or write memory: devmem <address> [<width> [<value>]]
   dmesg    : Show logs stored in RAM
   free     : Show the use of malloc()
   help     : Prints the help message.
-  id       : Show the board's unique ID (of the flash)
+  id       : Show the board's unique ID (the factory MAC address)
   ps       : List the tasks
   reboot   : Restart the board
   sleep    : Sleep for <ms> milliseconds (Zephyr's kernel sleep)
-  uptime   : Show the time since the start (TIMER) and the ticks
+  uptime   : Show the time since the start (SYSTIMER) and the ticks
   version  : Show the versions of the kernel, HAL and compiler
 ```
 
 The orange LED toggles every 0.5 s.  The banner is printed at boot; a terminal
 opened later gets a prompt on Enter.
 
-Three of the command texts come unchanged from rp2040-connect and describe an
-RP2040.  On this board `bootsel` restarts into the ROM download mode (where
-esptool can connect; a reset from esptool or the RESET button returns to the
-firmware), `id` prints the factory MAC address from eFuse, and the clock
-`uptime` calls TIMER is SYSTIMER.
+`bootsel` keeps its name from rp2040-connect; on this board it restarts into
+the ROM download mode, where esptool can connect.  A reset from esptool or the
+RESET button returns to the firmware.  `id` prints the factory MAC address
+from eFuse.
 
 `dmesg` shows a log kept in RAM that survives a reset, so it also holds the
 lines of earlier boots.  rp2040-connect's `date` and `fault` are not built:
@@ -197,8 +196,8 @@ files were copied to `port/threadx/` and adapted to Espressif's layer.  The
 `shell/common/` holds the 60 files of rp2040-connect's `common/` directory
 (commit `72f3485`) that this firmware uses, at the same relative paths: the
 shell engine, the generic commands, and the Zephyr-compatibility kernel layer
-they are written against.  All but one are byte-identical copies;
-`shell/ORIGIN.md` lists them, the one change, and their licences (MIT,
+they are written against.  All but two are byte-identical copies;
+`shell/ORIGIN.md` lists them, the changes, and their licences (MIT,
 Apache-2.0 for the parts derived from Zephyr, BSD-3-Clause for getopt and
 fnmatch).  `shell/port/` is this board's side of that code: the console
 transport, the kernel port header, the log back end, and the commands only the

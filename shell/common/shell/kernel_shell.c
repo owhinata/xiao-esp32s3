@@ -29,9 +29,8 @@
 /* The longest device ID shown (Zephyr's hwinfo shell takes 16 bytes). */
 #define ID_SIZE_MAX 16
 
-/* The device ID of the layer's hwinfo, in upper-case hexadecimal (on the
- * RP2040 the flash's 64-bit unique ID, as the Pico SDK's
- * pico_get_unique_board_id_string() writes it).
+/* The device ID of the layer's hwinfo, in upper-case hexadecimal (on this
+ * board the factory MAC address in eFuse, as esptool prints it).
  */
 static int cmd_id(const struct shell *sh, size_t argc, char **argv)
 {
@@ -57,7 +56,7 @@ static int cmd_id(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-SHELL_CMD_REGISTER(id, NULL, "Show the board's unique ID (of the flash)", cmd_id);
+SHELL_CMD_REGISTER(id, NULL, "Show the board's unique ID (the factory MAC address)", cmd_id);
 
 static int cmd_uptime(const struct shell *sh, size_t argc, char **argv)
 {
@@ -66,13 +65,13 @@ static int cmd_uptime(const struct shell *sh, size_t argc, char **argv)
 	(void)argc;
 	(void)argv;
 
-	shell_print(sh, "%llu.%06llu s (TIMER), %lu ticks of 1/%d s",
+	shell_print(sh, "%llu.%06llu s (SYSTIMER), %lu ticks of 1/%d s",
 		    (unsigned long long)(us / 1000000u), (unsigned long long)(us % 1000000u),
 		    (unsigned long)kernel_shell_os_tick_count(), (int)(1000000 / Z_USEC_PER_TICK));
 	return 0;
 }
 
-SHELL_CMD_REGISTER(uptime, NULL, "Show the time since the start (TIMER) and the ticks", cmd_uptime);
+SHELL_CMD_REGISTER(uptime, NULL, "Show the time since the start (SYSTIMER) and the ticks", cmd_uptime);
 
 /* The wall clock (UTC, set by the time synchronization), in the format of the
  * NuttX build's "date".  It counts from 1970 until the time is known.
@@ -199,17 +198,17 @@ static int cmd_reboot(const struct shell *sh, size_t argc, char **argv)
 
 SHELL_CMD_REGISTER(reboot, NULL, "Restart the board", cmd_reboot);
 
-/* Restarts into the boot ROM's USB loader (the RPI-RP2 drive), as holding the
- * board's REC pad low at reset does.
+/* Restarts into the boot ROM's download mode, where esptool connects over
+ * USB, as holding the board's B (BOOT) button at reset does.
  */
 static int cmd_bootsel(const struct shell *sh, size_t argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
 
-	shell_print(sh, "Entering BOOTSEL (the RPI-RP2 drive)");
+	shell_print(sh, "Entering the ROM download mode (for esptool)");
 	kernel_shell_os_bootsel(RESTART_DELAY_MS);
 	return 0;
 }
 
-SHELL_CMD_REGISTER(bootsel, NULL, "Restart into the USB bootloader (BOOTSEL)", cmd_bootsel);
+SHELL_CMD_REGISTER(bootsel, NULL, "Restart into the ROM download mode (for esptool)", cmd_bootsel);
