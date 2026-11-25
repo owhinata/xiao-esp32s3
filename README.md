@@ -4,7 +4,8 @@ Bare-metal [Eclipse ThreadX](https://github.com/eclipse-threadx/threadx) on the
 XIAO ESP32S3, built on
 [esp-hal-3rdparty](https://github.com/espressif/esp-hal-3rdparty) (an
 unmodified mirror of ESP-IDF's components, used here without ESP-IDF's build
-system or FreeRTOS).  The board boots through ESP-IDF's own second-stage
+system or FreeRTOS; the FreeRTOS API that ESP-IDF code is written against
+comes from ThreadX's FreeRTOS compatibility layer).  The board boots through ESP-IDF's own second-stage
 bootloader, built from the same sources.
 
 Status: **runs on a XIAO ESP32S3** (ESP32-S3R8, chip revision v0.2), executing
@@ -22,9 +23,10 @@ from flash at 240 MHz, with an interactive shell on the USB console.  See
 | Shell | The shell of [rp2040-connect](https://github.com/owhinata/rp2040-connect), copied into `shell/common/` |
 | Tick | 1000 Hz from CCOMPARE0 (CPU interrupt 6, level 1) |
 | Watchdog | ESP-IDF's interrupt watchdog: timer group 1, fed by every tick; 300 ms without a tick ends in the fault report, 600 ms more in a system reset |
-| Uptime clock | SYSTIMER counter 0 (16 MHz, from the crystal) |
+| Uptime clock | SYSTIMER counter 0 (16 MHz, from the crystal), through `esp_timer_get_time()`; counts from the start of the application |
+| Timers | ESP-IDF's esp_timer: a SYSTIMER alarm interrupt and its task on the FreeRTOS layer |
 | Run times | ThreadX execution profile kit on the CPU cycle counter |
-| LED | GPIO21, active low |
+| LED | GPIO21, active low, toggled by an esp_timer periodic timer |
 | CPU clock | 240 MHz from the PLL (`BOARD_CPU_FREQ_MHZ`) |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, the firmware as the factory application at 0x10000 |
 
@@ -129,7 +131,8 @@ previous `ps`, then the time spent idle and in interrupt handlers, and
 
 ```
 NAME                 STATE PRIO STACK FREE    CPU
-blink                B       10       3680    0.0%
+txfr_idle_task       S       31       1116    0.0%
+esp_timer            S        9       3596    0.0%
 console              X       30       5312    0.1%
 (idle)               -        -          -   99.8%
 (interrupts)         -        -       3872    0.1%
@@ -233,7 +236,9 @@ as it is, and to write only what connects it to ThreadX and to this board.
 | `bootloader/subproject/main/bootloader_start.c`, `bootloader_support/`, and what they need of `efuse`, `esp_rom`, `esp_hw_support`, `log`, `hal` | The second-stage bootloader, with ESP-IDF's own linker scripts |
 | `esp_app_format/esp_app_desc.c` | The application descriptor the bootloader expects at the start of the image |
 | `partition_table/gen_esp32part.py`, `check_sizes.py` | Partition table generation and size checks |
-| `esp_hal_systimer/systimer_hal.c`, `esp_hw_support/port/esp32s3/systimer.c` | Microsecond uptime clock |
+| `esp_timer/src/esp_timer.c`, `esp_timer_impl_common.c`, `esp_timer_impl_systimer.c`, `esp_timer_init.c`, with `esp_hal_systimer/systimer_hal.c` and `esp_hw_support/port/esp32s3/systimer.c` | esp_timer: timers and the microsecond uptime clock |
+| `esp_hw_support/intr_alloc.c`, `esp_hw_support/port/esp32s3/esp_cpu_intr.c` | Interrupt allocator (`esp_intr_alloc()`) |
+| `esp_hw_support/periph_ctrl.c` | Reference-counted peripheral clock gates |
 | `esp_hw_support/port/esp32s3/rtc_clk.c`, `esp_hw_support/regi2c_ctrl.c`, `esp_hal_regi2c/esp32s3/rom.regi2c.ld` | CPU clock |
 | `esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c` | Work-arounds for ROM cache bugs |
 | `esp_rom/patches/esp_rom_sys.c` + ROM | `esp_rom_printf`, console channel, ticks-per-us |
@@ -256,7 +261,13 @@ which `port/threadx/inc/xtensa_rtos.h` maps to ThreadX.
 
 `lib/threadx/common` is the kernel, and
 `utility/execution_profile_kit/tx_execution_profile.c` accounts the run time of
-threads, interrupt handlers and idle; both are built unmodified.  The kit is
+threads, interrupt handlers and idle; both are built unmodified.
+`utility/rtos_compatibility_layers/FreeRTOS/tx_freertos.c` provides the
+FreeRTOS API for ESP-IDF code, also unmodified (one warning option for a
+const mismatch) and configured by
+`port/esp_compat/freertos/include/FreeRTOSConfig.h`: FreeRTOS priority p is
+ThreadX priority 31 - p, and the objects it creates come from its own byte
+pool.  Its thread `txfr_idle_task` frees deleted tasks.  The kit is
 told about interrupt entry through a hook Espressif's dispatcher already has
 (`CONFIG_PM_TRACE`), which `port/threadx/inc/xtensa_rtos.h` maps to
 `_tx_execution_isr_enter`.  The upstream Xtensa port
@@ -297,7 +308,7 @@ fault record, and the commands only the board can answer (`version`, `free`,
 | File | Role |
 |---|---|
 | `startup.c` | Application start-up after the bootloader |
-| `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: a `freertos/FreeRTOS.h` that provides critical sections only, and small stand-in headers for `esp_sleep` and `esp_mspi` |
+| `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: `freertos/` (the `freertos/*.h` headers ESP-IDF code includes, on ThreadX's FreeRTOS layer, with ESP-IDF's additions: spinlock critical sections, `xTaskCreatePinnedToCore()`, stack sizes in bytes, `xQueueGenericSend()`), `heap_caps.c` (`heap_caps_malloc()` and `heap_caps_calloc()` on newlib's heap), and small stand-in headers for `esp_sleep` and `esp_mspi` |
 | `board.c` | LED, clock readback, uptime, console on USB Serial/JTAG and UART0 (receive interrupts, UART transmit interrupt and queue), device ID, restart, reset reason |
 | `watchdog.c` | The interrupt watchdog (started by the first tick, fed by every tick), and the watchdogs of the fault path and the restart |
 | `syscalls.c` | newlib fd 0-2 on the console; once the shell runs, stdout and stderr go through the shell's console layer |
@@ -329,19 +340,23 @@ would show up:
 3. The prompt appears and `help` lists the commands.  Banner but no prompt:
    the first context switch, the tick interrupt, or the receive interrupt.
 4. `uptime` twice: seconds and ticks advance together (1 tick = 1 ms).
-5. `ps` lists `blink`, `console`, `(idle)` and `(interrupts)`; the CPU column
+5. `ps` lists `txfr_idle_task`, `esp_timer`, `console`, `(idle)` and
+   `(interrupts)`; the CPU column
    adds up to about 100% and rises for `console` when the shell is kept busy.
    `date` advances with `uptime`.
 6. `id` prints the MAC address esptool reports.
 7. `devmem 0` ends in a register dump and a restart by itself; the banner
    then shows the record, `fault` shows it again, and after a `reboot`
    `fault` says there was none.  Writing 0 to the first word of a thread's
-   stack (`devmem <address of blink_stack> 32 0`) ends the same way with
-   `Stack overflow in thread "blink"`.  `reboot` comes back
+   stack (`devmem <address of session_stack> 32 0`) ends the same way with
+   `Stack overflow in thread "console"`.  `reboot` comes back
    to the banner, `bootsel` lets esptool connect, `dmesg` still shows the
    lines of earlier boots after a `reboot`, and `app-flash` alone updates the
    firmware.
-8. The LED blinks at 1 Hz.
+8. The LED blinks at 1 Hz (esp_timer: the SYSTIMER alarm interrupt and the
+   esp_timer task).  With temporary code, a FreeRTOS task blocked on a queue
+   that a 1 s esp_timer callback feeds prints at intervals of 1000000 us
+   within 10 us, shows in `ps`, and is gone from it after `vTaskDelete()`.
 9. The interrupt watchdog, with temporary code: a thread that keeps
    interrupts masked, or an interrupt handler that does not return, ends in
    `*** Interrupt watchdog: no tick for 300 ms` and a restart, and `fault`

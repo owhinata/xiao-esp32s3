@@ -127,6 +127,19 @@
 #define CONFIG_ESP_INT_WDT                      1
 #define CONFIG_ESP_INT_WDT_TIMEOUT_MS           300
 
+/*
+ * esp_timer (ESP-IDF's defaults): on SYSTIMER, its interrupt at level 1 and
+ * its task on core 0, 3584 bytes of task stack (esp_task.h adds 512).  Its
+ * code stays in flash (CONFIG_ESP_TIMER_IN_IRAM off), which nothing here
+ * ever disables.
+ */
+#define CONFIG_ESP_TIMER_IMPL_SYSTIMER          1
+#define CONFIG_ESP_TIMER_TASK_STACK_SIZE        3584
+#define CONFIG_ESP_TIMER_INTERRUPT_LEVEL        1
+#define CONFIG_ESP_TIMER_TASK_AFFINITY          0x0
+#define CONFIG_ESP_TIMER_TASK_AFFINITY_CPU0     1
+#define CONFIG_ESP_TIMER_ISR_AFFINITY_CPU0      1
+
 /* ---- HAL and log in the application ----------------------------------- */
 
 #define CONFIG_HAL_DEFAULT_ASSERTION_LEVEL      0

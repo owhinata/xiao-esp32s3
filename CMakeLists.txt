@@ -176,6 +176,29 @@ target_include_directories(threadx PUBLIC
 target_link_libraries(threadx PUBLIC xtensa_rtos)
 
 # ---------------------------------------------------------------------------
+# FreeRTOS API on ThreadX
+# ---------------------------------------------------------------------------
+# ThreadX's FreeRTOS compatibility layer, unmodified, configured by
+# port/esp_compat/freertos/include/FreeRTOSConfig.h, and what ESP-IDF's
+# FreeRTOS adds to the API (port/esp_compat/freertos): "freertos/FreeRTOS.h"
+# and the other "freertos/" headers ESP-IDF sources include.  Only the
+# targets that link this library see those headers; the Xtensa layer above
+# must not (see freertos/FreeRTOS.h), and it does not link it.
+set(TX_FREERTOS "${TX_DIR}/utility/rtos_compatibility_layers/FreeRTOS")
+add_library(freertos STATIC
+    "${TX_FREERTOS}/tx_freertos.c"
+    "${PORT_DIR}/esp_compat/freertos/freertos_idf.c")
+target_include_directories(freertos PUBLIC
+    "${PORT_DIR}/esp_compat/freertos/include"
+    "${TX_FREERTOS}"
+    "${ESP_HAL}/heap/include")                  # esp_heap_caps.h, as in ESP-IDF
+target_link_libraries(freertos PUBLIC threadx esp_hal)
+# pcTaskGetName() hands a "const char **" where tx_thread_info_get() takes a
+# "CHAR **"; only the constness differs.
+set_source_files_properties("${TX_FREERTOS}/tx_freertos.c"
+    PROPERTIES COMPILE_OPTIONS "-Wno-incompatible-pointer-types")
+
+# ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
 set(LDSCRIPT "${CMAKE_CURRENT_LIST_DIR}/ldscript/xiao_esp32s3.ld")
@@ -187,7 +210,7 @@ add_executable(app
     "${PORT_DIR}/panic.c"
     "${PORT_DIR}/watchdog.c"
     "${PORT_DIR}/syscalls.c"
-    "${PORT_DIR}/esp_compat/esp_stubs.c"
+    "${PORT_DIR}/esp_compat/heap_caps.c"
     # esp-hal-3rdparty sources this image needs, compiled as they are
     # The application description the second-stage bootloader reads from the
     # start of the read-only data (esp_app_desc_t; see the linker script).
@@ -202,19 +225,28 @@ add_executable(app
     "${ESP_HAL}/esp_rom/patches/esp_rom_sys.c"
     # Work-arounds for bugs in the ROM's cache suspend/write-back routines.
     "${ESP_HAL}/esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c"
-    # SYSTIMER: the uptime clock (port/board.c).
+    # esp_timer on SYSTIMER: timers, and the uptime clock (port/board.c).
+    "${ESP_HAL}/esp_timer/src/esp_timer.c"
+    "${ESP_HAL}/esp_timer/src/esp_timer_impl_common.c"
+    "${ESP_HAL}/esp_timer/src/esp_timer_impl_systimer.c"
+    "${ESP_HAL}/esp_timer/src/esp_timer_init.c"
     "${ESP_HAL}/esp_hal_systimer/systimer_hal.c"
     "${ESP_HAL}/esp_hw_support/port/esp32s3/systimer.c"
+    # The interrupt allocator (esp_intr_alloc()) with the table of the CPU's
+    # interrupts, and the reference-counted peripheral clock gates.
+    "${ESP_HAL}/esp_hw_support/intr_alloc.c"
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/esp_cpu_intr.c"
+    "${ESP_HAL}/esp_hw_support/periph_ctrl.c"
     # UART0: the console on D6/D7 (port/board.c), and the table of IO MUX
     # registers that gpio_ll_pullup_en() looks the RX pin up in.
     "${ESP_HAL}/esp_hal_uart/uart_hal.c"
     "${ESP_HAL}/soc/esp32s3/gpio_periph.c")
-# These use FreeRTOS only for critical sections; give them the stand-in header.
-# It is kept off the global include path on purpose: the Xtensa layer switches
-# to its FreeRTOS code paths as soon as it can see a "freertos/FreeRTOS.h".
 set_source_files_properties(
-    "${ESP_HAL}/esp_hw_support/regi2c_ctrl.c"
-    PROPERTIES INCLUDE_DIRECTORIES "${PORT_DIR}/esp_compat/include")
+    "${ESP_HAL}/esp_timer/src/esp_timer.c"
+    "${ESP_HAL}/esp_timer/src/esp_timer_impl_common.c"
+    "${ESP_HAL}/esp_timer/src/esp_timer_impl_systimer.c"
+    "${ESP_HAL}/esp_timer/src/esp_timer_init.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/esp_timer/private_include")
 # esp_mspi's timing-tuning header is not fetched: rtc_init.c includes it for
 # one declaration (port/esp_compat/esp_mspi).
 set_source_files_properties(
@@ -238,10 +270,13 @@ set_target_properties(app PROPERTIES
     OUTPUT_NAME xiao_esp32s3_threadx
     SUFFIX      .elf
     LINK_DEPENDS "${LDSCRIPT}")
-target_include_directories(app PRIVATE "${PORT_DIR}")
+target_include_directories(app PRIVATE
+    "${PORT_DIR}"
+    "${ESP_HAL}/esp_timer/include"
+    "${ESP_HAL}/esp_hw_support/etm/include")    # esp_timer.h includes esp_etm.h
 # xtensa_rtos is an object library: the vectors are reached only through the
 # linker script and VECBASE, so nothing would pull them out of an archive.
-target_link_libraries(app PRIVATE shell threadx xtensa_rtos esp_hal)
+target_link_libraries(app PRIVATE shell freertos threadx xtensa_rtos esp_hal)
 # -u esp_app_desc: nothing refers to it by name (esp_app_format does the same).
 target_link_options(app PRIVATE
     -nostartfiles

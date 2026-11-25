@@ -27,8 +27,9 @@ void     board_led_set(int on);
 uint32_t board_cpu_freq_hz(void);
 
 /*
- * Microseconds since reset; any context, interrupts masked or not.
- * board_uptime_init() once, before the first read.
+ * Microseconds since board_uptime_init(), esp_timer_get_time(); any context,
+ * interrupts masked or not.  board_uptime_init() once, before the kernel
+ * starts and before the first read: it is esp_timer's early initialization.
  */
 void     board_uptime_init(void);
 uint64_t board_uptime_us(void);

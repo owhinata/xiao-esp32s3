@@ -26,11 +26,16 @@
 #define TX_TIMER_PROCESS_IN_ISR
 
 /*
- * One pointer per thread for the layer (Zephyr's thread custom data): the
- * console a thread's output goes to.  tx_thread_create() clears it.  The
- * text is C; assembly sources never expand it.
+ * Two pointers per thread, which tx_thread_create() clears:
+ *   tx_thread_zephyr_local  the shell's Zephyr layer (Zephyr's thread custom
+ *                           data): the console a thread's output goes to;
+ *   txfr_thread_ptr         ThreadX's FreeRTOS compatibility layer
+ *                           (tx_freertos.c, which requires this name): the
+ *                           FreeRTOS task a thread belongs to, NULL for a
+ *                           thread made with tx_thread_create().
+ * The text is C; assembly sources never expand it.
  */
-#define TX_THREAD_USER_EXTENSION        VOID *tx_thread_zephyr_local;
+#define TX_THREAD_USER_EXTENSION        VOID *tx_thread_zephyr_local; VOID *txfr_thread_ptr;
 
 /* Detect thread stack overflow at context switches. */
 #define TX_ENABLE_STACK_CHECKING

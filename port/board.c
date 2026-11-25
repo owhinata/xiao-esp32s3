@@ -14,7 +14,7 @@
 #include "esp_cpu.h"
 #include "esp_rom_serial_output.h"
 #include "esp_rom_sys.h"
-#include "esp_private/systimer.h"
+#include "esp_timer.h"
 #include "soc/interrupts.h"
 #include "soc/rtc.h"
 #include "soc/rtc_cntl_reg.h"
@@ -25,7 +25,6 @@
 #include "soc/uart_pins.h"
 #include "hal/efuse_ll.h"
 #include "hal/gpio_ll.h"
-#include "hal/systimer_hal.h"
 #include "hal/uart_hal.h"
 #include "hal/usb_serial_jtag_ll.h"
 #include "xtensa_api.h"
@@ -70,30 +69,22 @@ uint32_t board_cpu_freq_hz(void)
 /* ---- Uptime -------------------------------------------------------------- */
 
 /*
- * SYSTIMER counter 0: 52 bits at 16 MHz, derived from the crystal.  It keeps
- * counting whatever the CPU clock is and while interrupts are masked, which a
- * clock built from the tick count and CCOUNT would have to work around, and
- * it starts from zero at every reset.  ESP-IDF uses the same counter for its
- * esp_timer.
+ * esp_timer's clock: SYSTIMER counter 0, 52 bits at 16 MHz, derived from the
+ * crystal.  It keeps counting whatever the CPU clock is and while interrupts
+ * are masked, which a clock built from the tick count and CCOUNT would have
+ * to work around.  esp_timer_early_init() resets SYSTIMER and starts the
+ * counter from zero, as in ESP-IDF's start-up, and sets up the rest of what
+ * esp_timer needs before its interrupt and task (esp_timer_init()).
  */
-static systimer_hal_context_t uptime_timer;
-
 void board_uptime_init(void)
 {
-    static systimer_hal_tick_rate_ops_t ops = {
-        .ticks_to_us = systimer_ticks_to_us,
-        .us_to_ticks = systimer_us_to_ticks,
-    };
-
-    systimer_hal_init(&uptime_timer);
-    systimer_hal_set_tick_rate_ops(&uptime_timer, &ops);
-    systimer_hal_enable_counter(&uptime_timer, SYSTIMER_COUNTER_ESPTIMER);
+    (void) esp_timer_early_init();
 }
 
 /* The HAL's read repeats itself when an interrupt handler read in between. */
 uint64_t board_uptime_us(void)
 {
-    return systimer_hal_get_time(&uptime_timer, SYSTIMER_COUNTER_ESPTIMER);
+    return (uint64_t) esp_timer_get_time();
 }
 
 void board_delay_us(uint32_t us)
@@ -755,7 +746,6 @@ void console_rx_notify(void (*callback)(void))
     usb_serial_jtag_ll_clr_intsts_mask(0xFFFFFFFFu);
 
     esp_rom_route_intr_matrix(0, ETS_USB_SERIAL_JTAG_INTR_SOURCE, CONSOLE_RX_CPU_INTR);
-    xt_set_interrupt_handler(CONSOLE_RX_CPU_INTR, console_rx_isr, NULL);
     usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
     xt_ints_on(1u << CONSOLE_RX_CPU_INTR);
 
@@ -768,11 +758,16 @@ void console_rx_notify(void (*callback)(void))
  * UART's handler is installed here rather than in console_rx_notify() so that
  * transmission is interrupt-driven from the first thread on, shell or not;
  * the UART raises nothing before a queued write or console_rx_notify()
- * enables it.
+ * enables it.  The USB handler is installed here too, although its source is
+ * routed and enabled only by console_rx_notify(): an installed handler is
+ * what tells ESP-IDF's interrupt allocator (esp_intr_alloc(), which esp_timer
+ * uses) that both CPU interrupts are taken.
  */
 void console_init(void)
 {
     uart_init();
+
+    xt_set_interrupt_handler(CONSOLE_RX_CPU_INTR, console_rx_isr, NULL);
 
     esp_rom_route_intr_matrix(0, ETS_UART0_INTR_SOURCE, CONSOLE_UART_CPU_INTR);
     xt_set_interrupt_handler(CONSOLE_UART_CPU_INTR, console_uart_isr, NULL);
