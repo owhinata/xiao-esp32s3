@@ -6,9 +6,8 @@ XIAO ESP32S3, built on
 part of ESP-IDF, without ESP-IDF, FreeRTOS or the second-stage bootloader).
 
 Status: **runs on a XIAO ESP32S3** (ESP32-S3R8, chip revision v0.2), executing
-from flash at 240 MHz.  Both demo threads run; one tick is exactly 2400000 CPU
-cycles and the CPU clock measures 240 MHz within 60 ppm of a host clock; no
-watchdog reset.  See [Bring-up checklist](#bring-up-checklist).
+from flash at 240 MHz, with an interactive shell on the USB console.  See
+[Bring-up checklist](#bring-up-checklist) for what has been observed.
 
 | | |
 |---|---|
@@ -17,8 +16,10 @@ watchdog reset.  See [Bring-up checklist](#bring-up-checklist).
 | Xtensa layer | esp-hal-components `components/xtensa` (vectors, interrupt dispatch, context switch primitives) |
 | HAL | esp-hal-components `sync-3-master` (ESP-IDF master as of 2024-12) |
 | Toolchain | `xtensa-esp-elf` 14.2.0_20241119, fetched on first configure |
-| Console | USB Serial/JTAG on the USB-C connector, polled |
-| Tick | 100 Hz from CCOMPARE0 (CPU interrupt 6, level 1) |
+| Console | USB Serial/JTAG on the USB-C connector; polled transmit, interrupt-driven receive |
+| Shell | The shell of [rp2040-connect](https://github.com/owhinata/rp2040-connect), copied into `shell/common/` |
+| Tick | 1000 Hz from CCOMPARE0 (CPU interrupt 6, level 1) |
+| Uptime clock | SYSTIMER counter 0 (16 MHz, from the crystal) |
 | LED | GPIO21, active low |
 | CPU clock | 240 MHz from the PLL (`BOARD_CPU_FREQ_MHZ`) |
 | Image | Booted directly by the ROM; code and constants execute from flash |
@@ -54,20 +55,40 @@ away: hold **B** (BOOT), tap **R** (RESET), release **B**.
 Pass `-DESPPORT=/dev/ttyACMn` at configure time if more than one serial device
 is attached.
 
-Expected on the console (any terminal on the board's `/dev/ttyACM*`):
+On the console (any terminal on the board's `/dev/ttyACM*`):
 
 ```
-XIAO ESP32S3: ThreadX 6.5.2, CPU clock 240000000 Hz, 100 ticks/s
-hello 0  tick=0  ccount=...
-hello 1  tick=100  ccount=...
+XIAO ESP32S3: ThreadX 6.5.2, CPU clock 240000000 Hz, 1000 ticks/s
+
+xiao:~$ help
+Available commands:
+  bootsel  : Restart into the USB bootloader (BOOTSEL)
+  devmem   : Read or write memory: devmem <address> [<width> [<value>]]
+  dmesg    : Show logs stored in RAM
+  free     : Show the use of malloc()
+  help     : Prints the help message.
+  id       : Show the board's unique ID (of the flash)
+  ps       : List the tasks
+  reboot   : Restart the board
+  sleep    : Sleep for <ms> milliseconds (Zephyr's kernel sleep)
+  uptime   : Show the time since the start (TIMER) and the ticks
+  version  : Show the versions of the kernel, HAL and compiler
 ```
 
-and the orange LED toggling every 0.5 s.  `ccount` is the CPU cycle counter;
-it advances by 100 ticks x 2400000 cycles per line.  The clock figure is read
-back from the clock registers.
+The orange LED toggles every 0.5 s.  The banner is printed at boot; a terminal
+opened later gets a prompt on Enter.
 
-The banner and `hello 0` are printed before a terminal can attach after
-`flash`; to see them, keep the terminal open and reset the board.
+Three of the command texts come unchanged from rp2040-connect and describe an
+RP2040.  On this board `bootsel` restarts into the ROM download mode (where
+esptool can connect; a reset from esptool or the RESET button returns to the
+firmware), `id` prints the factory MAC address from eFuse, and the clock
+`uptime` calls TIMER is SYSTIMER.
+
+`dmesg` shows a log kept in RAM that survives a reset, so it also holds the
+lines of earlier boots.  rp2040-connect's `date` and `fault` are not built:
+nothing here sets a wall clock, and the fault record is laid out for a
+Cortex-M.  `ps` has no CPU column, because this port does not account run time
+per thread.
 
 ## How it boots
 
@@ -111,9 +132,11 @@ What is still missing compared with an ESP-IDF start-up:
 ## Layout
 
 ```
-cmake/          toolchain file (downloads the compiler)
+cmake/          toolchain file (downloads the compiler), upstream fetch
 ldscript/       linker script
 script/         build helpers
+shell/common/   shell engine and commands, copied from rp2040-connect
+shell/port/     this board's part of the shell
 lib/            upstream sources, fetched by CMake; read-only, not tracked
 port/           board and start-up code
 port/threadx/   ThreadX architecture port
@@ -136,10 +159,11 @@ as it is, and to write only what connects it to ThreadX and to this board.
 | `esp_system/port/arch/xtensa/panic_handler_asm.S` | `_xt_panic` |
 | `hal/wdt_hal_iram.c` | Watchdog control |
 | `hal/cache_hal.c`, `hal/mmu_hal.c` | Cache and MMU for the flash mapping |
+| `hal/systimer_hal.c`, `esp_hw_support/port/esp32s3/systimer.c` | Microsecond uptime clock |
 | `esp_hw_support/port/esp32s3/rtc_clk.c`, `rtc_clk_init.c`, `esp_hw_support/regi2c_ctrl.c` | PLL and CPU clock |
 | `esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c` | Work-arounds for ROM cache bugs |
 | `esp_rom/patches/esp_rom_sys.c` + ROM | `esp_rom_printf`, console channel, ticks-per-us |
-| `hal/esp32s3/include/hal/*_ll.h` | GPIO, USB Serial/JTAG |
+| `hal/esp32s3/include/hal/*_ll.h` | GPIO, USB Serial/JTAG, eFuse |
 | `soc/`, `esp_rom/` linker scripts | Peripheral and ROM symbol addresses |
 
 Espressif's Xtensa layer is the RTOS-neutral half of what ESP-IDF's FreeRTOS
@@ -164,9 +188,21 @@ files were copied to `port/threadx/` and adapted to Espressif's layer.  The
 | `src/tx_clib_newlib.c` | new | Replaces upstream `tx_clib_lock.c`, which does not build against Espressif's newlib.  Per-thread `_reent`, `__retarget_lock_*` on `TX_MUTEX`, `_sbrk_r`. |
 | `src/tx_port_asm.S` | new | Coprocessor save-area lookup (taken from upstream `xtensa_coproc_handler.S`), exception hook, interrupt stack |
 | `src/tx_port_offset_check.c` | new | Build-time check of the TCB offsets the assembly uses.  The upstream Xtensa port has no such check; the name follows the one upstream's Cortex-R ports use. |
-| `inc/tx_user.h` | new | Kernel options |
+| `inc/tx_user.h` | new | Kernel options: 1 kHz tick, timers processed in the tick interrupt, and the per-thread pointer the shell's kernel layer needs |
 | `inc/xtensa_rtos.h` | new | Maps the layer's RTOS callouts to ThreadX (upstream has a file of the same name for its own copy of the layer) |
 | `inc/freertos/xtensa_rtos.h` | new | Include-path shim for `panic_handler_asm.S` |
+
+**rp2040-connect**
+
+`shell/common/` holds the 60 files of rp2040-connect's `common/` directory
+(commit `72f3485`) that this firmware uses, at the same relative paths: the
+shell engine, the generic commands, and the Zephyr-compatibility kernel layer
+they are written against.  All but one are byte-identical copies;
+`shell/ORIGIN.md` lists them, the one change, and their licences (MIT,
+Apache-2.0 for the parts derived from Zephyr, BSD-3-Clause for getopt and
+fnmatch).  `shell/port/` is this board's side of that code: the console
+transport, the kernel port header, the log back end, and the commands only the
+board can answer (`version`, `free`, `ps`).
 
 **This project** (`port/`)
 
@@ -175,31 +211,33 @@ files were copied to `port/threadx/` and adapted to Espressif's layer.  The
 | `startup.c` | Reset entry, clocks |
 | `flash_map.c` | Maps the flash part of the image (follows ESP-IDF's `bootloader_support`, which is not in esp-hal-components) |
 | `esp_compat/` | What esp-hal-components sources expect from the rest of ESP-IDF: a `freertos/FreeRTOS.h` that provides critical sections only, and documented stubs |
-| `board.c` | LED, clock readback, console |
-| `syscalls.c` | newlib fd 0-2 on the console |
+| `board.c` | LED, clock readback, uptime, console (with its receive interrupt), device ID, restart |
+| `syscalls.c` | newlib fd 0-2 on the console; once the shell runs, stdout and stderr go through the shell's console layer |
 | `panic.c` | `panicHandler` / `xt_unhandled_exception`: register dump |
 | `include/sdkconfig.h` | The few `CONFIG_` symbols the HAL headers need |
 
 The C library is usable from threads and from `tx_application_define()`, not
-from interrupt handlers.  The same goes for the FPU and the vector extension:
+from interrupt handlers (output written from one bypasses the shell's console
+layer and goes to the port directly).  The same goes for the FPU and the vector extension:
 using a coprocessor in an interrupt handler ends in a panic.
 
 ## Bring-up checklist
 
-Items 1 to 3 have been observed on the board with the current image.  The LED
-(item 4) and a power cycle (item 5) were observed with the earlier RAM-only
-image and have not been looked at again since.  In the order a failure would
-show up:
+Everything below has been observed on the board with the current image except
+the LED, which was last looked at before the shell was added.  In the order a
+failure would show up:
 
 1. The banner appears after `flash`.  No output at all: the fault is before
-   or in the console, i.e. `_start`, the load addresses, or USB Serial/JTAG.
+   or in the console, i.e. `_start`, the flash mapping, or USB Serial/JTAG.
 2. The banner shows the configured clock (240 MHz).
-3. `hello` lines arrive once per second and `tick` advances by 100 per line.
-   Banner but no `hello`: the first context switch or the tick interrupt.
-   Wrong rate: the clock readback in `board_cpu_freq_hz()`.
-4. The LED blinks at 1 Hz.
-5. The same after a power cycle (the ROM arms its watchdogs on every boot from
-   flash; a reset loop every few seconds points at `watchdogs_disable()`).
+3. The prompt appears and `help` lists the commands.  Banner but no prompt:
+   the first context switch, the tick interrupt, or the receive interrupt.
+4. `uptime` twice: seconds and ticks advance together (1 tick = 1 ms).
+5. `ps` lists `blink`, `console` and `(interrupts)` with their free stack.
+6. `id` prints the MAC address esptool reports.
+7. `devmem 0` ends in a register dump (the fault path), `reboot` comes back
+   to the banner, `bootsel` lets esptool connect.
+8. The LED blinks at 1 Hz.
 
 Every unhandled exception, including kernel and double exceptions, prints a
 register dump through the ROM printf and halts.  The handler is kept in RAM so

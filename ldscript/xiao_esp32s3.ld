@@ -170,6 +170,17 @@ SECTIONS
     } > dram_seg
 
     /*
+     * Not loaded and not cleared by _start: what is here keeps its contents
+     * across a reset that leaves the RAM powered (the RAM log).
+     */
+    .dram0.noinit (NOLOAD) :
+    {
+        . = ALIGN(8);
+        *(.noinit .noinit.*)
+        . = ALIGN(8);
+    } > dram_seg
+
+    /*
      * _end   : first free byte.  ThreadX hands it to tx_application_define().
      * __stack: end of usable data RAM.  The ThreadX port puts the C library
      *          heap in the upper half of [_end, __stack) by default.

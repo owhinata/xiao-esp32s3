@@ -31,8 +31,13 @@ set(TX_PORT  "${TX_DIR}/ports/xtensa/xcc")
 set(PORT_DIR "${CMAKE_CURRENT_LIST_DIR}/port")
 
 # -mlongcalls: code and ROM are further apart than a direct call reaches.
+# -fstrict-volatile-bitfields: peripheral registers only answer 32-bit
+#   accesses.  The HAL describes them as volatile bit-field structs, and
+#   without this option GCC reads a 16-bit field with a 16-bit load, which
+#   returns 0 (seen with the eFuse MAC).  ESP-IDF builds everything with it.
 add_compile_options(
     -mlongcalls
+    -fstrict-volatile-bitfields
     -ffunction-sections -fdata-sections
     -fno-common
     -Wall)
@@ -71,6 +76,9 @@ target_link_options(esp_hal INTERFACE
     "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.api.ld"
     # memcpy/memset/str* and the libgcc helpers in ROM: always reachable, even
     # before the flash is mapped, and they cost no flash or RAM.
+    # The libc list also names three things that belong to the ROM's own C
+    # library state (sbrk, syscall_table_ptr, _global_impure_ptr), which this
+    # firmware does not initialize: nothing may use them.
     "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.libc.ld"
     "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.libgcc.ld")
 
@@ -147,7 +155,10 @@ add_executable(app
     "${ESP_HAL}/esp_hw_support/regi2c_ctrl.c"
     "${ESP_HAL}/esp_rom/patches/esp_rom_sys.c"
     # Work-arounds for bugs in the ROM's cache suspend/write-back routines.
-    "${ESP_HAL}/esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c")
+    "${ESP_HAL}/esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c"
+    # SYSTIMER: the uptime clock (port/board.c).
+    "${ESP_HAL}/hal/systimer_hal.c"
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/systimer.c")
 # These use FreeRTOS only for critical sections; give them the stand-in header.
 # It is kept off the global include path on purpose: the Xtensa layer switches
 # to its FreeRTOS code paths as soon as it can see a "freertos/FreeRTOS.h".
@@ -162,12 +173,73 @@ set_target_properties(app PROPERTIES
 target_include_directories(app PRIVATE "${PORT_DIR}")
 # xtensa_rtos is an object library: the vectors are reached only through the
 # linker script and VECBASE, so nothing would pull them out of an archive.
-target_link_libraries(app PRIVATE threadx xtensa_rtos esp_hal)
+target_link_libraries(app PRIVATE shell threadx xtensa_rtos esp_hal)
 target_link_options(app PRIVATE
     -nostartfiles
     "-T${LDSCRIPT}"
     -Wl,--gc-sections
     "-Wl,-Map=$<TARGET_FILE_DIR:app>/xiao_esp32s3_threadx.map")
+
+# ---------------------------------------------------------------------------
+# Shell
+# ---------------------------------------------------------------------------
+# shell/common is a copy of the part of rp2040-connect's common/ that the
+# shell needs, at the same relative paths (shell/ORIGIN.md lists the files and
+# says which differ from the original).  shell/port is what that code expects
+# a board to write.
+#
+# An object library: the commands are reached only through the table in
+# shell/port/commands.c, and the tick hook only through a weak reference.
+set(SHELL_COMMON "${CMAKE_CURRENT_LIST_DIR}/shell/common")
+set(SHELL_PORT   "${CMAKE_CURRENT_LIST_DIR}/shell/port")
+
+add_library(shell OBJECT
+    # The Zephyr-compatibility kernel layer on ThreadX
+    "${SHELL_COMMON}/compat/kernel_generic/zephyr_kernel.c"
+    "${SHELL_COMMON}/compat/kernel_generic/zephyr_mutex.c"
+    "${SHELL_COMMON}/compat/port/threadx/zephyr_kernel_os.c"
+    # RAM log
+    "${SHELL_COMMON}/compat/log/log_ram.c"
+    "${SHELL_COMMON}/compat/log/log_ring.c"
+    # Shell engine
+    "${SHELL_COMMON}/compat/shell_engine/cli.c"
+    "${SHELL_COMMON}/compat/shell_engine/getopt_state.c"
+    "${SHELL_COMMON}/compat/shell_engine/shell_argv.c"
+    "${SHELL_COMMON}/compat/shell_engine/shell_console.c"
+    "${SHELL_COMMON}/compat/shell_engine/shell_engine.c"
+    "${SHELL_COMMON}/compat/shell_engine/shell_serial.c"
+    "${SHELL_COMMON}/shell/zshell.c"
+    "${SHELL_COMMON}/shell/subcmd.c"
+    "${SHELL_COMMON}/compat/subsys/portability/posix/c_lib_ext/fnmatch.c"
+    "${SHELL_COMMON}/compat/lib/utils/getopt/getopt.c"
+    "${SHELL_COMMON}/compat/lib/utils/getopt/getopt_long.c"
+    # Commands
+    "${SHELL_COMMON}/shell/kernel_shell.c"
+    "${SHELL_COMMON}/shell/dmesg_shell.c"
+    # This board's part
+    "${SHELL_PORT}/commands.c"
+    "${SHELL_PORT}/shell_port.c")
+# The order is rp2040-connect's (common/compat/port/pico_sdk/compat.cmake):
+# the board's and the OS's parts first, then the parts for an OS without its
+# own model, then the layer's and the shell's headers.
+target_include_directories(shell PUBLIC
+    "${SHELL_PORT}"
+    "${SHELL_COMMON}/compat/port/threadx"
+    "${SHELL_COMMON}/compat/port/generic"
+    "${SHELL_COMMON}/compat/include"
+    "${SHELL_COMMON}/compat/port"
+    "${SHELL_COMMON}/compat/internal"
+    "${SHELL_COMMON}/shell/include"
+    "${SHELL_COMMON}/shell/port"
+    "${SHELL_COMMON}/shell/port/generic"
+    "${SHELL_COMMON}/compat/lib/utils/getopt"
+    "${PORT_DIR}")                              # board.h
+# Z_SHELL_CMD_ROOT_GLOBAL: SHELL_CMD_REGISTER() makes a global root entry for
+# the table.  CONFIG_GETOPT_LONG changes a structure every command sees.
+target_compile_definitions(shell PUBLIC
+    Z_SHELL_CMD_ROOT_GLOBAL
+    CONFIG_GETOPT_LONG=1)
+target_link_libraries(shell PUBLIC threadx)
 
 # ---------------------------------------------------------------------------
 # Image and download targets (esptool from ./.venv, see README)

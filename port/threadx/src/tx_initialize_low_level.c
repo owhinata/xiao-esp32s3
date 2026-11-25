@@ -32,6 +32,7 @@ void _xt_tick_divisor_init(void)
 
 VOID _tx_initialize_low_level(VOID)
 {
+    extern char _xt_interrupt_stack;
     extern char _xt_interrupt_stack_top;
     extern char _end;
     extern char __stack;
@@ -46,6 +47,12 @@ VOID _tx_initialize_low_level(VOID)
     TX_DISABLE
     (void) interrupt_save;
 
+    /*
+     * Nothing runs on the system stack yet (this is still the ROM's stack).
+     * Fill it the way ThreadX fills thread stacks (the bytes of
+     * TX_STACK_FILL), so that its high-water mark can be read the same way.
+     */
+    memset(&_xt_interrupt_stack, 0xEF, (size_t) (&_xt_interrupt_stack_top - &_xt_interrupt_stack));
     _tx_thread_system_stack_ptr = &_xt_interrupt_stack_top;
 
     /* First free RAM address, handed to tx_application_define(). */

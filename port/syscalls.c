@@ -8,9 +8,25 @@
 #include <unistd.h>
 
 #include "tx_api.h"
+#include "tx_initialize.h"
 #include "tx_thread.h"
 
 #include "board.h"
+
+static void (*stdout_sink)(const char *buf, size_t len);
+
+void console_stdout_redirect(void (*sink)(const char *buf, size_t len))
+{
+    stdout_sink = sink;
+}
+
+/* An interrupt handler is running (nesting count; larger values: start-up). */
+static int in_interrupt(void)
+{
+    ULONG state = TX_THREAD_GET_SYSTEM_STATE();
+
+    return state != 0u && state < TX_INITIALIZE_IN_PROGRESS;
+}
 
 _ssize_t _write_r(struct _reent *r, int fd, const void *buf, size_t len)
 {
@@ -21,6 +37,15 @@ _ssize_t _write_r(struct _reent *r, int fd, const void *buf, size_t len)
     if (fd != STDOUT_FILENO && fd != STDERR_FILENO) {
         r->_errno = EBADF;
         return -1;
+    }
+
+    /*
+     * The sink serializes writers with a mutex, so it cannot serve an
+     * interrupt handler; what is printed there goes out directly.
+     */
+    if (stdout_sink != NULL && !in_interrupt()) {
+        stdout_sink(p, len);
+        return (_ssize_t) len;
     }
 
     /* Terminals expect CR LF. */
