@@ -15,8 +15,9 @@
  *   scan          the driver's scan of all channels; the request's
  *                 parameters are the command's, all zero (anything else is
  *                 refused, as rp2040-connect's binding does)
- *   connect       open (-k 0) or WPA2-PSK and better (-k 1) with the
- *                 passphrase (net_wifi_connect())
+ *   connect       net_wifi_connect() with the security of the request
+ *                 (auth_of(): what the driver can require of an access
+ *                 point; the rest is refused, -ENOTSUP)
  *   disconnect    net_wifi_disconnect(); -EALREADY when there is nothing
  *                 to end ("Already disconnected")
  *   iface_status  the state, and the access point once associated
@@ -33,8 +34,16 @@
  * before (this file's own event callback says so), however long the
  * output of the one before takes.  A scan's records are taken from the
  * driver in that thread too, one by one.
+ *
+ * The automatic connection is the copy of rp2040-connect's Wi-Fi profile
+ * (shell/common/imu/wifi_profile.c, its thread wifi_reconnect_tid), on the
+ * stored networks of the copy of Zephyr's Wi-Fi credentials
+ * (wifi_credentials.c, "wifi cred"): it registers its hooks as with the
+ * NINA driver (nina_wifi_set_reconnect_ops(), shell/port/nina_wifi.h), and
+ * this file hands them to the driver (struct net_wifi_reconnect_ops).
  */
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -44,12 +53,16 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/wifi_credentials.h>
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/spinlock.h>
 #include <zephyr/sys/util.h>
 
 #include "priorities.h"
 #include "net/wifi.h"
+#include "nina_wifi.h"
+#include "wifi_profile.h"
+#include "zephyr_compat.h"
 #include "zephyr_net_socket.h"
 #include "zephyr_net_wifi.h"
 
@@ -312,6 +325,47 @@ static const struct net_wifi_ops driver_ops = {
 	.disconnected = disconnected,
 };
 
+/* The automatic connection's hooks ---------------------------------------- */
+
+/* The Wi-Fi profile's, registered at any time from a thread: read atomically. */
+static _Atomic(const struct nina_wifi_reconnect_ops *) profile_ops;
+
+void nina_wifi_set_reconnect_ops(const struct nina_wifi_reconnect_ops *hooks)
+{
+	atomic_store(&profile_ops, hooks);
+}
+
+static bool reconnect_allowed(void)
+{
+	const struct nina_wifi_reconnect_ops *hooks = atomic_load(&profile_ops);
+
+	return !hooks || !hooks->connection_allowed || hooks->connection_allowed();
+}
+
+static void reconnect_pause(void)
+{
+	const struct nina_wifi_reconnect_ops *hooks = atomic_load(&profile_ops);
+
+	if (hooks && hooks->pause) {
+		hooks->pause();
+	}
+}
+
+static void reconnect_request(void)
+{
+	const struct nina_wifi_reconnect_ops *hooks = atomic_load(&profile_ops);
+
+	if (hooks && hooks->request) {
+		hooks->request();
+	}
+}
+
+static const struct net_wifi_reconnect_ops reconnect_ops = {
+	.connection_allowed = reconnect_allowed,
+	.pause = reconnect_pause,
+	.request = reconnect_request,
+};
+
 /* In the event loop's task. */
 static void scan_done(int status, unsigned int count, void *arg)
 {
@@ -353,10 +407,90 @@ static int wifi_scan(const struct device *dev, struct net_if *iface,
 	return net_wifi_scan(scan_done, NULL);
 }
 
+/*
+ * The security of a request as the driver's threshold (enum
+ * net_wifi_auth), so that no access point with a weaker one is joined:
+ *   NONE (0)                    any
+ *   PSK (1, WPA2-PSK)           WPA2-PSK or better
+ *   WPA_PSK (9)                 WPA-PSK or better
+ *   WPA_AUTO_PERSONAL (10)      WPA-PSK or better
+ *   SAE_HNP, _H2E, _AUTO (3-5)  WPA3-SAE, with that password element method
+ *   OWE (23)                    OWE or better
+ * -ENOTSUP for the rest: the driver cannot require the key management of
+ * PSK-SHA256, PSK-SHA384, FT and SAE-EXT-KEY (it would join with plain
+ * PSK or SAE), and this build has no WEP key handling, WAPI, enterprise
+ * (EAP) or DPP.
+ */
+static int auth_of(enum wifi_security_type security, struct net_wifi_connect_params *p)
+{
+	p->sae_pwe = NET_WIFI_SAE_PWE_BOTH;
+	switch (security) {
+	case WIFI_SECURITY_TYPE_NONE:
+		p->auth = NET_WIFI_AUTH_OPEN;
+		return 0;
+	case WIFI_SECURITY_TYPE_PSK:
+		p->auth = NET_WIFI_AUTH_WPA2_PSK;
+		return 0;
+	case WIFI_SECURITY_TYPE_WPA_PSK:
+	case WIFI_SECURITY_TYPE_WPA_AUTO_PERSONAL:
+		p->auth = NET_WIFI_AUTH_WPA_PSK;
+		return 0;
+	case WIFI_SECURITY_TYPE_SAE_HNP:
+		p->auth = NET_WIFI_AUTH_WPA3_SAE;
+		p->sae_pwe = NET_WIFI_SAE_PWE_HUNT_AND_PECK;
+		return 0;
+	case WIFI_SECURITY_TYPE_SAE_H2E:
+		p->auth = NET_WIFI_AUTH_WPA3_SAE;
+		p->sae_pwe = NET_WIFI_SAE_PWE_HASH_TO_ELEMENT;
+		return 0;
+	case WIFI_SECURITY_TYPE_SAE_AUTO:
+		p->auth = NET_WIFI_AUTH_WPA3_SAE;
+		return 0;
+	case WIFI_SECURITY_TYPE_OWE:
+		p->auth = NET_WIFI_AUTH_OWE;
+		return 0;
+	default:
+		return -ENOTSUP;
+	}
+}
+
+/*
+ * The last request refused for what this board does not do, so that the
+ * automatic connection's retries (every 32 s) log it once.
+ */
+static struct k_spinlock refused_lock;
+static enum wifi_security_type refused_security;
+static uint8_t refused_band;
+static uint8_t refused_ssid[WIFI_SSID_MAX_LEN];
+static uint8_t refused_ssid_len;
+
+/* Logs the refusal unless it is the one before. */
+static void refused(const struct wifi_connect_req_params *params, const char *what)
+{
+	k_spinlock_key_t key = k_spin_lock(&refused_lock);
+	bool same = refused_ssid_len == params->ssid_length &&
+		    refused_security == params->security && refused_band == params->band &&
+		    memcmp(refused_ssid, params->ssid, params->ssid_length) == 0;
+
+	if (!same) {
+		refused_security = params->security;
+		refused_band = params->band;
+		refused_ssid_len = params->ssid_length;
+		memcpy(refused_ssid, params->ssid, params->ssid_length);
+	}
+	k_spin_unlock(&refused_lock, key);
+	if (!same) {
+		LOG_WRN("\"%.*s\" not joined: %s not supported", (int)params->ssid_length,
+			(const char *)params->ssid, what);
+	}
+}
+
 static int wifi_connect(const struct device *dev, struct net_if *iface,
 			struct wifi_connect_req_params *params)
 {
-	struct net_wifi_connect_params p;
+	struct net_wifi_connect_params p = {0};
+	bool keyed;
+	int ret;
 
 	ARG_UNUSED(dev);
 	ARG_UNUSED(iface);
@@ -364,21 +498,38 @@ static int wifi_connect(const struct device *dev, struct net_if *iface,
 	if (!params) {
 		return -EINVAL;
 	}
-	/* The types the copied "wifi connect" accepts (-k 0 and 1), as the NINA's binding. */
-	if (params->security != WIFI_SECURITY_TYPE_NONE &&
-	    params->security != WIFI_SECURITY_TYPE_PSK) {
-		return -ENOTSUP;
-	}
 	if (params->psk_is_pbkdf2) {
 		return -EINVAL;
 	}
-	p = (struct net_wifi_connect_params){
-		.ssid = params->ssid,
-		.ssid_len = params->ssid_length,
-		.passphrase = params->security == WIFI_SECURITY_TYPE_PSK ? params->psk : NULL,
-		.passphrase_len = params->security == WIFI_SECURITY_TYPE_PSK ? params->psk_length : 0,
-	};
-	return net_wifi_connect(&p);
+	if (auth_of(params->security, &p) != 0) {
+		refused(params, wifi_security_txt(params->security));
+		return -ENOTSUP;
+	}
+	/* The radio has the 2.4 GHz band only. */
+	if (params->band != WIFI_FREQ_BAND_UNKNOWN && params->band != WIFI_FREQ_BAND_2_4_GHZ) {
+		refused(params, wifi_band_txt(params->band));
+		return -ENOTSUP;
+	}
+	keyed = p.auth == NET_WIFI_AUTH_WPA_PSK || p.auth == NET_WIFI_AUTH_WPA2_PSK ||
+		p.auth == NET_WIFI_AUTH_WPA3_SAE;
+	p.ssid = params->ssid;
+	p.ssid_len = params->ssid_length;
+	if (keyed && p.auth == NET_WIFI_AUTH_WPA3_SAE && params->sae_password_length) {
+		p.passphrase = params->sae_password;
+		p.passphrase_len = params->sae_password_length;
+	} else if (keyed) {
+		p.passphrase = params->psk;
+		p.passphrase_len = params->psk_length;
+	}
+	p.pmf_required = params->mfp == WIFI_MFP_REQUIRED;
+	ret = net_wifi_connect(&p);
+	if (ret == 0) {
+		k_spinlock_key_t key = k_spin_lock(&refused_lock);
+
+		refused_ssid_len = 0;
+		k_spin_unlock(&refused_lock, key);
+	}
+	return ret;
 }
 
 static int wifi_disconnect(const struct device *dev, struct net_if *iface)
@@ -516,6 +667,7 @@ int zephyr_net_initialize(void)
 
 	iface_api->wifi_iface.iface_api.init(&wifi_iface);
 	net_wifi_set_ops(&driver_ops);
+	net_wifi_set_reconnect_ops(&reconnect_ops);
 
 	ret = z_thread_static_start(&thread);
 	if (ret < 0) {
@@ -524,4 +676,21 @@ int zephyr_net_initialize(void)
 
 	/* SYS_INIT(APPLICATION) of the "wifi" command. */
 	return wifi_shell_init();
+}
+
+void zephyr_net_wifi_credentials_init(void)
+{
+	(void)wifi_credentials_init();
+}
+
+int zephyr_net_wifi_profile_start(void)
+{
+	int ret = K_THREAD_DEFINE_START(wifi_reconnect_tid);
+
+	if (ret < 0) {
+		LOG_ERR("Could not start %s: %d", "wifi_reconnect_tid", ret);
+		return ret;
+	}
+	(void)wifi_profile_init();
+	return 0;
 }

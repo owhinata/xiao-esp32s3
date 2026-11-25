@@ -1005,6 +1005,17 @@ set(SHELL_KV_ZEPHYR_COPIES
     "${SHELL_COMMON}/compat/subsys/settings/src/settings_nvs.c"
     "${SHELL_COMMON}/compat/subsys/crc/crc8_sw.c")
 set(SHELL_KV_NVS "${SHELL_COMMON}/compat/subsys/kvss/nvs/nvs.c")
+# The stored Wi-Fi networks and the automatic connection, as
+# rp2040-connect's builds on the Pico SDK have them
+# (common/compat/port/pico_sdk/wifi.cmake): the copies of Zephyr's Wi-Fi
+# credentials with their settings backend (the entries "wifi_cred/<n>"),
+# and the Wi-Fi profile (its thread wifi_reconnect_tid).
+set(SHELL_WIFI_CRED "${SHELL_COMMON}/compat/wifi_credentials.c")
+set(SHELL_WIFI_CRED_BACKEND "${SHELL_COMMON}/compat/wifi_credentials_backend_settings.c")
+set(SHELL_WIFI_PROFILE "${SHELL_COMMON}/imu/wifi_profile.c")
+# Copy of Zephyr's file (v4.5.0, unchanged in rp2040-connect): "wifi cred".
+set(SHELL_WIFI_CRED_SHELL
+    "${SHELL_COMMON}/compat/subsys/net/lib/wifi_credentials/wifi_credentials_shell.c")
 
 add_library(shell OBJECT
     # The Zephyr-compatibility kernel layer on ThreadX
@@ -1037,6 +1048,10 @@ add_library(shell OBJECT
     "${SHELL_COMMON}/compat/zephyr_wifi_shell.c"
     "${SHELL_COMMON}/compat/zephyr_wifi_utils.c"
     "${SHELL_COMMON}/shell/ifconfig_shell.c"
+    "${SHELL_WIFI_CRED}"
+    "${SHELL_WIFI_CRED_BACKEND}"
+    "${SHELL_WIFI_PROFILE}"
+    "${SHELL_WIFI_CRED_SHELL}"
     # Zephyr's socket layer down to its list of socket implementations, and
     # the network functions newlib lacks (inet_pton(), inet_ntop())
     "${SHELL_COMMON}/compat/net_offload/lib/os/zvfs/zvfs_fdtable.c"
@@ -1095,9 +1110,15 @@ target_include_directories(shell
     "${SHELL_COMMON}/compat/subsys/settings/src")
 # Z_SHELL_CMD_ROOT_GLOBAL: SHELL_CMD_REGISTER() makes a global root entry for
 # the table.  CONFIG_GETOPT_LONG changes a structure every command sees.
+# CONFIG_WIFI_CREDENTIALS for every source of the shell, as wifi.cmake sets
+# it: the stored networks in <zephyr/net/wifi_mgmt.h>, zephyr_wifi_mgmt.c
+# (NET_REQUEST_WIFI_CONNECT_STORED) and the "wifi" command ("wifi cred").
+# sdkconfig.h has no such name.
 target_compile_definitions(shell PUBLIC
     Z_SHELL_CMD_ROOT_GLOBAL
     CONFIG_GETOPT_LONG=1)
+target_compile_definitions(shell PRIVATE
+    CONFIG_WIFI_CREDENTIALS=1)
 target_link_libraries(shell PUBLIC threadx)
 # The prelude of the shared sources (the Zephyr build's Kconfig values they
 # use, compat/port/generic/common_prelude.h) on the sources that
@@ -1120,8 +1141,16 @@ set_source_files_properties(
     "${SHELL_COMMON}/compat/zephyr_wifi_shell.c"
     "${SHELL_COMMON}/compat/zephyr_wifi_utils.c"
     "${SHELL_PORT}/zephyr_net_socket.c"
+    "${SHELL_WIFI_CRED}"
+    "${SHELL_WIFI_CRED_BACKEND}"
+    "${SHELL_WIFI_PROFILE}"
     ${SHELL_KV_SOURCES}
     PROPERTIES COMPILE_OPTIONS "-include;${SHELL_COMMON}/compat/port/generic/common_prelude.h")
+# "wifi cred" as wifi.cmake builds it: with the prelude, and without
+# -Wformat, as it prints a uint32_t (long here) with %d; the values are
+# small, and long and int are both 32 bits and passed alike.
+set_source_files_properties("${SHELL_WIFI_CRED_SHELL}"
+    PROPERTIES COMPILE_OPTIONS "-include;${SHELL_COMMON}/compat/port/generic/common_prelude.h;-Wno-format")
 # The copies of Zephyr's settings and NVS, as kv.cmake builds them: the
 # Zephyr build's Kconfig values first (zephyr_kv_config.h), without -Wundef
 # (they test unset options with #if; -Wundef is not on here either), and for

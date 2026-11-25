@@ -51,6 +51,18 @@
 #define APP_STACK_WIFI_EVENTS   4096
 
 /*
+ * The Wi-Fi profile's reconnection thread "wifi_reconnect_tid"
+ * (shell/common/imu/wifi_profile.c, the shared default 2048 bytes, measured
+ * on a Cortex-M0+): a stored network's connection request runs in it, from
+ * the credentials' settings and NVS down to the flash driver
+ * (net_mgmt(NET_REQUEST_WIFI_CONNECT_STORED), about 1.3 KiB of frames here,
+ * from GCC's call graph), and a log line on that path adds newlib's
+ * vsnprintf() (about 1.1 KiB), which 2048 bytes do not hold.  "ps" shows
+ * what is left.
+ */
+#define APP_STACK_WIFI_RECONNECT 4096
+
+/*
  * The Telnet shell's service thread "telnet_service" (shell/common/compat/
  * shell_engine/shell_telnet.c, the shared default 2048 bytes): its poll
  * goes through the socket layer's zvfs_poll() (an event array of 384

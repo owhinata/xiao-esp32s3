@@ -125,9 +125,11 @@ enum net_wifi_disconn_reason {
  * or with connect_result(status) alone; a connection ends with link_down()
  * (and ip_clear() when the address goes with it) and then disconnected().
  * After a connection is lost without a request the station connects again
- * by itself; the address stays until ip_clear(), at most
- * WLANIF_ADDRESS_HOLD_MS (120 s) after the loss, and a connection that
- * comes back ends with ip_set(), link_up(), connect_result(0) again.
+ * by itself, for at most WLANIF_ADDRESS_HOLD_MS (120 s) from the loss, and
+ * the address stays for that time: a connection that comes back ends with
+ * ip_set(), link_up(), connect_result(0) again; else ip_clear() ends the
+ * hold, the station stops trying and tells the reconnection policy
+ * (struct net_wifi_reconnect_ops, request()).
  * Addresses are 4 bytes in network order.  Called one at a time, from the
  * event loop's task ("sys_evt"), which also runs the requests of
  * net_wifi_connect() and net_wifi_disconnect(): they must not block, and
@@ -145,33 +147,87 @@ struct net_wifi_ops {
 /* Keeps ops (static) for good.  Once, before net_wifi_start(). */
 void net_wifi_set_ops(const struct net_wifi_ops *ops);
 
+/*
+ * The automatic connection's policy, which the interface's owner keeps
+ * (the hooks of rp2040-connect's NINA driver, struct
+ * nina_wifi_reconnect_ops).  The driver itself connects again after a loss
+ * only for as long as the address hold lasts (WLANIF_ADDRESS_HOLD_MS), to
+ * the network it had, so that TCP connections survive; what happens after
+ * that, and at the start, is the owner's.
+ *   connection_allowed()  in net_wifi_connect(), in the caller's thread,
+ *                         under the lock that net_wifi_disconnect() takes
+ *                         too; false refuses the connection (-ECANCELED)
+ *   pause()               in net_wifi_disconnect(), in the caller's
+ *                         thread, under that lock, before anything else
+ *   request()             a connection lost without a request has not come
+ *                         back within the address hold, and the driver has
+ *                         stopped trying (the state is idle); in the event
+ *                         loop's task, so it must not wait for more than a
+ *                         short lock, and must not call net_wifi_connect()
+ * Any of them may be NULL.
+ */
+struct net_wifi_reconnect_ops {
+    bool (*connection_allowed)(void);
+    void (*pause)(void);
+    void (*request)(void);
+};
+
+/* Keeps ops (static) for good.  Once, before net_wifi_start(). */
+void net_wifi_set_reconnect_ops(const struct net_wifi_reconnect_ops *ops);
+
+/*
+ * The weakest security a connection accepts (the driver's threshold): an
+ * access point with a weaker one is not joined.  The order of strength is
+ * ESP-IDF's (wifi_auth_mode_t): open < WPA-PSK < OWE < WPA2-PSK <
+ * WPA2/WPA3 transition = WPA3-SAE.
+ */
+enum net_wifi_auth {
+    NET_WIFI_AUTH_OPEN,         /* any; no passphrase */
+    NET_WIFI_AUTH_WPA_PSK,      /* WPA-PSK or better */
+    NET_WIFI_AUTH_OWE,          /* OWE or better; no passphrase */
+    NET_WIFI_AUTH_WPA2_PSK,     /* WPA2-PSK or better */
+    NET_WIFI_AUTH_WPA3_SAE,     /* WPA3-SAE, also with a WPA2/WPA3 transition access point */
+};
+
+/* How SAE derives its password element (WPA3-SAE). */
+enum net_wifi_sae_pwe {
+    NET_WIFI_SAE_PWE_BOTH,              /* hash-to-element or hunting-and-pecking */
+    NET_WIFI_SAE_PWE_HUNT_AND_PECK,
+    NET_WIFI_SAE_PWE_HASH_TO_ELEMENT,
+};
+
 struct net_wifi_connect_params {
     const uint8_t *ssid;
     uint8_t ssid_len;                   /* 1 .. NET_WIFI_SSID_MAX_LEN */
-    const uint8_t *passphrase;          /* NULL: an open network */
+    enum net_wifi_auth auth;
+    const uint8_t *passphrase;          /* WPA-PSK, WPA2-PSK, WPA3-SAE; else NULL */
     uint8_t passphrase_len;             /* 8 .. 63, or 64 hexadecimal digits */
+    enum net_wifi_sae_pwe sae_pwe;
+    bool pmf_required;                  /* management frame protection required (always with OWE and WPA3-SAE) */
 };
 
 /*
- * Starts a connection: to an open network without a passphrase, else to
- * one with WPA2-PSK or better (WPA2/WPA3 transition, WPA3-SAE with
- * hash-to-element or hunt-and-peck), management frame protection offered.
- * The request runs in the event loop's task, and this waits for it.
- * 0: the attempt runs and ends with connect_result() (at most 30 s, the
- * time rp2040-connect's NINA driver waits); -ENETDOWN: the driver is not
- * running; -EALREADY: connected, or connecting again after a loss
- * (net_wifi_disconnect() first); -EBUSY: a scan or an attempt is in
- * progress; -EINVAL: bad parameters; -EIO: the driver refused; -EDEADLK:
- * called from the event loop's task.  From a thread.
+ * Starts a connection that accepts params->auth or better, management
+ * frame protection offered (required with pmf_required, OWE and WPA3-SAE).
+ * Asks the reconnection policy first (connection_allowed()).  The request
+ * runs in the event loop's task, and this waits for it.  0: the attempt
+ * runs and ends with connect_result() (at most 30 s, the time
+ * rp2040-connect's NINA driver waits); -ENETDOWN: the driver is not
+ * running; -ECANCELED: the policy refused; -EALREADY: connected, or
+ * connecting again after a loss (net_wifi_disconnect() first); -EBUSY: a
+ * scan or an attempt is in progress; -EINVAL: bad parameters (a passphrase
+ * missing, or given where none is used); -EIO: the driver refused;
+ * -EDEADLK: called from the event loop's task.  From a thread.
  */
 int net_wifi_connect(const struct net_wifi_connect_params *params);
 
 /*
- * Ends the connection, the attempt or the reconnection, in the event
- * loop's task: DHCP releases the address, link_down(), ip_clear() if there
- * was an address, disconnected(NET_WIFI_DISCONN_REQUESTED), then the driver
- * disconnects, before this returns.  0, -ENETDOWN, -EALREADY when there is
- * nothing to end, -EDEADLK from the event loop's task.  From a thread.
+ * Tells the reconnection policy (pause()), then ends the connection, the
+ * attempt or the reconnection, in the event loop's task: DHCP releases the
+ * address, link_down(), ip_clear() if there was an address,
+ * disconnected(NET_WIFI_DISCONN_REQUESTED), then the driver disconnects,
+ * before this returns.  0, -ENETDOWN, -EALREADY when there is nothing to
+ * end, -EDEADLK from the event loop's task.  From a thread.
  */
 int net_wifi_disconnect(void);
 

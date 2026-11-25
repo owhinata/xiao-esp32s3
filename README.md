@@ -30,7 +30,7 @@ UART0.
 | CPU clock | 240 MHz from the PLL (`esp_clk_init()`, `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ`) |
 | Heap | ESP-IDF's heap (`heap_caps` on TLSF; `malloc()` is esp_libc's): about 400 KiB of internal RAM and the RTC FAST memory, usable from interrupt handlers |
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
-| Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect` (WPA2-PSK), `wifi status`, `wifi disconnect` |
+| Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect`, `wifi status`, `wifi disconnect`, and `wifi cred` for stored networks with automatic connection |
 | TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23) |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, a 28 KiB `settings` partition at 0x9000, the firmware as the factory application at 0x10000 |
 | Settings | rp2040-connect's key-value store (Zephyr settings on Zephyr NVS) in the `settings` partition, written through ESP-IDF's esp_flash driver; the `kv` command |
@@ -126,26 +126,36 @@ Available commands:
 **Settings.**  `kv set <key> <text>`, `kv sethex <key> <hex>`, `kv get <key>`
 (prints hexadecimal) and `kv delete <key>` keep values in the `settings`
 partition; they survive resets, power cycles and `app-flash`.  The store has
-rp2040-connect's format (Zephyr NVS), not ESP-IDF's NVS.  It does not touch
-an area that holds anything else: on a board whose flash still has other
-data at 0x9000 every `kv` command fails until `kv wipe confirm` erases the
-area, once.  A board flashed with an older partition table needs the `flash`
-target once.
+rp2040-connect's format (Zephyr NVS), not ESP-IDF's NVS.  It only uses the
+`settings` partition, and only when that holds its own data or is erased:
+with anything else in the area, or with a partition table that has no
+`settings`, every `kv` command fails (the reason is in `dmesg`).  `kv wipe
+confirm` erases the area; the `flash` target writes the partition table.
+The stored Wi-Fi networks are in the same store: `kv` does not show them,
+and `kv wipe confirm` erases them too.
 
 While a flash sector is erased (about 40 ms) or a page is written (about
 0.6 ms) the cache is off and interrupts are masked: the LED, the console and
 the network pause for that long.
 
-**Over Wi-Fi.**  `wifi connect -s <ssid> -p <passphrase> -k 1` joins a
-WPA2-PSK access point (the passphrase is not stored yet), `ifconfig` shows
-the address DHCP gave, and `telnet <address>` from a PC on that network opens
-the same shell with the same prompt.  One Telnet client at a time: a second
-one is closed at once, and a client that vanishes without closing is dropped
-after at most 90 s by TCP keepalive.  When the access point goes away the
-address is kept for up to 120 s and the station keeps trying to return, so
-a session gets through a loss of up to a minute.  Telnet has no authentication.  The UART
-and USB console keeps working beside it, and each console gets the output of
-its own commands.
+**Over Wi-Fi.**  `wifi cred add -s <ssid> -p <passphrase> -k 1` stores a
+WPA2-PSK network in the settings partition (`-k 0` none, `-k 3`, `4`, `5`
+WPA3-SAE; `wifi cred list` shows the stored networks with their passphrases,
+`wifi cred delete <ssid>` removes one).  With a network stored the board
+connects by itself about 4 s after it starts and tries again every 32 s
+while that fails.  `wifi connect -s <ssid> -p <passphrase> -k 1` connects
+once without storing anything; `wifi disconnect` also stops the automatic
+connection until `wifi connect` or `wifi cred auto_connect` succeeds.
+`ifconfig` shows the address DHCP gave, and `telnet <address>` from a PC on
+that network opens the same shell with the same prompt.  One Telnet client
+at a time: a second one is closed at once, and a client that vanishes
+without closing is dropped after at most 90 s by TCP keepalive.  When the
+access point goes away the address is kept for up to 120 s while the
+station tries every 3 s to return, so a session gets through a loss of up
+to a minute; after that the address is dropped and the stored networks are
+tried every 32 s.  Telnet has no authentication.  The UART and USB console
+keeps working beside it, and each console gets the output of its own
+commands.
 
 The orange LED toggles every 0.5 s.  The banner is printed at boot; a terminal
 opened later gets a prompt on Enter.  Output goes to both transports and input

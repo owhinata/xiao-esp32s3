@@ -11,9 +11,10 @@
  * esp_timer, its interrupt and the FreeRTOS layer.  The FreeRTOS task
  * "main", like ESP-IDF's main task, finishes the start-up from a thread and
  * then ends: ESP-IDF's last start-up hooks, the persistent store in flash
- * (the shell's "kv"), then the Wi-Fi driver and lwIP (port/net/wifi.c,
- * port/net/wlanif.c), then the shell on Telnet (port 23), on lwIP's
- * sockets.
+ * (the shell's "kv") with the stored Wi-Fi networks ("wifi cred"), then
+ * the Wi-Fi driver and lwIP (port/net/wifi.c, port/net/wlanif.c), then the
+ * shell on Telnet (port 23), on lwIP's sockets, and the automatic
+ * connection to a stored network.
  */
 #include <stdio.h>
 
@@ -94,13 +95,18 @@ static void main_task(void *arg)
     if (ret) {
         LOG_ERR("Could not initialize settings: %d", ret);
     }
+    /* The stored networks of "wifi cred", from the store. */
+    zephyr_net_wifi_credentials_init();
     /*
-     * The Telnet shell's listening socket and threads, once lwIP runs, as
-     * rp2040-connect starts it after its network interface; a failure is
-     * logged and leaves no Telnet.
+     * Once lwIP runs: the Telnet shell's listening socket and threads, as
+     * rp2040-connect starts it after its network interface (a failure is
+     * logged and leaves no Telnet), then the automatic connection to a
+     * stored network (the Wi-Fi profile), as rp2040-connect's application
+     * start does it last.
      */
     if (net_wifi_start() == 0) {
         (void) shell_telnet_init(PROMPT);
+        (void) zephyr_net_wifi_profile_start();
     }
     vTaskDelete(NULL);
 }

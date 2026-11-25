@@ -32,7 +32,9 @@
  */
 
 #define APP_PRIO_WIFI_RECONNECT     APP_PRIO_FROM_ZEPHYR(8)
+#ifndef APP_STACK_WIFI_RECONNECT
 #define APP_STACK_WIFI_RECONNECT    2048
+#endif
 
 /* The NINA core's Wi-Fi thread (common/drivers/nina/include/nina_wifi.h):
  * K_THREAD_DEFINE() of common/drivers/nina/port/zephyr/nina_net.c,

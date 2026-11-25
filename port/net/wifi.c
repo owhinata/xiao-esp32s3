@@ -31,10 +31,12 @@
  *   CONNECTING --address--> CONNECTED, connect_result(0); --driver's
  *     disconnection or 30 s--> IDLE, connect_result(status).
  *   CONNECTED --loss without a request--> RECONNECTING: link down (the
- *     address stays, wlanif.h), disconnected(reason); a new attempt every
- *     RETRY_DELAY_US (retry timer), 30 s for each after its association.
- *   RECONNECTING --address--> CONNECTED, connect_result(0); the address
- *     goes (ip_clear()) when the loss lasts WLANIF_ADDRESS_HOLD_MS.
+ *     address stays, wlanif.h), disconnected(reason); a new attempt to the
+ *     same network every RETRY_DELAY_US (retry timer), 30 s for each after
+ *     its association.
+ *   RECONNECTING --address--> CONNECTED, connect_result(0); --the address
+ *     hold ends (WLANIF_ADDRESS_HOLD_MS after the loss)--> IDLE: ip_clear(),
+ *     then the reconnection policy's request().
  *   any --net_wifi_disconnect()--> IDLE.
  *
  * What belongs to an earlier attempt is told apart: the interface's events
@@ -45,8 +47,13 @@
  * disconnection this file asked for (WIFI_REASON_ASSOC_LEAVE) is taken as
  * that, once, not as the failure of the attempt that may follow it.
  *
- * Reconnecting after a loss is this board's policy, in one place
- * (reconnect_*() below).
+ * The driver connects again by itself only within the address hold, so
+ * that TCP connections survive a short loss (retry_*() below).  When to
+ * connect otherwise (at the start, after the hold, after a disconnection,
+ * and to which network) is the policy of the interface's owner (struct
+ * net_wifi_reconnect_ops: rp2040-connect's Wi-Fi profile), which this file
+ * asks in net_wifi_connect(), tells in net_wifi_disconnect(), and calls
+ * when it stops trying.
  *
  * The driver's failures that it reports come back as esp_err_t and are
  * logged; the board keeps running with the driver stopped where it
@@ -81,7 +88,7 @@ LOG_MODULE_REGISTER(net_wifi);
 /* The time an attempt has, to the address (rp2040-connect's NINA driver: 60 x 500 ms). */
 #define CONNECT_TIMEOUT_US      (30 * 1000000LL)
 
-/* Between the reconnection attempts after a loss. */
+/* Between the attempts after a loss, within the address hold. */
 #define RETRY_DELAY_US          (3 * 1000000LL)
 
 /* A timer's expiry that found the loop's queue full is posted again this much later. */
@@ -135,6 +142,7 @@ static int64_t retry_deadline;
 static esp_timer_handle_t lease_timer;
 static esp_timer_handle_t retry_timer;
 static const struct net_wifi_ops *ops;
+static const struct net_wifi_reconnect_ops *policy;
 
 /*
  * The request in the loop: one at a time (request_lock), its network
@@ -299,6 +307,39 @@ static const char *reason_name(uint8_t reason)
     }
 }
 
+/* The threshold of an attempt (see enum net_wifi_auth), for the log. */
+static const char *threshold_name(wifi_auth_mode_t mode)
+{
+    switch (mode) {
+    case WIFI_AUTH_OPEN: return "any security";
+    case WIFI_AUTH_WPA_PSK: return "WPA-PSK or better";
+    case WIFI_AUTH_OWE: return "OWE or better";
+    case WIFI_AUTH_WPA2_PSK: return "WPA2-PSK or better";
+    case WIFI_AUTH_WPA3_PSK: return "WPA3-SAE";
+    default: return "?";
+    }
+}
+
+static wifi_auth_mode_t threshold_of(enum net_wifi_auth auth)
+{
+    switch (auth) {
+    case NET_WIFI_AUTH_WPA_PSK: return WIFI_AUTH_WPA_PSK;
+    case NET_WIFI_AUTH_OWE: return WIFI_AUTH_OWE;
+    case NET_WIFI_AUTH_WPA2_PSK: return WIFI_AUTH_WPA2_PSK;
+    case NET_WIFI_AUTH_WPA3_SAE: return WIFI_AUTH_WPA3_PSK;
+    default: return WIFI_AUTH_OPEN;
+    }
+}
+
+static wifi_sae_pwe_method_t sae_pwe_of(enum net_wifi_sae_pwe pwe)
+{
+    switch (pwe) {
+    case NET_WIFI_SAE_PWE_HUNT_AND_PECK: return WPA3_SAE_PWE_HUNT_AND_PECK;
+    case NET_WIFI_SAE_PWE_HASH_TO_ELEMENT: return WPA3_SAE_PWE_HASH_TO_ELEMENT;
+    default: return WPA3_SAE_PWE_BOTH;
+    }
+}
+
 /* An attempt's failure, as Zephyr's wifi_conn_status. */
 static int conn_status_of(uint8_t reason)
 {
@@ -409,10 +450,10 @@ static void go_idle(void)
     wlanif_stop();
 }
 
-/* Reconnection after a loss ----------------------------------------------- */
+/* Reconnection within the address hold ------------------------------------ */
 
 /* A loss without a request: the attempts start. */
-static void reconnect_request(void)
+static void retry_start(void)
 {
     retries = 0;
     lost_at = esp_timer_get_time();
@@ -420,16 +461,30 @@ static void reconnect_request(void)
 }
 
 /* An attempt failed: the next one later. */
-static void reconnect_failed(void)
+static void retry_next(void)
 {
     retries++;
     timer_arm(retry_timer, &retry_deadline, RETRY_DELAY_US);
 }
 
-/* net_wifi_disconnect(): no more attempts. */
-static void reconnect_pause(void)
+/* No more attempts. */
+static void retry_stop(void)
 {
     timer_disarm(retry_timer, &retry_deadline);
+}
+
+/*
+ * The address hold is over without a connection: the attempts end, and
+ * one in progress is stopped; the policy decides what comes next.
+ */
+static void retry_give_up(void)
+{
+    retry_stop();
+    go_idle();
+    driver_leave();
+    if (policy != NULL && policy->request != NULL) {
+        policy->request();
+    }
 }
 
 /* The retry timer: the next attempt, unless a scan runs (then later). */
@@ -455,7 +510,7 @@ static void retry_due(void)
     err = esp_wifi_connect();
     if (err != ESP_OK) {
         LOG_DBG("esp_wifi_connect failed: 0x%x", (unsigned int) err);
-        reconnect_failed();
+        retry_next();
     }
 }
 
@@ -484,7 +539,7 @@ static void lease_due(void)
             LOG_DBG("attempt %u failed: no address", retries + 1u);
             wlanif_link_down();
             driver_leave();
-            reconnect_failed();
+            retry_next();
         }
         break;
     default:
@@ -516,6 +571,11 @@ static int connect_request(void)
     session = last_session;
     attempt_start = esp_timer_get_time();
     timer_arm(lease_timer, &lease_deadline, CONNECT_TIMEOUT_US);
+    LOG_INF("connecting to \"%.*s\": %s%s",
+            (int) strnlen((const char *) request_config.sta.ssid, sizeof(request_config.sta.ssid)),
+            (const char *) request_config.sta.ssid,
+            threshold_name(request_config.sta.threshold.authmode),
+            request_config.sta.pmf_cfg.required ? ", management frame protection required" : "");
 
     err = esp_wifi_set_config(WIFI_IF_STA, &request_config);
     if (err == ESP_OK) {
@@ -540,7 +600,7 @@ static int disconnect_request(void)
     if (conn_get() == CONN_IDLE) {
         return -EALREADY;
     }
-    reconnect_pause();
+    retry_stop();
     go_idle();
     ops->link_down();
     address_clear();
@@ -651,7 +711,7 @@ static void sta_disconnected(const wifi_event_sta_disconnected_t *d)
         wlanif_link_down();
         ops->link_down();
         ops->disconnected(disconn_reason_of(d->reason));
-        reconnect_request();
+        retry_start();
         break;
     case CONN_RECONNECTING:
         LOG_DBG("attempt %u failed: %s (%u)", retries + 1u, reason_name(d->reason),
@@ -660,7 +720,7 @@ static void sta_disconnected(const wifi_event_sta_disconnected_t *d)
         if (was_associated) {
             wlanif_link_down();
         }
-        reconnect_failed();
+        retry_next();
         break;
     default:
         LOG_INF("disconnected: %s (%u)", reason_name(d->reason), (unsigned int) d->reason);
@@ -763,8 +823,15 @@ static void lost_ip(const struct wlanif_ip_event *event)
     if (session == 0u || event->session != session || !have_address) {
         return;
     }
-    LOG_INF("%u.%u.%u.%u dropped%s", address[0], address[1], address[2], address[3],
-            c == CONN_RECONNECTING ? ": no connection for 120 s" : " by DHCP");
+    if (c == CONN_RECONNECTING) {
+        LOG_INF("%u.%u.%u.%u dropped: no connection for %u s, %u attempts failed; "
+                "reconnection stopped", address[0], address[1], address[2], address[3],
+                (unsigned int) (WLANIF_ADDRESS_HOLD_MS / 1000u), retries);
+        address_clear();
+        retry_give_up();
+        return;
+    }
+    LOG_INF("%u.%u.%u.%u dropped by DHCP", address[0], address[1], address[2], address[3]);
     if (c == CONN_CONNECTED) {
         ops->link_down();
     }
@@ -802,6 +869,11 @@ static bool failed(const char *step, esp_err_t err)
 void net_wifi_set_ops(const struct net_wifi_ops *table)
 {
     ops = table;
+}
+
+void net_wifi_set_reconnect_ops(const struct net_wifi_reconnect_ops *table)
+{
+    policy = table;
 }
 
 int net_wifi_start(void)
@@ -936,31 +1008,47 @@ void net_wifi_scan_end(void)
 
 int net_wifi_connect(const struct net_wifi_connect_params *params)
 {
+    bool keyed;
+    bool pmf_required;
     int result;
 
     if (params == NULL || params->ssid == NULL || params->ssid_len == 0u
-        || params->ssid_len > NET_WIFI_SSID_MAX_LEN
-        || (params->passphrase != NULL
-            && (params->passphrase_len < 8u || params->passphrase_len > 64u))) {
+        || params->ssid_len > NET_WIFI_SSID_MAX_LEN || params->auth > NET_WIFI_AUTH_WPA3_SAE) {
+        return -EINVAL;
+    }
+    keyed = params->auth == NET_WIFI_AUTH_WPA_PSK || params->auth == NET_WIFI_AUTH_WPA2_PSK
+            || params->auth == NET_WIFI_AUTH_WPA3_SAE;
+    if (keyed != (params->passphrase != NULL)
+        || (keyed && (params->passphrase_len < 8u || params->passphrase_len > 64u))) {
         return -EINVAL;
     }
     if (!sta_started) {
         return -ENETDOWN;
     }
+    pmf_required = params->pmf_required || params->auth == NET_WIFI_AUTH_OWE
+                || params->auth == NET_WIFI_AUTH_WPA3_SAE;
 
     (void) tx_mutex_get(&request_lock, TX_WAIT_FOREVER);
-    /* Zephyr's ESP32 driver's (drivers/wifi/esp32/src/esp_wifi_drv.c) for the same request. */
+    if (policy != NULL && policy->connection_allowed != NULL && !policy->connection_allowed()) {
+        (void) tx_mutex_put(&request_lock);
+        return -ECANCELED;
+    }
+    /*
+     * As Zephyr's ESP32 driver (drivers/wifi/esp32/src/esp_wifi_drv.c)
+     * sets it up, with the threshold, the management frame protection and
+     * the SAE method of the request; OWE also enables the station's OWE
+     * (wifi_sta_config_t.owe_enabled).
+     */
     memset(&request_config, 0, sizeof(request_config));
     memcpy(request_config.sta.ssid, params->ssid, params->ssid_len);
-    if (params->passphrase != NULL) {
+    if (keyed) {
         memcpy(request_config.sta.password, params->passphrase, params->passphrase_len);
-        request_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    } else {
-        request_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
     }
+    request_config.sta.threshold.authmode = threshold_of(params->auth);
+    request_config.sta.owe_enabled = params->auth == NET_WIFI_AUTH_OWE;
     request_config.sta.pmf_cfg.capable = true;
-    request_config.sta.pmf_cfg.required = false;
-    request_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    request_config.sta.pmf_cfg.required = pmf_required;
+    request_config.sta.sae_pwe_h2e = sae_pwe_of(params->sae_pwe);
     result = request(CTL_CONNECT);
     memset(&request_config, 0, sizeof(request_config));
     (void) tx_mutex_put(&request_lock);
@@ -975,6 +1063,9 @@ int net_wifi_disconnect(void)
         return -ENETDOWN;
     }
     (void) tx_mutex_get(&request_lock, TX_WAIT_FOREVER);
+    if (policy != NULL && policy->pause != NULL) {
+        policy->pause();
+    }
     result = request(CTL_DISCONNECT);
     (void) tx_mutex_put(&request_lock);
     return result;
