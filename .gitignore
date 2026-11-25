@@ -1,4 +1,5 @@
 /build/
 /tools/
+/lib/
 /.venv/
 /backup/

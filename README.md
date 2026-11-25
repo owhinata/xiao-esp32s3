@@ -26,13 +26,15 @@ watchdog reset.  See [Bring-up checklist](#bring-up-checklist).
 ## Build
 
 ```sh
-git submodule update --init --depth 1
 python3 -m venv .venv && .venv/bin/pip install esptool
 cmake -S . -B build -G Ninja
 cmake --build build
 ```
 
-The first configure downloads the compiler (~110 MB) into `tools/`.
+The first configure downloads the compiler (~110 MB) into `tools/` and the
+two upstream source trees (ThreadX and esp-hal-components, ~200 MB) into
+`lib/`, each at the commit pinned in `CMakeLists.txt`.  Neither directory is
+tracked by this repository.
 Outputs are `build/xiao_esp32s3_threadx.elf`, `.bin` (ESP image) and `.map`.
 
 ## Run
@@ -112,7 +114,7 @@ What is still missing compared with an ESP-IDF start-up:
 cmake/          toolchain file (downloads the compiler)
 ldscript/       linker script
 script/         build helpers
-lib/            upstream submodules, read-only
+lib/            upstream sources, fetched by CMake; read-only, not tracked
 port/           board and start-up code
 port/threadx/   ThreadX architecture port
 src/            application

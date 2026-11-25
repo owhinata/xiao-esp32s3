@@ -1,7 +1,0 @@
-[submodule "lib/threadx"]
-	path = lib/threadx
-	url = https://github.com/eclipse-threadx/threadx
-[submodule "lib/esp-hal-components"]
-	path = lib/esp-hal-components
-	url = https://github.com/espressif/esp-hal-components
-	branch = sync-3-master

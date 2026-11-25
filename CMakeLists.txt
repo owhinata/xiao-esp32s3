@@ -13,17 +13,22 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Upstream sources.  Fetched into lib/ (not tracked) at exactly these commits.
+#   ThreadX            tag v6.5.2.202603_rel
+#   esp-hal-components branch sync-3-master as of 2024-12-03 (ESP-IDF master of
+#                      that day; the toolchain version in cmake/ goes with it)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/fetch_upstream.cmake")
+fetch_upstream(threadx
+    https://github.com/eclipse-threadx/threadx
+    93387b0a60382a29579bbad5045c68328e3751df)
+fetch_upstream(esp-hal-components
+    https://github.com/espressif/esp-hal-components
+    5567b35b9b0cd10bf26a4112f84a71ddd46f1488)
+
 set(ESP_HAL  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-hal-components/components")
 set(TX_DIR   "${CMAKE_CURRENT_LIST_DIR}/lib/threadx")
 set(TX_PORT  "${TX_DIR}/ports/xtensa/xcc")
 set(PORT_DIR "${CMAKE_CURRENT_LIST_DIR}/port")
-
-foreach(_sentinel "${ESP_HAL}/hal" "${TX_DIR}/common/src")
-    if(NOT EXISTS "${_sentinel}")
-        message(FATAL_ERROR
-            "Missing ${_sentinel}.  Run: git submodule update --init --depth 1")
-    endif()
-endforeach()
 
 # -mlongcalls: code and ROM are further apart than a direct call reaches.
 add_compile_options(
