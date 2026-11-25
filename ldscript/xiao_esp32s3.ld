@@ -99,7 +99,8 @@ SECTIONS
      *   - fault reporting, which has to work when the flash mapping is the
      *     thing that is broken,
      *   - what Espressif marks IRAM_ATTR (.iram1),
-     *   - interrupt entry/exit and context switch.
+     *   - interrupt entry/exit and context switch, with the execution profile
+     *     kit they call (tx_execution_profile.c).
      * The same list appears in .dram0.data for the read-only data of these
      * objects.  Keep the two in step.
      */
@@ -126,6 +127,7 @@ SECTIONS
         *xtensa_context.S.obj(.literal .literal.* .text .text.*)
         *xtensa_intr_asm.S.obj(.literal .literal.* .text .text.*)
         *tx_*.S.obj(.literal .literal.* .text .text.*)
+        *tx_execution_profile.c.obj(.literal .literal.* .text .text.*)
         *libxt_hal.a:(.literal .literal.* .text .text.*)
         . = ALIGN(4);
         _iram_text_end = ABSOLUTE(.);
@@ -157,6 +159,7 @@ SECTIONS
         *xtensa_intr_asm.S.obj(.rodata .rodata.*)
         *xtensa_vectors.S.obj(.rodata .rodata.*)
         *tx_*.S.obj(.rodata .rodata.*)
+        *tx_execution_profile.c.obj(.rodata .rodata.*)
         *libxt_hal.a:(.rodata .rodata.*)
         . = ALIGN(4);
     } > dram_seg

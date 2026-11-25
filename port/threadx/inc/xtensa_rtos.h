@@ -56,6 +56,29 @@
 #define XT_RTOS_INT_ENTER       _tx_thread_context_save
 #define XT_RTOS_INT_EXIT        _tx_thread_context_restore
 
+/*
+ * Interrupt entry for ThreadX's execution profile kit (tx_user.h).  The kit
+ * wants _tx_execution_isr_enter() once per interrupt, after
+ * _tx_thread_context_save() has counted it in _tx_thread_system_state and
+ * before the first handler; tx_thread_context_restore.S calls its
+ * counterpart _tx_execution_isr_exit() before the count drops.
+ *
+ * The layer's dispatcher (dispatch_c_isr in xtensa_vectors.S) has that call
+ * in place for ESP-IDF's power-management trace: with CONFIG_PM_TRACE it does
+ * "call4 esp_pm_trace_exit" once at the start of every dispatch of levels 1
+ * to XCHAL_EXCM_LEVEL, right after XT_RTOS_INT_ENTER and the switch of PS to
+ * the C environment (EXCM clear, WOE set, on the stack the handlers then
+ * use), before the loop over the pending interrupts.  Here the name is
+ * mapped to the kit's function, which ignores the two arguments (event,
+ * core) that the dispatcher puts in its a2 and a3.  Assembly only: no C
+ * source sees CONFIG_PM_TRACE, and xtensa_vectors.S is the only assembly
+ * source that tests it.
+ */
+#if defined(TX_EXECUTION_PROFILE_ENABLE) && defined(__ASSEMBLER__)
+#define CONFIG_PM_TRACE         1
+#define esp_pm_trace_exit       _tx_execution_isr_enter
+#endif
+
 /* Tick interrupt; C calling convention. */
 #ifndef TX_NO_TIMER
 #define XT_RTOS_TIMER_INT       _tx_timer_interrupt

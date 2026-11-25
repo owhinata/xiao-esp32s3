@@ -20,7 +20,10 @@
 #include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
 
+#include "board.h"
+#include "cpu_load.h"
 #include "esp_idf_version.h"
+#include "ps_interval.h"
 #include "shell_engine.h"
 
 /* ---- version ------------------------------------------------------------- */
@@ -74,14 +77,57 @@ SHELL_CMD_REGISTER(free, NULL, "Show the use of malloc()", cmd_free);
 
 /* ---- ps ------------------------------------------------------------------ */
 
-#define PS_THREADS_MAX 24
+/*
+ * The run times of ThreadX's execution profile kit (tx_user.h), in CPU
+ * cycles (CCOUNT), turned into microseconds of the uptime clock (SYSTIMER):
+ * both count the crystal, at BOARD_CPU_FREQ_MHZ cycles per microsecond.
+ */
+#ifndef TX_EXECUTION_PROFILE_ENABLE
+#error "ps needs TX_EXECUTION_PROFILE_ENABLE (port/threadx/inc/tx_user.h)"
+#endif
+
+/* The kit's (tx_execution_profile.c), declared in no header. */
+extern EXECUTION_TIME _tx_execution_idle_time_total;
+extern EXECUTION_TIME _tx_execution_isr_time_total;
+
+/*
+ * The time thread has run, its current run included when it is the caller
+ * (the kit's start is non-zero only while the thread runs).  Interrupts
+ * masked by the caller.
+ */
+static uint64_t ps_thread_cycles(const TX_THREAD *t)
+{
+    uint64_t total = t->tx_thread_execution_time_total;
+    EXECUTION_TIME_SOURCE_TYPE start = t->tx_thread_execution_time_last_start;
+
+    if (start != 0u) {
+        total += (EXECUTION_TIME_SOURCE_TYPE) (TX_EXECUTION_TIME_SOURCE - start);
+    }
+    return total;
+}
+
+static uint64_t ps_cycles_to_us(uint64_t cycles)
+{
+    return cycles / BOARD_CPU_FREQ_MHZ;
+}
+
+/* The threads and the rows of the scheduler's wait and of the interrupts. */
+#define PS_TASKS_MAX 24
+
+_Static_assert(PS_TASKS_MAX <= PS_INTERVAL_TASKS_MAX, "ps keeps every task");
 
 struct ps_row {
     const TX_THREAD *thread;
     const char *name;
     UINT priority;
     char state;
+    uint64_t run_cycles;
+    unsigned int permille;
 };
+
+/* The ids of the rows that are no thread's. */
+static const char ps_idle_id;
+static const char ps_irq_id;
 
 /*
  * X the caller, R ready, B waiting with a timeout, S suspended or waiting
@@ -121,17 +167,31 @@ static size_t ps_stack_free(const TX_THREAD *t)
 
 /*
  * The threads: state, ThreadX priority (0 the most urgent; raised while a
- * mutex's priority inheritance lasts) and the least free stack so far.
- * Threads that have ended, which ThreadX keeps in its list, are left out.
- * The last row is the interrupt stack (filled by _tx_initialize_low_level()),
- * on which the scheduler also waits when no thread is ready.
+ * mutex's priority inheritance lasts), the least free stack so far and the
+ * share of the CPU time since the previous "ps" (since the start for the
+ * first), from any shell: the run times of this list less those of the
+ * previous one (shell/common/shell/include/ps_interval.h), over the uptime
+ * between the two.  Threads that have ended, which ThreadX keeps in its
+ * list, are left out.
  *
- * rp2040-connect's "ps" has a CPU column and a "cpu_active" line as well.
- * They need the run time of each thread, which this port does not measure,
- * so they are absent here rather than filled with a guess.
+ * "(idle)" is the time the scheduler waited with no thread ready (ThreadX
+ * has no idle thread: the kit's idle time).  "(interrupts)" is the time in
+ * the handlers of the interrupts that go through _tx_thread_context_save()
+ * (every interrupt of levels 1 to 3), nested ones included, and the least
+ * free of the interrupt stack (filled by _tx_initialize_low_level()), on
+ * which the scheduler also waits.  This port tells the kit where each
+ * interrupt starts and ends, so a handler's time is in that row and not in
+ * the thread it interrupted or in "(idle)"; the rows add up to about 100%.
+ * What is in no row: the few instructions of a switch between the kit's
+ * calls, and for the first list the start before the scheduler ran.
  *
- * The list is read with interrupts masked, the stacks after: control blocks
- * and stacks are static.
+ * "cpu_active" is the time the CPU was not in the scheduler's wait, over
+ * the same interval: 100% less "(idle)", rounded down, with the handlers
+ * that interrupt the wait counted as load.
+ *
+ * The list and the run times are read with interrupts masked (the kit
+ * changes them at switches and in interrupts), the stacks after: control
+ * blocks and stacks are static.
  */
 static K_MUTEX_DEFINE(ps_lock);
 
@@ -140,11 +200,20 @@ static int cmd_ps(const struct shell *sh, size_t argc, char **argv)
     extern ULONG _xt_interrupt_stack[];
     extern ULONG _xt_interrupt_stack_top[];
     TX_INTERRUPT_SAVE_AREA
-    static struct ps_row rows[PS_THREADS_MAX];
+    static struct ps_row rows[PS_TASKS_MAX - 2];
+    static struct ps_interval interval;
     const TX_THREAD *t;
+    uint64_t total;
+    uint64_t idle_cycles;
+    uint64_t irq_cycles;
+    uint64_t elapsed;
+    uint64_t idle;
+    unsigned int idle_permille;
+    unsigned int irq_permille;
     unsigned int count = 0;
     bool full = false;
     ULONG created;
+    int active_permille;
 
     (void) argc;
     (void) argv;
@@ -168,7 +237,11 @@ static int cmd_ps(const struct shell *sh, size_t argc, char **argv)
         row->name = t->tx_thread_name;
         row->priority = t->tx_thread_priority;
         row->state = ps_state(t);
+        row->run_cycles = ps_thread_cycles(t);
     }
+    idle_cycles = _tx_execution_idle_time_total;
+    irq_cycles = _tx_execution_isr_time_total;
+    total = board_uptime_us();
     TX_RESTORE
 
     if (full) {
@@ -177,16 +250,40 @@ static int cmd_ps(const struct shell *sh, size_t argc, char **argv)
         return -ENOMEM;
     }
 
-    shell_print(sh, "%-20s %-5s %4s %10s", "NAME", "STATE", "PRIO", "STACK FREE");
+    elapsed = ps_interval_begin(&interval, total);
+    for (unsigned int i = 0; i < count; i++) {
+        uint64_t run = ps_interval_task(&interval, (uintptr_t) rows[i].thread, 0,
+                                        ps_cycles_to_us(rows[i].run_cycles));
+
+        rows[i].permille = ps_interval_permille(run, elapsed);
+    }
+    idle = ps_interval_task(&interval, (uintptr_t) &ps_idle_id, 0, ps_cycles_to_us(idle_cycles));
+    idle_permille = ps_interval_permille(idle, elapsed);
+    irq_permille = ps_interval_permille(
+        ps_interval_task(&interval, (uintptr_t) &ps_irq_id, 0, ps_cycles_to_us(irq_cycles)), elapsed);
+    ps_interval_end(&interval);
+    active_permille = cpu_load_ratio(elapsed, idle);
+
+    shell_print(sh, "%-20s %-5s %4s %10s %6s", "NAME", "STATE", "PRIO", "STACK FREE", "CPU");
     for (unsigned int i = 0; i < count; i++) {
         const struct ps_row *row = &rows[i];
 
-        shell_print(sh, "%-20s %-5c %4lu %10lu", row->name, row->state,
-                    (unsigned long) row->priority, (unsigned long) ps_stack_free(row->thread));
+        shell_print(sh, "%-20s %-5c %4lu %10lu %4u.%u%%", row->name, row->state,
+                    (unsigned long) row->priority, (unsigned long) ps_stack_free(row->thread),
+                    row->permille / 10, row->permille % 10);
     }
-    shell_print(sh, "%-20s %-5c %4c %10lu", "(interrupts)", '-', '-',
-                (unsigned long) ps_fill_left(_xt_interrupt_stack, _xt_interrupt_stack_top));
+    /* The scheduler's wait (waiti in _tx_thread_schedule): not a thread. */
+    shell_print(sh, "%-20s %-5c %4c %10c %4u.%u%%", "(idle)", '-', '-', '-', idle_permille / 10,
+                idle_permille % 10);
+    /* The interrupt handlers and their stack: not a thread. */
+    shell_print(sh, "%-20s %-5c %4c %10lu %4u.%u%%", "(interrupts)", '-', '-',
+                (unsigned long) ps_fill_left(_xt_interrupt_stack, _xt_interrupt_stack_top),
+                irq_permille / 10, irq_permille % 10);
     shell_print(sh, "STATE: X running, R ready, B blocked, S suspended");
+    shell_print(sh, "cpu_active: %d.%d%% in the %llu.%03llu s since the previous \"ps\"",
+                active_permille / 10, active_permille % 10,
+                (unsigned long long) (elapsed / 1000000u),
+                (unsigned long long) (elapsed / 1000u % 1000u));
     k_mutex_unlock(&ps_lock);
     return 0;
 }
@@ -199,12 +296,12 @@ SHELL_CMD_REGISTER(ps, NULL, "List the tasks", cmd_ps);
  * The commands of other sources: "help" of the shell engine
  * (shell/common/compat/shell_engine/shell_engine.c), "dmesg"
  * (shell/common/shell/dmesg_shell.c) and the generic commands of
- * shell/common/shell/kernel_shell.c.  That file also registers "date" and
- * "fault", which are not listed and so are dropped at link time: nothing
- * sets a wall clock on this board, and the fault record is laid out for a
- * Cortex-M exception frame.
+ * shell/common/shell/kernel_shell.c ("date" reads shell/port/zephyr_sys_clock.c).
+ * That file also registers "fault", which is not listed and so is dropped
+ * at link time: the fault record is laid out for a Cortex-M exception frame.
  */
 SHELL_ENGINE_CMD_DECLARE(bootsel);
+SHELL_ENGINE_CMD_DECLARE(date);
 SHELL_ENGINE_CMD_DECLARE(devmem);
 SHELL_ENGINE_CMD_DECLARE(dmesg);
 SHELL_ENGINE_CMD_DECLARE(help);
@@ -216,6 +313,7 @@ SHELL_ENGINE_CMD_DECLARE(uptime);
 /* Sorted by name, as Zephyr's "help" lists them. */
 const struct shell_engine_cmd shell_engine_cmds[] = {
     SHELL_ENGINE_CMD(bootsel),
+    SHELL_ENGINE_CMD(date),
     SHELL_ENGINE_CMD(devmem),
     SHELL_ENGINE_CMD(dmesg),
     SHELL_ENGINE_CMD(free),

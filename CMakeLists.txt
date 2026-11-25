@@ -146,8 +146,12 @@ add_library(threadx STATIC
     "${PORT_DIR}/threadx/src/tx_xtensa_stack_error_handler.c"
     "${PORT_DIR}/threadx/src/tx_port_asm.S"
     "${PORT_DIR}/threadx/src/tx_port_offset_check.c"
-    "${PORT_DIR}/threadx/src/tx_clib_newlib.c")
-target_include_directories(threadx PUBLIC "${TX_DIR}/common/inc")
+    "${PORT_DIR}/threadx/src/tx_clib_newlib.c"
+    # Execution profile kit, unmodified: the run times of "ps" (tx_user.h).
+    "${TX_DIR}/utility/execution_profile_kit/tx_execution_profile.c")
+target_include_directories(threadx PUBLIC
+    "${TX_DIR}/common/inc"
+    "${TX_DIR}/utility/execution_profile_kit")
 target_link_libraries(threadx PUBLIC xtensa_rtos)
 
 # ---------------------------------------------------------------------------
@@ -262,7 +266,8 @@ add_library(shell OBJECT
     "${SHELL_COMMON}/shell/dmesg_shell.c"
     # This board's part
     "${SHELL_PORT}/commands.c"
-    "${SHELL_PORT}/shell_port.c")
+    "${SHELL_PORT}/shell_port.c"
+    "${SHELL_PORT}/zephyr_sys_clock.c")
 # The order is rp2040-connect's (common/compat/port/pico_sdk/compat.cmake):
 # the board's and the OS's parts first, then the parts for an OS without its
 # own model, then the layer's and the shell's headers.

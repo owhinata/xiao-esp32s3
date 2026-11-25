@@ -47,7 +47,10 @@
  * (esp-hal-3rdparty/components/xtensa) with the Espressif GCC toolchain.
  * Differences from the original are limited to:
  *   - interrupt lockout through the layer's XTOS_SET_INTLEVEL macros,
- *   - _xt_coproc_release() taking the layer's (save area, core) arguments.
+ *   - _xt_coproc_release() taking the layer's (save area, core) arguments,
+ *   - TX_THREAD_EXTENSION_3 empty unless TX_ENABLE_EXECUTION_CHANGE_NOTIFY
+ *     (tx_api.h declares the execution profile fields for
+ *     TX_EXECUTION_PROFILE_ENABLE).
  */
 
 /* Thread-safe C library support (port/threadx/src/tx_clib_newlib.c). */
@@ -352,10 +355,19 @@ typedef unsigned short                          USHORT;
 
 #define TX_THREAD_EXTENSION_2
 
-/* Execution profile related */
+/*
+ * Execution profile kit: the two run-time fields, under the kit's ThreadX 5
+ * symbol only.  With TX_EXECUTION_PROFILE_ENABLE (tx_user.h) tx_api.h
+ * declares them itself, at this place in TX_THREAD, and the kit asks that
+ * the port adds nothing.
+ */
+#ifdef TX_ENABLE_EXECUTION_CHANGE_NOTIFY
 #define TX_THREAD_EXTENSION_3 \
     unsigned long long  tx_thread_execution_time_total; \
     unsigned long       tx_thread_execution_time_last_start;
+#else
+#define TX_THREAD_EXTENSION_3
+#endif
 
 
 /* Define the port extensions of the remaining ThreadX objects.  */

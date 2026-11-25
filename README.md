@@ -21,6 +21,7 @@ from flash at 240 MHz, with an interactive shell on the USB console.  See
 | Shell | The shell of [rp2040-connect](https://github.com/owhinata/rp2040-connect), copied into `shell/common/` |
 | Tick | 1000 Hz from CCOMPARE0 (CPU interrupt 6, level 1) |
 | Uptime clock | SYSTIMER counter 0 (16 MHz, from the crystal) |
+| Run times | ThreadX execution profile kit on the CPU cycle counter |
 | LED | GPIO21, active low |
 | CPU clock | 240 MHz from the PLL (`BOARD_CPU_FREQ_MHZ`) |
 | Image | Booted directly by the ROM; code and constants execute from flash |
@@ -64,6 +65,7 @@ XIAO ESP32S3: ThreadX 6.5.2, CPU clock 240000000 Hz, 1000 ticks/s
 xiao:~$ help
 Available commands:
   bootsel  : Restart into the ROM download mode (for esptool)
+  date     : Show the date and time (UTC)
   devmem   : Read or write memory: devmem <address> [<width> [<value>]]
   dmesg    : Show logs stored in RAM
   free     : Show the use of malloc()
@@ -85,10 +87,25 @@ RESET button returns to the firmware.  `id` prints the factory MAC address
 from eFuse.
 
 `dmesg` shows a log kept in RAM that survives a reset, so it also holds the
-lines of earlier boots.  rp2040-connect's `date` and `fault` are not built:
-nothing here sets a wall clock, and the fault record is laid out for a
-Cortex-M.  `ps` has no CPU column, because this port does not account run time
-per thread.
+lines of earlier boots.
+
+`ps` lists each thread with its free stack and its share of the CPU since the
+previous `ps`, then the time spent idle and in interrupt handlers, and
+`cpu_active` (everything but idle):
+
+```
+NAME                 STATE PRIO STACK FREE    CPU
+blink                B       10       3680    0.0%
+console              X       30       5312    0.1%
+(idle)               -        -          -   99.8%
+(interrupts)         -        -       3872    0.1%
+STATE: X running, R ready, B blocked, S suspended
+cpu_active: 0.2% in the 2.915 s since the previous "ps"
+```
+
+`date` counts from 1970-01-01 at boot: nothing sets the clock yet.
+`sys_clock_settime()` is there for a future time source.  rp2040-connect's
+`fault` is not built, because its record is laid out for a Cortex-M.
 
 ## How it boots
 
@@ -116,7 +133,7 @@ session here:
 - The instruction cache uses the first 16 KiB of SRAM0 as its own memory.
   Anything linked there works until the first instruction is fetched from
   flash, and is then overwritten.
-- ESP-IDF's bootloader only reads flash as data.  Executing from it also needs
+- ESP-IDF's second-stage bootloader only reads flash as data.  Executing from it also needs
   the cache geometry set and the ROM told where code ends and data begins in
   the shared MMU table (`rom_config_instruction_cache_mode`,
   `Cache_Set_IDROM_MMU_Size`), which ESP-IDF does in its application start-up.
@@ -176,7 +193,12 @@ which `port/threadx/inc/xtensa_rtos.h` maps to ThreadX.
 
 **ThreadX**
 
-`lib/threadx/common` is the kernel.  The upstream Xtensa port
+`lib/threadx/common` is the kernel, and
+`utility/execution_profile_kit/tx_execution_profile.c` accounts the run time of
+threads, interrupt handlers and idle; both are built unmodified.  The kit is
+told about interrupt entry through a hook Espressif's dispatcher already has
+(`CONFIG_PM_TRACE`), which `port/threadx/inc/xtensa_rtos.h` maps to
+`_tx_execution_isr_enter`.  The upstream Xtensa port
 (`lib/threadx/ports/xtensa/xcc`) is **not built**: it brings its own copy of
 the Xtensa layer, written for the Cadence toolchain.  Its ThreadX-specific
 files were copied to `port/threadx/` and adapted to Espressif's layer.  The
@@ -198,15 +220,15 @@ files were copied to `port/threadx/` and adapted to Espressif's layer.  The
 
 **rp2040-connect**
 
-`shell/common/` holds the 60 files of rp2040-connect's `common/` directory
+`shell/common/` holds the 62 files of rp2040-connect's `common/` directory
 (commit `72f3485`) that this firmware uses, at the same relative paths: the
 shell engine, the generic commands, and the Zephyr-compatibility kernel layer
 they are written against.  Most are byte-identical copies;
 `shell/ORIGIN.md` lists them, the changes, and their licences (MIT,
 Apache-2.0 for the parts derived from Zephyr, BSD-3-Clause for getopt and
 fnmatch).  `shell/port/` is this board's side of that code: the console
-transport, the kernel port header, the log back end, and the commands only the
-board can answer (`version`, `free`, `ps`).
+transport, the kernel port header, the log back end, the realtime clock, and
+the commands only the board can answer (`version`, `free`, `ps`).
 
 **This project** (`port/`)
 
@@ -236,7 +258,9 @@ the order a failure would show up:
 3. The prompt appears and `help` lists the commands.  Banner but no prompt:
    the first context switch, the tick interrupt, or the receive interrupt.
 4. `uptime` twice: seconds and ticks advance together (1 tick = 1 ms).
-5. `ps` lists `blink`, `console` and `(interrupts)` with their free stack.
+5. `ps` lists `blink`, `console`, `(idle)` and `(interrupts)`; the CPU column
+   adds up to about 100% and rises for `console` when the shell is kept busy.
+   `date` advances with `uptime`.
 6. `id` prints the MAC address esptool reports.
 7. `devmem 0` ends in a register dump (the fault path), `reboot` comes back
    to the banner, `bootsel` lets esptool connect.
