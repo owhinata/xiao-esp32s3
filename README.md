@@ -312,8 +312,12 @@ using a coprocessor in an interrupt handler ends in a panic.
 ## Bring-up checklist
 
 Everything below has been observed on the board with the current image over
-USB.  The UART0 console and flashing through it have not been tried on a board
-yet.  In the order a failure would show up:
+USB.  On UART0 the boot logs, the shell in both directions, a burst of output
+larger than the transmit queue, the fault dump with its restart, `reboot` and
+`bootsel` have been observed too, and so has flashing through a PL2303
+adapter (`app-flash` at 115200 and at 460800 baud, and `flash`, each without
+a button and back in the firmware 5 to 10 s later).  In the order a failure
+would show up:
 
 1. After `flash`, the ROM log is followed by the bootloader's
    (`boot: ESP-IDF ... 2nd stage bootloader`, the partition table, the image
