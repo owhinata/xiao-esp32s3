@@ -26,9 +26,10 @@ fetch_upstream(esp-hal-3rdparty
     https://github.com/espressif/esp-hal-3rdparty
     130cda986be9d69bf53c28ec1f815479dcdbf5db)
 # The second-stage bootloader's image loader (esp_image_verify), its version
-# record (esp_bootloader_format) and the flash command definitions of esp_mspi
-# are not in the mirror.  They are taken from ESP-IDF itself, at the commit
-# the mirror is a copy of (only these directories are downloaded).
+# record (esp_bootloader_format) and esp_mspi's headers (the flash command
+# definitions, the flash driver's private interfaces) are not in the mirror.
+# They are taken from ESP-IDF itself, at the commit the mirror is a copy of
+# (only these directories are downloaded).
 fetch_upstream(esp-idf
     https://github.com/espressif/esp-idf
     ad20ded62a2d67a26e501fdc1905f43ba7ad6c81
@@ -36,6 +37,7 @@ fetch_upstream(esp-idf
     components/esp_image_verify
     components/esp_bootloader_format
     components/esp_mspi/include
+    components/esp_mspi/mspi_intr/include
     components/esp_mspi/mspi_timing_tuning/include
     components/esp_mspi/esp_mspi_align
     components/esp_sleep/include
@@ -103,9 +105,16 @@ set(IDF_VER "v6.3-dev-gad20ded6")
 #   accesses.  The HAL describes them as volatile bit-field structs, and
 #   without this option GCC reads a 16-bit field with a 16-bit load, which
 #   returns 0 (seen with the eFuse MAC).  ESP-IDF builds everything with it.
+# -fno-jump-tables -fno-tree-switch-conversion: a switch becomes compares and
+#   branches, not a table of addresses or values in .rodata.  Code that runs
+#   with the cache off (the linker script's RAM lists) must not read a table
+#   in flash; a function marked IRAM_ATTR in an object that otherwise stays
+#   in flash would.  ESP-IDF sets both for every build, its bootloader's
+#   included (its root CMakeLists.txt); here they apply to bootloader/ too.
 add_compile_options(
     -mlongcalls
     -fstrict-volatile-bitfields
+    -fno-jump-tables -fno-tree-switch-conversion
     -ffunction-sections -fdata-sections
     -fno-common
     -Wall)
@@ -118,7 +127,7 @@ add_compile_options(
 # headers this firmware reaches are listed.
 set(ESP_HAL_PERIPHERALS
     esp_hal_ana_conv esp_hal_cache esp_hal_clock esp_hal_dma esp_hal_gpio esp_hal_gpspi
-    esp_hal_regi2c esp_hal_rtc_timer esp_hal_systimer esp_hal_timg esp_hal_uart
+    esp_hal_mspi esp_hal_regi2c esp_hal_rtc_timer esp_hal_systimer esp_hal_timg esp_hal_uart
     esp_hal_usb esp_hal_wdt)
 set(ESP_HAL_PERIPHERAL_INCLUDES)
 foreach(_c IN LISTS ESP_HAL_PERIPHERALS)
@@ -155,10 +164,12 @@ target_include_directories(esp_hal INTERFACE
     "${ESP_HAL}/esp_system/include"
     "${ESP_HAL}/log/include"
     "${ESP_HAL}/heap/include"
+    "${ESP_HAL}/spi_flash/include"
     # Components that are not in esp-hal-3rdparty: headers from ESP-IDF
     # (lib/esp-idf): esp_sleep's (rtc_clk.c) and esp_mspi's (rtc_init.c,
-    # heap_align_hw.c).
+    # heap_align_hw.c, the flash driver).
     "${ESP_IDF}/esp_sleep/include"
+    "${ESP_IDF}/esp_mspi/include"
     "${ESP_IDF}/esp_mspi/mspi_timing_tuning/include"
     "${ESP_IDF}/esp_mspi/esp_mspi_align/include")
 target_link_libraries(esp_hal INTERFACE "${ESP_HAL}/xtensa/esp32s3/libxt_hal.a")
@@ -262,6 +273,8 @@ add_executable(app
     "${PORT_DIR}/board.c"
     "${PORT_DIR}/panic.c"
     "${PORT_DIR}/watchdog.c"
+    "${PORT_DIR}/board_flash.c"
+    "${PORT_DIR}/board_flash_os.c"
     "${PORT_DIR}/syscalls.c"
     "${PORT_DIR}/stdio_wrap.c"
     "${PORT_DIR}/esp_log_ram.c"
@@ -269,6 +282,7 @@ add_executable(app
     "${PORT_DIR}/net/wlanif.c"
     "${PORT_DIR}/net/lwip_bridge.c"
     "${PORT_DIR}/esp_compat/esp_sleep.c"
+    "${PORT_DIR}/esp_compat/flash_mmap.c"
     "${PORT_DIR}/esp_compat/lwip_vfs.c"
     "${PORT_DIR}/esp_compat/mspi_timing.c"
     "${PORT_DIR}/esp_compat/nvs.c"
@@ -344,7 +358,9 @@ set(ESP_WIFI_LIB  "${CMAKE_CURRENT_LIST_DIR}/lib/esp32-wifi-lib/esp32s3")
 # (wifi_init.c, and the IP events' types for port/net; esp_netif's code is
 # not built, port/net/wlanif.c is the network interface), nvs_flash and
 # esp_partition with esp_blockdev (phy_init.c and the OS adapter include
-# nvs.h; port/esp_compat/nvs.c), the GPIO driver's types (phy_common.c).
+# nvs.h; port/esp_compat/nvs.c; the flash driver's esp_flash.h includes
+# esp_blockdev.h too), the GPIO driver's types (phy_common.c,
+# esp_flash_spi_init.c).
 add_library(esp_wifi_headers INTERFACE)
 target_include_directories(esp_wifi_headers INTERFACE
     "${ESP_HAL}/esp_wifi/include"
@@ -746,7 +762,33 @@ add_library(esp_idf OBJECT
     # UART0: the console on D6/D7 (port/board.c), and the table of IO MUX
     # registers that gpio_ll_pullup_en() looks the RX pin up in.
     "${ESP_HAL}/esp_hal_uart/uart_hal.c"
-    "${ESP_HAL}/soc/esp32s3/gpio_periph.c")
+    "${ESP_HAL}/soc/esp32s3/gpio_periph.c"
+    # The flash driver on SPI1 (port/board_flash.c): ESP-IDF's esp_flash API
+    # with the chip drivers of the vendors ESP-IDF supports by default (not
+    # the octal MXIC one) and its host on the MSPI HAL, the start-up of the
+    # default chip (esp_flash_spi_init.c; its own start-up hook is left out,
+    # see the linker script), the no-OS OS functions whose cache suspend and
+    # resume port/board_flash_os.c uses; the encrypted-write HAL, which the
+    # generic chip driver's table names (flash encryption is off, it is never
+    # called).  The cache error interrupt (port/startup.c), and the
+    # second-stage bootloader's check of a partition table (port/board_flash.c).
+    "${ESP_HAL}/spi_flash/esp_flash_api.c"
+    "${ESP_HAL}/spi_flash/esp_flash_spi_init.c"
+    "${ESP_HAL}/spi_flash/spi_flash_os_func_noos.c"
+    "${ESP_HAL}/spi_flash/memspi_host_driver.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_drivers.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_generic.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_gd.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_winbond.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_mxic.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_issi.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_boya.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_th.c"
+    "${ESP_HAL}/esp_hal_mspi/spi_flash_hal.c"
+    "${ESP_HAL}/esp_hal_mspi/spi_flash_hal_iram.c"
+    "${ESP_HAL}/esp_hal_mspi/spi_flash_encrypt_hal_iram.c"
+    "${ESP_HAL}/esp_system/port/soc/esp32s3/cache_err_int.c"
+    "${ESP_HAL}/bootloader_support/src/flash_partitions.c")
 target_include_directories(esp_idf PRIVATE
     "${ESP_HAL}/esp_libc/platform_include"
     "${ESP_HAL}/esp_timer/include"
@@ -759,7 +801,11 @@ target_include_directories(esp_idf PRIVATE
     "${ESP_HAL}/esp_system/port/include"
     "${ESP_HAL}/esp_security/include"
     "${ESP_HAL}/esp_hal_security/include"
-    "${ESP_HAL}/esp_hal_security/esp32s3/include")
+    "${ESP_HAL}/esp_hal_security/esp32s3/include"
+    "${ESP_HAL}/esp_hw_support/ldo/include"
+    "${ESP_HAL}/esp_system/port/include/private"
+    "${ESP_HAL}/bootloader_support/include"
+    "${ESP_IDF}/esp_mspi/mspi_intr/include")
 target_link_libraries(esp_idf PRIVATE esp_wifi_headers freertos threadx esp_hal)
 # Assertions on, as ESP-IDF builds them by default (assert(),
 # ESP_ERROR_CHECK(), configASSERT(); CONFIG_COMPILER_OPTIMIZATION_
@@ -820,6 +866,37 @@ set_source_files_properties("${ESP_HAL}/esp_security/src/esp_crypto_periph_clk.c
                COMPILE_OPTIONS "-include;stdbool.h")
 set_source_files_properties("${ESP_HAL}/esp_system/port/esp_system_chip.c"
     PROPERTIES COMPILE_DEFINITIONS "IDF_VER_DEF=\"${IDF_VER}\"")
+# The flash driver as ESP-IDF builds it: no inlining in the sources whose
+# functions are placed one by one (spi_flash/CMakeLists.txt, "Avoid cache
+# miss by unexpected inlining").  Those of its sources that run with the
+# cache off, and the cache HAL, log nothing: ESP-IDF's early log there goes
+# through code in flash (log version 1, its timestamp and level code, and
+# the console output of port/board.c), which ESP-IDF keeps in RAM with
+# CONFIG_LOG_IN_IRAM.  port/board_flash.c names the chip in its place.
+set_source_files_properties(
+    "${ESP_HAL}/spi_flash/esp_flash_spi_init.c"
+    PROPERTIES COMPILE_OPTIONS
+        "-fno-inline-functions;-fno-inline-small-functions;-fno-inline-functions-called-once")
+set_source_files_properties(
+    "${ESP_HAL}/spi_flash/esp_flash_api.c"
+    "${ESP_HAL}/spi_flash/spi_flash_os_func_noos.c"
+    PROPERTIES
+        COMPILE_OPTIONS "-fno-inline-functions;-fno-inline-small-functions;-fno-inline-functions-called-once"
+        COMPILE_DEFINITIONS "LOG_LOCAL_LEVEL=ESP_LOG_NONE")
+set_source_files_properties(
+    "${ESP_HAL}/spi_flash/memspi_host_driver.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_drivers.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_generic.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_gd.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_winbond.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_mxic.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_issi.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_boya.c"
+    "${ESP_HAL}/spi_flash/spi_flash_chip_th.c"
+    "${ESP_HAL}/esp_hal_mspi/spi_flash_hal_iram.c"
+    "${ESP_HAL}/esp_hal_mspi/spi_flash_encrypt_hal_iram.c"
+    "${ESP_HAL}/esp_hal_cache/cache_hal.c"
+    PROPERTIES COMPILE_DEFINITIONS "LOG_LOCAL_LEVEL=ESP_LOG_NONE")
 # The ThreadX layer's semaphores and queues are different structures (in
 # FreeRTOS a semaphore is a queue, and SemaphoreHandle_t is QueueHandle_t).
 # The two adapters keep a semaphore's handle in a QueueHandle_t member and
@@ -863,7 +940,11 @@ target_include_directories(app PRIVATE
     "${ESP_HAL}/esp_timer/include"
     "${ESP_HAL}/esp_hw_support/etm/include"     # esp_timer.h includes esp_etm.h
     "${ESP_HAL}/esp_phy/include"
-    "${ESP_HAL}/esp_system/port/include")      # esp_clk_internal.h
+    "${ESP_HAL}/esp_system/port/include"        # esp_clk_internal.h
+    "${ESP_HAL}/esp_system/port/include/private") # esp_private/cache_err_int.h
+# The partition table's format and its check (esp_flash_partitions.h).
+set_source_files_properties("${PORT_DIR}/board_flash.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/bootloader_support/include")
 # xtensa_rtos is an object library: the vectors are reached only through the
 # linker script and VECBASE, so nothing would pull them out of an archive.
 target_link_libraries(app PRIVATE esp_wifi_headers shell esp_idf ${ESP_WIFI_GROUP} lwip freertos threadx
@@ -884,6 +965,8 @@ set_source_files_properties(
 # --orphan-handling=warn: every input section has a place in the linker
 # script (an orphan would end up wherever ld puts it).  The --wrap options:
 # stdout's and stderr's writes without newlib's lock (port/stdio_wrap.c).
+# --emit-relocs keeps the relocations in the ELF file (not in the image),
+# for the check after the link (see below).
 target_link_options(app PRIVATE
     -nostartfiles
     "-T${LDSCRIPT}"
@@ -893,6 +976,7 @@ target_link_options(app PRIVATE
     -Wl,-u,esp_mbedtls_mem_calloc
     -Wl,--orphan-handling=warn
     -Wl,--gc-sections
+    -Wl,--emit-relocs
     "-Wl,-Map=$<TARGET_FILE_DIR:app>/xiao_esp32s3_threadx.map")
 
 # ---------------------------------------------------------------------------
@@ -907,6 +991,20 @@ target_link_options(app PRIVATE
 # shell/port/commands.c, and the tick hook only through a weak reference.
 set(SHELL_COMMON "${CMAKE_CURRENT_LIST_DIR}/shell/common")
 set(SHELL_PORT   "${CMAKE_CURRENT_LIST_DIR}/shell/port")
+
+set(SHELL_KV_SOURCES
+    "${SHELL_COMMON}/imu/kv_store.c"
+    "${SHELL_COMMON}/compat/kv_store_wipe.c"
+    "${SHELL_COMMON}/compat/zephyr_flash_kv.c"
+    "${SHELL_COMMON}/compat/lib/utils/hex.c")
+# Copies of Zephyr's files (v4.5.0, unchanged in rp2040-connect).
+set(SHELL_KV_ZEPHYR_COPIES
+    "${SHELL_COMMON}/compat/subsys/settings/src/settings.c"
+    "${SHELL_COMMON}/compat/subsys/settings/src/settings_store.c"
+    "${SHELL_COMMON}/compat/subsys/settings/src/settings_init.c"
+    "${SHELL_COMMON}/compat/subsys/settings/src/settings_nvs.c"
+    "${SHELL_COMMON}/compat/subsys/crc/crc8_sw.c")
+set(SHELL_KV_NVS "${SHELL_COMMON}/compat/subsys/kvss/nvs/nvs.c")
 
 add_library(shell OBJECT
     # The Zephyr-compatibility kernel layer on ThreadX
@@ -949,9 +1047,17 @@ add_library(shell OBJECT
     "${SHELL_COMMON}/compat/libc_net/inet.c"
     # The shell on Telnet
     "${SHELL_COMMON}/compat/shell_engine/shell_telnet.c"
+    # The persistent store and "kv": the copies of Zephyr's settings on NVS
+    # in the Zephyr build's format, on the flash device of the store's area
+    # (zephyr_flash_kv.c, on shell/port/flash_kv_os.c), as rp2040-connect's
+    # builds on the Pico SDK have them (common/compat/port/pico_sdk/kv.cmake)
+    ${SHELL_KV_SOURCES}
+    ${SHELL_KV_ZEPHYR_COPIES}
+    "${SHELL_KV_NVS}"
     # This board's part
     "${SHELL_PORT}/commands.c"
     "${SHELL_PORT}/fault_record.c"
+    "${SHELL_PORT}/flash_kv_os.c"
     "${SHELL_PORT}/shell_port.c"
     "${SHELL_PORT}/zephyr_net_socket.c"
     "${SHELL_PORT}/zephyr_net_wifi.c"
@@ -980,7 +1086,13 @@ target_include_directories(shell
     "${SHELL_COMMON}/shell/port"
     "${SHELL_COMMON}/shell/port/generic"
     "${SHELL_COMMON}/compat/lib/utils/getopt"
-    "${PORT_DIR}")                              # board.h, net/wifi.h
+    "${PORT_DIR}"                               # board.h, board_flash.h, net/wifi.h
+    "${SHELL_COMMON}/imu"                       # kv_store.h
+    PRIVATE
+    # The settings' own headers (<settings/settings_nvs.h>; settings_priv.h
+    # for kv_store_wipe.c)
+    "${SHELL_COMMON}/compat/subsys/settings/include"
+    "${SHELL_COMMON}/compat/subsys/settings/src")
 # Z_SHELL_CMD_ROOT_GLOBAL: SHELL_CMD_REGISTER() makes a global root entry for
 # the table.  CONFIG_GETOPT_LONG changes a structure every command sees.
 target_compile_definitions(shell PUBLIC
@@ -1008,7 +1120,18 @@ set_source_files_properties(
     "${SHELL_COMMON}/compat/zephyr_wifi_shell.c"
     "${SHELL_COMMON}/compat/zephyr_wifi_utils.c"
     "${SHELL_PORT}/zephyr_net_socket.c"
+    ${SHELL_KV_SOURCES}
     PROPERTIES COMPILE_OPTIONS "-include;${SHELL_COMMON}/compat/port/generic/common_prelude.h")
+# The copies of Zephyr's settings and NVS, as kv.cmake builds them: the
+# Zephyr build's Kconfig values first (zephyr_kv_config.h), without -Wundef
+# (they test unset options with #if; -Wundef is not on here either), and for
+# nvs.c without the warnings Zephyr's code gives (-Wno-format: uint32_t
+# printed with %d/%u/%x; the other two are -Wextra's, not on here).
+set(_kv_config "-include;${SHELL_COMMON}/compat/port/generic/common_prelude.h;-include;${SHELL_COMMON}/compat/include/zephyr_kv_config.h;-Wno-undef")
+set_source_files_properties(${SHELL_KV_ZEPHYR_COPIES}
+    PROPERTIES COMPILE_OPTIONS "${_kv_config}")
+set_source_files_properties("${SHELL_KV_NVS}"
+    PROPERTIES COMPILE_OPTIONS "${_kv_config};-Wno-format;-Wno-sign-compare;-Wno-unused-parameter")
 
 # ---------------------------------------------------------------------------
 # Second-stage bootloader (bootloader/CMakeLists.txt)
@@ -1077,6 +1200,36 @@ execute_process(
 if(NOT _rc EQUAL 0 OR NOT APP_OFFSET)
     message(FATAL_ERROR "parttool.py could not read ${PARTITION_CSV}: ${_err}")
 endif()
+
+# The persistent store's partition, "settings": where port/board_flash.c lets
+# writes and erases through and looks for it in the table on the board, and
+# what the store (shell/port/flash_kv_os.c) checks its own constants against.
+execute_process(
+    COMMAND "${ESP_PYTHON}" "${PARTITION_TOOLS}/parttool.py" -q
+            --partition-table-offset ${PARTITION_TABLE_OFFSET}
+            --primary-bootloader-offset ${BOOTLOADER_OFFSET}
+            --partition-table-file "${PARTITION_CSV}"
+            get_partition_info --partition-name settings --info offset size type subtype
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _settings ERROR_VARIABLE _err
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+string(REGEX MATCH "^(0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+) ([0-9]+) ([0-9]+)$" _match "${_settings}")
+if(NOT _rc EQUAL 0 OR NOT _match)
+    message(FATAL_ERROR "No \"settings\" partition in ${PARTITION_CSV}: ${_settings}${_err}")
+endif()
+set(BOARD_SETTINGS_DEFINITIONS
+    "BOARD_SETTINGS_OFFSET=${CMAKE_MATCH_1}u" "BOARD_SETTINGS_SIZE=${CMAKE_MATCH_2}u"
+    "BOARD_SETTINGS_TYPE=${CMAKE_MATCH_3}u" "BOARD_SETTINGS_SUBTYPE=${CMAKE_MATCH_4}u")
+set_property(SOURCE
+    "${PORT_DIR}/board_flash.c" "${PORT_DIR}/board_flash_os.c" "${SHELL_PORT}/flash_kv_os.c"
+    APPEND PROPERTY COMPILE_DEFINITIONS ${BOARD_SETTINGS_DEFINITIONS})
+
+# After the link: nothing that the linker script keeps in RAM for the times
+# the cache is off refers to the flash (ldscript/check_ram_refs.py, on the
+# relocations that --emit-relocs keeps).
+add_custom_command(TARGET app POST_BUILD
+    COMMAND "${ESP_PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/ldscript/check_ram_refs.py"
+            "$<TARGET_FILE:app>" "$<TARGET_FILE_DIR:app>/xiao_esp32s3_threadx.map"
+    VERBATIM)
 
 # Flash parameters written into both image headers: 8 MB, DIO, 80 MHz (the
 # same as sdkconfig.h).  The bootloader programs the flash interface from its

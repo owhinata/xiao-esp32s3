@@ -17,16 +17,19 @@
  *
  *   init_cpu()            vectors
  *   init_bss()            .bss (there is no RTC .bss)
- *   ext_mem_init()        cache geometry, code/data split of the MMU table
+ *   ext_mem_init()        the cache HAL's state (cache_hal_init()), cache
+ *                         geometry, code/data split of the MMU table
  *   sys_rtc_init()        esp_rtc_init(): rtc_init(), the regulators and the
  *                         SAR peripherals (o-code calibration after power-on);
  *                         the CPU clock kept running in WAITI (see _start)
  *   system_early_init()   esp_clk_init(): RTC fast and slow clocks, the slow
- *                         clock's calibration, the final CPU clock
+ *                         clock's calibration, the final CPU clock; the
+ *                         cache error interrupt (esp_cache_err_int_init())
  *   init_disable_rtc_wdt  RTC watchdog off (esp_system/startup_funcs.c)
  *   do_core_init()        the ESP_SYSTEM_INIT_FN(..., CORE, ...) hooks: the
  *                         heap (heap_caps_init()), esp_timer's counter, the
- *                         application information on the console
+ *                         application information on the console, the
+ *                         flash driver (port/board_flash.c)
  *   __libc_init_array()   global constructors
  *
  * The rest of ESP-IDF's start-up hooks run later, where ESP-IDF runs them
@@ -35,15 +38,14 @@
  * ThreadX, whose objects can only be made from tx_application_define() on.
  *
  * Left out, with the reason:
- *   - cache_hal_init()/mmu_hal_ctx_init() in ext_mem_init() only set up the
- *     HALs' state for the flash and MMU drivers, which are not built.
- *   - mspi_init(): flash chip state and timing tuning for the flash driver,
- *     and the PSRAM, neither of which is used.
+ *   - mmu_hal_ctx_init() in ext_mem_init() only sets up the MMU HAL's state
+ *     for ESP-IDF's MMU driver (esp_mm), which is not built.
+ *   - mspi_init(): timing tuning, which the flash at 80 MHz in DIO mode does
+ *     not need, and the PSRAM, which is not used.
  *   - system_early_init(): the memory region protection the bootloader has
  *     already set (bootloader_init_mem()); stopping the second core and
  *     Cache_Set_IDROM_MMU_Info(), which only the PSRAM code reads; the
- *     interrupt matrix clear and cache error interrupt of a full ESP-IDF
- *     system.
+ *     interrupt matrix clear of a full ESP-IDF system.
  *   - CONFIG_ESP_SYSTEM_BBPLL_RECALIB: a second PLL calibration that only
  *     bootloaders older than ESP-IDF v5.2 need (bootloader/ is the same
  *     ESP-IDF as the application).
@@ -61,8 +63,10 @@
 #include "esp_err.h"
 #include "esp_intr_alloc.h"
 #include "esp_rom_sys.h"
+#include "esp_private/cache_err_int.h"
 #include "esp_private/esp_sys_event.h"
 #include "esp32s3/rom/cache.h"
+#include "hal/cache_hal.h"
 #include "hal/wdt_hal.h"
 #include "soc/ext_mem_defs.h"
 #include "soc/soc.h"
@@ -109,10 +113,22 @@ extern char _icache_size;       /* absolute symbol, value = size in bytes */
 
 /*
  * ext_mem_init(): what executing from flash needs on top of the bootloader's
- * mapping, which only ever read flash as data.
+ * mapping, which only ever read flash as data.  Not inlined into _start: it
+ * runs before the code in flash may be fetched, and ldscript/check_ram_refs.py
+ * checks it on its own.
  */
-static void cache_init(void)
+static void __attribute__((noinline)) cache_init(void)
 {
+    /*
+     * The cache HAL's state: whether autoload is on, which
+     * cache_hal_resume() restores after the flash driver's windows
+     * (port/board_flash_os.c); the caches and their buses enabled, as the
+     * bootloader left them.
+     */
+    const cache_hal_config_t config = { .core_nums = 1 };
+
+    cache_hal_init(&config);
+
     /* Cache geometry. */
     rom_config_instruction_cache_mode(BOARD_ICACHE_SIZE, BOARD_CACHE_WAYS, BOARD_CACHE_LINE_SIZE);
     Cache_Suspend_DCache();
@@ -184,11 +200,12 @@ void board_sys_pre_app_main(void)
  * CPU interrupts that this firmware routes and serves itself, outside
  * ESP-IDF's interrupt allocator, which must therefore never hand them out
  * (esp_intr_reserve()).  The allocator's table already keeps it off the
- * tick's (6, a "special" timer interrupt), the interrupt watchdog's (24)
- * and the other reserved ones; on one core it leaves 0 free, which the
- * Wi-Fi driver takes for its MAC interrupt (ETS_WMAC_INUM) with
- * xt_set_interrupt_handler() as it does under ESP-IDF, and which would
- * otherwise be the first level-1 interrupt the allocator hands out.
+ * tick's (6, a "special" timer interrupt), the interrupt watchdog's (24),
+ * the cache error interrupt's (25) and the other reserved ones; on one
+ * core it leaves 0 free, which the Wi-Fi driver takes for its MAC interrupt
+ * (ETS_WMAC_INUM) with xt_set_interrupt_handler() as it does under ESP-IDF,
+ * and which would otherwise be the first level-1 interrupt the allocator
+ * hands out.
  */
 static void intr_reserve_own(void)
 {
@@ -251,6 +268,15 @@ void __attribute__((noreturn, section(".entry.text"))) _start(void)
      * UART0 because it is CONFIG_ESP_CONSOLE_UART_NUM.
      */
     esp_perip_clk_init();
+
+    /*
+     * The cache error interrupt (level 4, ETS_CACHEERR_INUM), as ESP-IDF's
+     * system_early_init(): an access to the flash windows while the cache
+     * is off, or an illegal cache operation, ends in panicHandler()
+     * (port/panic.c) through xt_highint4 instead of a stall or wrong data.
+     * It also makes the cache refuse writes to the flash windows.
+     */
+    esp_cache_err_int_init();
 
     /*
      * rtc_init() lets the CPU clock stop while the CPU waits in WAITI

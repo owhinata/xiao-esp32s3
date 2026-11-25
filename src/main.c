@@ -10,9 +10,10 @@
  * by the SYSTIMER alarm interrupt, so the LED rate is a direct check of
  * esp_timer, its interrupt and the FreeRTOS layer.  The FreeRTOS task
  * "main", like ESP-IDF's main task, finishes the start-up from a thread and
- * then ends: ESP-IDF's last start-up hooks, then the Wi-Fi driver and
- * lwIP (port/net/wifi.c, port/net/wlanif.c), then the shell on Telnet
- * (port 23), on lwIP's sockets.
+ * then ends: ESP-IDF's last start-up hooks, the persistent store in flash
+ * (the shell's "kv"), then the Wi-Fi driver and lwIP (port/net/wifi.c,
+ * port/net/wlanif.c), then the shell on Telnet (port 23), on lwIP's
+ * sockets.
  */
 #include <stdio.h>
 
@@ -26,6 +27,8 @@
 #include "app_log.h"
 #include "board.h"
 #include "fault_record.h"
+#include "flash_kv_os.h"
+#include "kv_store.h"
 #include "log_ram.h"
 #include "net/wifi.h"
 #include "shell_serial.h"
@@ -75,9 +78,22 @@ static int blink_start(void)
 
 static void main_task(void *arg)
 {
+    int ret;
+
     (void) arg;
 
     board_sys_pre_app_main();
+    /*
+     * The persistent store (Zephyr's settings on NVS in the "settings"
+     * partition), mounted from a thread as rp2040-connect's application
+     * start does it.  Data that is neither Zephyr's NVS nor erased is not
+     * touched: every call of the store fails with -EILSEQ until "kv wipe
+     * confirm" (shell/common/compat/zephyr_flash_kv.c logs why).
+     */
+    ret = kv_store_init();
+    if (ret) {
+        LOG_ERR("Could not initialize settings: %d", ret);
+    }
     /*
      * The Telnet shell's listening socket and threads, once lwIP runs, as
      * rp2040-connect starts it after its network interface; a failure is
@@ -120,6 +136,13 @@ void tx_application_define(void *first_unused_memory)
         printf("*** The last run ended with a fatal error (\"fault\" shows it again):\n");
         fault_record_print(fault_last());
     }
+
+    /*
+     * The store's area, once the flash driver has checked the partition
+     * table on the board (port/board_flash.c); no flash access here.  A
+     * failure is logged and leaves the store closed.
+     */
+    (void) flash_kv_os_initialize();
 
     /*
      * The FreeRTOS layer (its byte pool and the thread that reaps deleted

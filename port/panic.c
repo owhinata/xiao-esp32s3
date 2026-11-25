@@ -10,8 +10,9 @@
  *                             double and debug exceptions and for coprocessor
  *                             use outside a thread, and by xt_highint4
  *                             (esp_system's highint_hdl.S) for stage 0 of the
- *                             interrupt watchdog (port/watchdog.c).  EXCCAUSE
- *                             then holds a PANIC_RSN_* pseudo cause.
+ *                             interrupt watchdog (port/watchdog.c) and for the
+ *                             cache error interrupt (port/startup.c).
+ *                             EXCCAUSE then holds a PANIC_RSN_* pseudo cause.
  *   _tx_xtensa_stack_error_handler()
  *                             ThreadX's stack check (TX_ENABLE_STACK_CHECKING),
  *                             registered by tx_port.h.
@@ -33,7 +34,9 @@
  *
  * This file and its read-only data run from RAM (see the linker script), so
  * the record is filled and sealed without reading flash: the exception
- * frame, the kernel's state and the CRC.  What may read flash is done after
+ * frame, the kernel's state and the CRC.  A fault inside one of the flash
+ * driver's windows finds the cache suspended: right after that first seal
+ * board_flash_fault() resumes it.  What may read flash is done after
  * that first seal, and the record is sealed again: the uptime
  * (board_uptime_us() and the SYSTIMER HAL are in flash), the thread's name
  * (a string literal is in flash), then the dump, whose console code and
@@ -249,11 +252,14 @@ static size_t text_location(struct fault_record *r, size_t i, const char *file, 
 
 /*
  * The parts that may read flash, each followed by a seal: the uptime, then
- * the name of thread (the running one, or the one the entry names).
+ * the name of thread (the running one, or the one the entry names).  The
+ * cache comes back first if the fault came while the flash driver had it
+ * suspended.
  */
 static void fault_seal(struct fault_record *r, const TX_THREAD *thread)
 {
     fault_record_seal(r);
+    board_flash_fault();
     r->uptime_us = board_uptime_us();
     fault_record_seal(r);
     copy_task_name(r, thread);
@@ -290,9 +296,10 @@ void xt_unhandled_exception(XtExcFrame *frame)
 }
 
 /*
- * For the interrupt watchdog the frame's PS is the one xt_highint4 ran with
- * (level 4); the PS of the code that was stuck is in EPS_4, which nothing
- * has overwritten since (xt_highint4 calls this at level 5).
+ * For the interrupt watchdog and the cache error interrupt the frame's PS
+ * is the one xt_highint4 ran with (level 4); the PS of the code that was
+ * interrupted is in EPS_4, which nothing has overwritten since (xt_highint4
+ * calls this at level 5).
  */
 void panicHandler(void *frame)
 {
@@ -301,7 +308,7 @@ void panicHandler(void *frame)
     struct fault_record *r = fault_begin(int_wdt ? FAULT_REASON_INT_WDT : FAULT_REASON_PANIC);
 
     set_frame(r, f);
-    if (int_wdt) {
+    if (int_wdt || f->exccause == PANIC_RSN_CACHEERR) {
         uint32_t eps4;
 
         __asm__ volatile ("rsr.eps4 %0" : "=a" (eps4));

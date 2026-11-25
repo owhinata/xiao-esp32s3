@@ -156,8 +156,9 @@ SECTIONS
      *     calls (esp_rom_cache_esp32s2_esp32s3.c),
      *   - fault reporting (port/panic.c), which fills and seals the record of
      *     the error before it reads flash: the flash mapping may be the
-     *     thing that is broken, and the watchdogs it stops and arms on the
-     *     way (port/watchdog.c, which also feeds on every tick),
+     *     thing that is broken, or the cache suspended by the flash driver,
+     *     and the watchdogs it stops and arms on the way (port/watchdog.c,
+     *     which also feeds on every tick and in the flash driver's windows),
      *   - what Espressif marks IRAM_ATTR (.iram1), and the objects ESP-IDF
      *     keeps out of flash in an application so that they work with the
      *     cache disabled: the clock code with its analog-register access
@@ -167,11 +168,23 @@ SECTIONS
      *     without the calibration in eFuse) runs the CPU from the crystal
      *     with the PLL off, where ESP-IDF first slows the flash down
      *     (esp_mspi's low-speed mode, not built here); in RAM it does not
-     *     touch the flash meanwhile,
+     *     touch the flash meanwhile, nor does the stand-in it calls at the
+     *     edges (mspi_timing.c),
+     *   - the flash driver, which runs with the cache suspended (port/
+     *     board_flash_os.c: every interrupt up to XCHAL_EXCM_LEVEL masked, so
+     *     nothing else runs then): its OS functions (board_flash_os.c), the
+     *     objects ESP-IDF keeps out of flash for it (spi_flash/linker.lf,
+     *     esp_hal_mspi/linker.lf, esp_hal_cache/linker.lf: the API, the chip
+     *     drivers, the host driver, the HAL's command part, the no-OS cache
+     *     suspend, the cache HAL), the list of chip drivers it searches, and
+     *     the cache flush stand-in it calls (flash_mmap.c).  Whole objects:
+     *     their functions that only run with the cache on (the start-up of
+     *     the chip) cost a little RAM,
      *   - interrupt entry/exit and context switch, with the execution profile
      *     kit they call (tx_execution_profile.c).
      * The same list appears in .dram0.data for the read-only data of these
-     * objects.  Keep the two in step.
+     * objects.  Keep the two in step.  ldscript/check_ram_refs.py checks
+     * after every link that nothing in these objects refers to the flash.
      */
     .iram0.text :
     {
@@ -187,6 +200,23 @@ SECTIONS
         *rtc_init.c.obj(.literal .literal.* .text .text.*)
         *wdt_hal_iram.c.obj(.literal .literal.* .text .text.*)
         *esp_rom_cache_esp32s2_esp32s3.c.obj(.literal .literal.* .text .text.*)
+        *mspi_timing.c.obj(.literal .literal.* .text .text.*)
+        *board_flash_os.c.obj(.literal .literal.* .text .text.*)
+        *flash_mmap.c.obj(.literal .literal.* .text .text.*)
+        *esp_flash_api.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_chip_drivers.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_chip_generic.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_chip_gd.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_chip_winbond.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_chip_mxic.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_chip_issi.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_chip_boya.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_chip_th.c.obj(.literal .literal.* .text .text.*)
+        *memspi_host_driver.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_hal_iram.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_encrypt_hal_iram.c.obj(.literal .literal.* .text .text.*)
+        *spi_flash_os_func_noos.c.obj(.literal .literal.* .text .text.*)
+        *cache_hal.c.obj(.literal .literal.* .text .text.*)
         *xtensa_context.S.obj(.literal .literal.* .text .text.*)
         *xtensa_intr_asm.S.obj(.literal .literal.* .text .text.*)
         *tx_*.S.obj(.literal .literal.* .text .text.*)
@@ -215,6 +245,23 @@ SECTIONS
         *rtc_init.c.obj(.rodata .rodata.*)
         *wdt_hal_iram.c.obj(.rodata .rodata.*)
         *esp_rom_cache_esp32s2_esp32s3.c.obj(.rodata .rodata.*)
+        *mspi_timing.c.obj(.rodata .rodata.*)
+        *board_flash_os.c.obj(.rodata .rodata.*)
+        *flash_mmap.c.obj(.rodata .rodata.*)
+        *esp_flash_api.c.obj(.rodata .rodata.*)
+        *spi_flash_chip_drivers.c.obj(.rodata .rodata.*)
+        *spi_flash_chip_generic.c.obj(.rodata .rodata.*)
+        *spi_flash_chip_gd.c.obj(.rodata .rodata.*)
+        *spi_flash_chip_winbond.c.obj(.rodata .rodata.*)
+        *spi_flash_chip_mxic.c.obj(.rodata .rodata.*)
+        *spi_flash_chip_issi.c.obj(.rodata .rodata.*)
+        *spi_flash_chip_boya.c.obj(.rodata .rodata.*)
+        *spi_flash_chip_th.c.obj(.rodata .rodata.*)
+        *memspi_host_driver.c.obj(.rodata .rodata.*)
+        *spi_flash_hal_iram.c.obj(.rodata .rodata.*)
+        *spi_flash_encrypt_hal_iram.c.obj(.rodata .rodata.*)
+        *spi_flash_os_func_noos.c.obj(.rodata .rodata.*)
+        *cache_hal.c.obj(.rodata .rodata.*)
         *xtensa_context.S.obj(.rodata .rodata.*)
         *xtensa_intr_asm.S.obj(.rodata .rodata.*)
         *xtensa_vectors.S.obj(.rodata .rodata.*)
@@ -276,7 +323,9 @@ SECTIONS
      * the Wi-Fi libraries keep in sections of their own (.wifi0iram,
      * .wifirxiram, ...): ESP-IDF moves those to RAM only for speed
      * (CONFIG_ESP_WIFI_IRAM_OPT and friends, esp_wifi/linker.lf), and here
-     * the cache is never disabled.
+     * nothing of it runs while the flash driver has the cache off: every
+     * interrupt up to XCHAL_EXCM_LEVEL is masked then, and no thread switch
+     * can happen (port/board_flash_os.c).
      */
     .flash.text :
     {
@@ -330,11 +379,14 @@ SECTIONS
          * ESP_SYSTEM_INIT_FN() and friends), one table per event, in the
          * order of their priority, as esp_system/linker.lf lays them out.
          * port/startup.c runs them at the points where ESP-IDF's start-up
-         * does.
+         * does.  Not esp_flash_spi_init.c's (ESP-IDF's init_flash, which
+         * installs ESP-IDF's OS functions for the flash driver, not built
+         * here): port/board_flash.c's hook, at the same priority, sets the
+         * driver up instead, and --gc-sections drops the left-out one.
          */
         . = ALIGN(4);
         _esysev_initc_start = ABSOLUTE(.);
-        KEEP(*(SORT_BY_INIT_PRIORITY(.esysev_initc.*)))
+        KEEP(EXCLUDE_FILE(*esp_flash_spi_init.c.obj) *(SORT_BY_INIT_PRIORITY(.esysev_initc.*)))
         _esysev_initc_end = ABSOLUTE(.);
         _esysev_inits_start = ABSOLUTE(.);
         KEEP(*(SORT_BY_INIT_PRIORITY(.esysev_inits.*)))

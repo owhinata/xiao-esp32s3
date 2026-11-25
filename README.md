@@ -32,7 +32,8 @@ UART0.
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
 | Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect` (WPA2-PSK), `wifi status`, `wifi disconnect` |
 | TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23) |
-| Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, the firmware as the factory application at 0x10000 |
+| Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, a 28 KiB `settings` partition at 0x9000, the firmware as the factory application at 0x10000 |
+| Settings | rp2040-connect's key-value store (Zephyr settings on Zephyr NVS) in the `settings` partition, written through ESP-IDF's esp_flash driver; the `kv` command |
 
 ## Build
 
@@ -111,6 +112,7 @@ Available commands:
   free     : Show the use of malloc()
   help     : Prints the help message.
   id       : Show the board's unique ID (the factory MAC address)
+  kv       : Key-value store: kv set|sethex|get|delete <key> ..., kv wipe confirm
   ifconfig : Show the network interface: ifconfig [wlan0]
              (MAC address, state, IPv4 address, default router, netmask)
   ps       : List the tasks
@@ -120,6 +122,19 @@ Available commands:
   version  : Show the versions of the kernel, HAL and compiler
   wifi     : Wi-Fi commands
 ```
+
+**Settings.**  `kv set <key> <text>`, `kv sethex <key> <hex>`, `kv get <key>`
+(prints hexadecimal) and `kv delete <key>` keep values in the `settings`
+partition; they survive resets, power cycles and `app-flash`.  The store has
+rp2040-connect's format (Zephyr NVS), not ESP-IDF's NVS.  It does not touch
+an area that holds anything else: on a board whose flash still has other
+data at 0x9000 every `kv` command fails until `kv wipe confirm` erases the
+area, once.  A board flashed with an older partition table needs the `flash`
+target once.
+
+While a flash sector is erased (about 40 ms) or a page is written (about
+0.6 ms) the cache is off and interrupts are masked: the LED, the console and
+the network pause for that long.
 
 **Over Wi-Fi.**  `wifi connect -s <ssid> -p <passphrase> -k 1` joins a
 WPA2-PSK access point (the passphrase is not stored yet), `ifconfig` shows
@@ -191,7 +206,7 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
 1. The mask ROM loads the second-stage bootloader from flash offset 0.
 2. The bootloader (`bootloader/CMakeLists.txt`; 75 unmodified ESP-IDF sources)
    sets up the clocks (PLL, CPU at 80 MHz), the flash and the cache, reads the
-   partition table (`partitions.csv`: nvs, phy_init, a 7 MB factory
+   partition table (`partitions.csv`: settings, a 7 MB factory
    application), verifies the application image, loads its RAM segments, maps
    its flash segments and jumps to `_start`.  Its log goes to UART0 and to the
    USB console.
@@ -201,7 +216,8 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    `esp_rtc_init()` (the internal regulators trimmed from eFuse),
    `esp_clk_init()` (calibration of the RTC slow clock, CPU to 240 MHz), the
    RTC watchdog the bootloader armed for the application off, the console,
-   ESP-IDF's core start-up hooks (the heap, esp_timer's clock), the
+   ESP-IDF's core start-up hooks (the heap, esp_timer's clock, the flash
+   driver, which also checks that the partition table has `settings`), the
    constructors, then `main()`.  The later hooks run where ESP-IDF runs
    them: in `tx_application_define()` (esp_timer's task) and in the first
    task, "main", which then starts the Wi-Fi driver in station mode
@@ -229,8 +245,6 @@ wrong:
 
 What ESP-IDF's application start-up does and this firmware does not:
 
-- `esp_perip_clk_init()`, which gates the clocks of unused peripherals: it
-  would stop the USB Serial/JTAG console.
 - PSRAM (8 MB on this board) is not initialized.
 - Only core 0 runs.  ThreadX (non-SMP) is single-core; core 1 is left as the
   ROM leaves it.
@@ -242,7 +256,8 @@ bootloader/     build of ESP-IDF's second-stage bootloader
 cmake/          toolchain file (downloads the compiler), upstream fetch
 partitions.csv  partition table
 script/         flash tool
-ldscript/       linker script
+ldscript/       linker script, and the check run after linking that code placed
+                in RAM does not reference flash
 shell/common/   shell engine and commands, copied from rp2040-connect
 shell/port/     this board's part of the shell
 lib/            upstream sources, fetched by CMake; read-only, not tracked

@@ -66,6 +66,7 @@
  * voltage at 80/160 MHz CPU clock (DIG_DBIAS_80M_160M in soc/rtc.h), as
  * ESP-IDF requires for that flash speed.
  */
+#define CONFIG_ESPTOOLPY_FLASHMODE_DIO          1       /* the flash driver's read mode */
 #define CONFIG_ESPTOOLPY_FLASHMODE_VAL          3       /* DIO, recorded in esp_app_desc_t */
 #define CONFIG_ESPTOOLPY_FLASHFREQ_80M          1
 
@@ -96,6 +97,27 @@
 #define CONFIG_LIBC_NEWLIB                      1
 
 /* ---- Flash layout (partitions.csv) ------------------------------------- */
+
+/*
+ * The flash driver (ESP-IDF's esp_flash on SPI1, port/board_flash.c), with
+ * ESP-IDF's defaults: the chip drivers of the vendors ESP-IDF supports by
+ * default (the octal MXIC one is for octal flash only and left out), its
+ * code in RAM (the driver runs with the cache suspended), no automatic
+ * suspend of an erase, no counters, no verification of writes.  Different
+ * from ESP-IDF, so that each cache-off window (all interrupts masked here)
+ * stays short: a write is cut into chunks of one 256-byte page (ESP-IDF:
+ * 8192 bytes), and an erase is always done sector by sector, never with
+ * the 64 KiB block erase (up to several seconds per command).
+ */
+#define CONFIG_SPI_FLASH_SUPPORT_ISSI_CHIP      1
+#define CONFIG_SPI_FLASH_SUPPORT_MXIC_CHIP      1
+#define CONFIG_SPI_FLASH_SUPPORT_GD_CHIP        1
+#define CONFIG_SPI_FLASH_SUPPORT_WINBOND_CHIP   1
+#define CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP      1
+#define CONFIG_SPI_FLASH_SUPPORT_TH_CHIP        1
+#define CONFIG_SPI_FLASH_PLACE_FUNCTIONS_IN_IRAM 1
+#define CONFIG_SPI_FLASH_WRITE_CHUNK_SIZE       256
+#define CONFIG_SPI_FLASH_BYPASS_BLOCK_ERASE     1
 
 #define CONFIG_BOOTLOADER_OFFSET_IN_FLASH       0x0
 #define CONFIG_PARTITION_TABLE_OFFSET           0x8000
@@ -156,8 +178,9 @@
 /*
  * esp_timer (ESP-IDF's defaults): on SYSTIMER, its interrupt at level 1 and
  * its task on core 0, 3584 bytes of task stack (esp_task.h adds 512).  Its
- * code stays in flash (CONFIG_ESP_TIMER_IN_IRAM off), which nothing here
- * ever disables.
+ * code stays in flash (CONFIG_ESP_TIMER_IN_IRAM off): while the flash
+ * driver has the cache off, every interrupt up to XCHAL_EXCM_LEVEL is
+ * masked (port/board_flash.c), so its handler never runs then.
  */
 #define CONFIG_ESP_TIMER_IMPL_SYSTIMER          1
 #define CONFIG_ESP_TIMER_TASK_STACK_SIZE        3584
@@ -172,8 +195,9 @@
  * TLSF compiled from source (the ESP32-S3's ROM has none), no poisoning and
  * no tracing (ESP-IDF's defaults, which no symbol here needs to say),
  * memory that can execute is allocatable (no memory protection), the
- * allocation functions in flash: this firmware never disables the cache,
- * so the heap is usable from interrupt handlers without being in RAM.
+ * allocation functions in flash: no interrupt handler runs while the flash
+ * driver has the cache off (port/board_flash.c masks them all), so the heap
+ * is usable from interrupt handlers without being in RAM.
  */
 #define CONFIG_HEAP_HAS_EXEC_HEAP               1
 #define CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH   1
@@ -209,7 +233,8 @@
  * ESP-IDF's defaults, except that no calibration data is kept in NVS
  * (CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE off): every start does a
  * full RF calibration.  The init data is the one compiled in
- * (esp32s3/phy_init_data.c; the phy_init partition is not read).
+ * (esp32s3/phy_init_data.c, CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION off; the
+ * partition table has no phy_init partition).
  * CONFIG_ESP_PHY_ENABLE_USB keeps the USB Serial/JTAG controller's PHY
  * clock on while the PHY is set up (the console on the USB-C connector).
  * CONFIG_ESP_WIFI_ENABLED: the PHY is enabled for Wi-Fi, which its PLL
@@ -263,8 +288,8 @@
  *   - no enterprise (802.1X/EAP) and no SAE-PK, so no TLS for the
  *     supplicant;
  *   - CONFIG_ESP_WIFI_IRAM_OPT and CONFIG_ESP_WIFI_RX_IRAM_OPT off: the
- *     libraries' code stays in flash (see the linker script), which
- *     nothing here ever disables.
+ *     libraries' code stays in flash (see the linker script); their
+ *     interrupt is masked while the flash driver has the cache off.
  * Buffers: 10 static and 32 dynamic receive buffers, 32 dynamic transmit
  * buffers, 5 static management receive buffers; A-MPDU both ways with a
  * block-ack window of 6.  The Wi-Fi task is not pinned (one core).

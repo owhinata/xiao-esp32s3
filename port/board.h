@@ -54,14 +54,25 @@ void     board_restart_to_download(void) __attribute__((noreturn));
  * board_tick_interrupt(), the Xtensa layer's tick handler.  Its first stage
  * ends in panicHandler() (port/panic.c); its second resets the system.
  *
+ * board_watchdog_feed(): feeds it (once it runs), with interrupts masked;
+ * for code that keeps the tick masked longer, the flash driver's windows.
  * board_watchdog_fault(): at the entry of the fault path, interrupts
  * masked.  The interrupt watchdog off, the RTC watchdog armed to reset the
  * system if the fault path does not get to its restart.
  * board_watchdog_stop(): both off (board_restart(), right before the reset).
  */
 void     board_tick_interrupt(void);
+void     board_watchdog_feed(void);
 void     board_watchdog_fault(void);
 void     board_watchdog_stop(void);
+
+/*
+ * The fault path, once its first record is sealed (port/panic.c): if the
+ * fault came inside one of the flash driver's windows, waits for the flash
+ * chip to be idle and resumes the cache, so that the rest of the fault path
+ * can read flash (port/board_flash_os.c, in RAM).  Nothing otherwise.
+ */
+void     board_flash_fault(void);
 
 /*
  * Whether the last reset was the interrupt watchdog's second stage: the

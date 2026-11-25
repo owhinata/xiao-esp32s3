@@ -20,7 +20,10 @@
  * the watchdog, so start-up and tx_application_define(), which run with
  * interrupts masked, are not watched.  The stages are set once and every
  * tick only feeds (ESP-IDF sets them again at every tick because it starts
- * with a longer first timeout).
+ * with a longer first timeout).  The flash driver's windows, which mask the
+ * tick for up to one sector erase, feed it themselves
+ * (board_watchdog_feed()); ESP-IDF instead keeps its tick running then,
+ * from RAM.
  *
  * The fault path runs at level 15 for as long as its output takes.  At its
  * entry board_watchdog_fault() does what ESP-IDF's panic handler does
@@ -31,9 +34,10 @@
  * download mode must not be cut short).
  *
  * This file runs from RAM (see the linker script): the tick wrapper is on
- * the interrupt path, and the fault path calls it before the record is
- * sealed.  The wdt_hal functions are in wdt_hal_iram.c, also in RAM; the LL
- * functions are inline, rtc_clk_slow_freq_get_hz() is in rtc_clk.c (RAM),
+ * the interrupt path, the flash driver feeds with the cache off, and the
+ * fault path calls it before the record is sealed.  The wdt_hal functions
+ * are in wdt_hal_iram.c, also in RAM; the LL functions are inline,
+ * rtc_clk_slow_freq_get_hz() is in rtc_clk.c (RAM),
  * esp_rom_route_intr_matrix() is in ROM and xt_ints_on() in
  * xtensa_intr_asm.S (RAM).
  */
@@ -95,6 +99,21 @@ static void int_wdt_start(void)
 }
 
 /*
+ * Feeds once the first tick has started the watchdog.  From the tick and
+ * from the flash driver's cache-off windows (port/board_flash_os.c), both
+ * with interrupts masked.
+ */
+void board_watchdog_feed(void)
+{
+    if (int_wdt.mwdt_dev == NULL) {
+        return;
+    }
+    wdt_hal_write_protect_disable(&int_wdt);
+    wdt_hal_feed(&int_wdt);
+    wdt_hal_write_protect_enable(&int_wdt);
+}
+
+/*
  * The tick interrupt (XT_RTOS_TIMER_INT), called by the layer's dispatcher
  * at the tick's level: feed, then ThreadX's tick.  Fed once per interrupt,
  * also when the interrupt then counts several late ticks.
@@ -104,9 +123,7 @@ void board_tick_interrupt(void)
     if (int_wdt.mwdt_dev == NULL) {
         int_wdt_start();
     }
-    wdt_hal_write_protect_disable(&int_wdt);
-    wdt_hal_feed(&int_wdt);
-    wdt_hal_write_protect_enable(&int_wdt);
+    board_watchdog_feed();
 
     _tx_timer_interrupt();
 }
