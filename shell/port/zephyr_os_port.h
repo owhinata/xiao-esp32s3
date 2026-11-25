@@ -14,8 +14,8 @@
  *                          previous PS
  *   z_os_busy_wait_us(us)  spins on the CPU cycle counter
  *   z_os_clock_us()        the board's uptime (SYSTIMER)
- *   Z_TX_ASSERT(test)      a failed test ends in the fault handler's
- *                          register dump
+ *   Z_TX_ASSERT(test)      a failed test ends in the fault handlers
+ *                          (port/panic.c): dump, record, restart
  *
  * The board functions are called rather than inlined so that no Espressif
  * header, and with it no sdkconfig.h, reaches the shared sources: both
@@ -60,7 +60,7 @@ static inline uint64_t z_os_clock_us(void)
     return board_uptime_us();
 }
 
-/* Stops at the spot: the break instruction ends in panicHandler(). */
+/* Traps at the spot: GCC emits "break 1, 15", which ends in panicHandler(). */
 #define Z_TX_ASSERT(test)                                                      \
     do {                                                                       \
         if (!(test)) {                                                         \

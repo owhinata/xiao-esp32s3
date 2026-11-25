@@ -162,7 +162,6 @@ add_library(threadx STATIC
     "${PORT_DIR}/threadx/src/tx_thread_stack_build.S"
     "${PORT_DIR}/threadx/src/tx_thread_system_return.S"
     "${PORT_DIR}/threadx/src/tx_timer_interrupt.S"
-    "${PORT_DIR}/threadx/src/tx_xtensa_stack_error_handler.c"
     "${PORT_DIR}/threadx/src/tx_port_asm.S"
     "${PORT_DIR}/threadx/src/tx_port_offset_check.c"
     "${PORT_DIR}/threadx/src/tx_clib_newlib.c"
@@ -285,6 +284,7 @@ add_library(shell OBJECT
     "${SHELL_COMMON}/shell/dmesg_shell.c"
     # This board's part
     "${SHELL_PORT}/commands.c"
+    "${SHELL_PORT}/fault_record.c"
     "${SHELL_PORT}/shell_port.c"
     "${SHELL_PORT}/zephyr_sys_clock.c")
 # The order is rp2040-connect's (common/compat/port/pico_sdk/compat.cmake):

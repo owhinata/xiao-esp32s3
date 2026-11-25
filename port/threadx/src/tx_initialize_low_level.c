@@ -38,7 +38,6 @@ VOID _tx_initialize_low_level(VOID)
     extern char __stack;
     extern void _tx_clib_init(void);
     extern void _xt_coproc_init(void);
-    extern VOID _tx_xtensa_stack_error_handler(TX_THREAD *thread);
     uint32_t ccount;
 
     TX_INTERRUPT_SAVE_AREA
@@ -96,8 +95,4 @@ VOID _tx_initialize_low_level(VOID)
 #endif
 
     _tx_clib_init();
-
-#ifdef TX_ENABLE_STACK_CHECKING
-    _tx_thread_stack_error_notify(_tx_xtensa_stack_error_handler);
-#endif
 }

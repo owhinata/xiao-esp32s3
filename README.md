@@ -96,6 +96,7 @@ Available commands:
   date     : Show the date and time (UTC)
   devmem   : Read or write memory: devmem <address> [<width> [<value>]]
   dmesg    : Show logs stored in RAM
+  fault    : Show the fatal error that ended the last run
   free     : Show the use of malloc()
   help     : Prints the help message.
   id       : Show the board's unique ID (the factory MAC address)
@@ -141,8 +142,13 @@ it; that time is counted with the thread, or the idle time, that was
 interrupted or resumed.
 
 `date` counts from 1970-01-01 at boot: nothing sets the clock yet.
-`sys_clock_settime()` is there for a future time source.  rp2040-connect's
-`fault` is not built, because its record is laid out for a Cortex-M.
+`sys_clock_settime()` is there for a future time source.
+
+After a fatal error the board restarts by itself.  `fault` then shows the
+record of the error that ended the last run (the reason, EXCCAUSE, the
+registers, the task, the time); the banner shows it once and `dmesg` has its
+lines.  The record is gone after the next restart.  Its layout is this
+board's (`shell/port/fault_record.h`), not rp2040-connect's Cortex-M one.
 
 ## How it boots
 
@@ -257,7 +263,7 @@ files were copied to `port/threadx/` and adapted to Espressif's layer.  The
 | `inc/tx_api_asm.h` | upstream | Verbatim copy |
 | `src/tx_timer_interrupt.S` | upstream | One symbol renamed (`_xt_tick_divisor`) |
 | `inc/tx_port.h` | upstream | Interrupt lockout and `_xt_coproc_release()` adapted; see the note at the top of the file |
-| `src/tx_initialize_low_level.c`, `tx_thread_interrupt_control.c`, `tx_xtensa_stack_error_handler.c` | upstream | Rewritten for the layer's API and GCC |
+| `src/tx_initialize_low_level.c`, `tx_thread_interrupt_control.c` | upstream | Rewritten for the layer's API and GCC |
 | `src/tx_clib_newlib.c` | new | Replaces upstream `tx_clib_lock.c`, which does not build against Espressif's newlib.  Per-thread `_reent`, `__retarget_lock_*` on `TX_MUTEX`, `_sbrk_r`. |
 | `src/tx_port_asm.S` | new | Coprocessor save-area lookup (taken from upstream `xtensa_coproc_handler.S`), exception hook, interrupt stack |
 | `src/tx_port_offset_check.c` | new | Build-time check of the TCB offsets the assembly uses.  The upstream Xtensa port has no such check; the name follows the one upstream's Cortex-R ports use. |
@@ -274,8 +280,9 @@ they are written against.  Most are byte-identical copies;
 `shell/ORIGIN.md` lists them, the changes, and their licences (MIT,
 Apache-2.0 for the parts derived from Zephyr, BSD-3-Clause for getopt and
 fnmatch).  `shell/port/` is this board's side of that code: the console
-transport, the kernel port header, the log back end, the realtime clock, and
-the commands only the board can answer (`version`, `free`, `ps`).
+transport, the kernel port header, the log back end, the realtime clock, the
+fault record, and the commands only the board can answer (`version`, `free`,
+`ps`).
 
 **This project** (`port/`)
 
@@ -285,7 +292,7 @@ the commands only the board can answer (`version`, `free`, `ps`).
 | `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: a `freertos/FreeRTOS.h` that provides critical sections only, and small stand-in headers for `esp_sleep` and `esp_mspi` |
 | `board.c` | LED, clock readback, uptime, console on USB Serial/JTAG and UART0 (receive interrupts, UART transmit interrupt and queue), device ID, restart |
 | `syscalls.c` | newlib fd 0-2 on the console; once the shell runs, stdout and stderr go through the shell's console layer |
-| `panic.c` | `panicHandler` / `xt_unhandled_exception`: register dump |
+| `panic.c` | Fatal errors (`xt_unhandled_exception`, `panicHandler`, ThreadX's stack check, `_exit`): register dump, record kept across the restart in `.noinit`, restart |
 | `include/sdkconfig.h` | The `CONFIG_` symbols the compiled sources need, shared by the bootloader and the application |
 
 The C library is usable from threads and from `tx_application_define()`, not
@@ -313,12 +320,20 @@ yet.  In the order a failure would show up:
    adds up to about 100% and rises for `console` when the shell is kept busy.
    `date` advances with `uptime`.
 6. `id` prints the MAC address esptool reports.
-7. `devmem 0` ends in a register dump (the fault path), `reboot` comes back
+7. `devmem 0` ends in a register dump and a restart by itself; the banner
+   then shows the record, `fault` shows it again, and after a `reboot`
+   `fault` says there was none.  Writing 0 to the first word of a thread's
+   stack (`devmem <address of blink_stack> 32 0`) ends the same way with
+   `Stack overflow in thread "blink"`.  `reboot` comes back
    to the banner, `bootsel` lets esptool connect, `dmesg` still shows the
    lines of earlier boots after a `reboot`, and `app-flash` alone updates the
    firmware.
 8. The LED blinks at 1 Hz.
 
-Every unhandled exception, including kernel and double exceptions, prints a
-register dump through the ROM printf and halts.  The handler is kept in RAM so
-that it also works when the flash mapping is what failed.
+Every unhandled exception, including kernel and double exceptions, a thread's
+stack overflow and `_exit()` print a register dump through the ROM printf,
+keep a record in RAM that survives the reset, and restart the board.  The
+handler runs from RAM and seals the record before it reads flash, so the
+record survives even when the flash mapping is what failed (the dump itself
+goes through console code in flash).  Not exercised on the board: `_exit()`,
+a break instruction, and a second fault inside the handler.

@@ -13,6 +13,7 @@
 #include "tx_api.h"
 
 #include "board.h"
+#include "fault_record.h"
 
 static inline uint32_t kernel_shell_os_tick_count(void)
 {
@@ -37,13 +38,10 @@ static inline void kernel_shell_os_bootsel(uint32_t delay_ms)
     board_restart_to_download();
 }
 
-/*
- * No record is kept across a fatal error: the fault handlers print a
- * register dump and halt (port/panic.c).
- */
+/* The record fault_boot() took at the start (shell/port/fault_record.c). */
 static inline const struct fault_record *kernel_shell_os_fault_last(void)
 {
-    return NULL;
+    return fault_last();
 }
 
 #endif /* SHELL_PORT_KERNEL_SHELL_OS_IMPL_H */

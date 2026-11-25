@@ -296,14 +296,14 @@ SHELL_CMD_REGISTER(ps, NULL, "List the tasks", cmd_ps);
  * The commands of other sources: "help" of the shell engine
  * (shell/common/compat/shell_engine/shell_engine.c), "dmesg"
  * (shell/common/shell/dmesg_shell.c) and the generic commands of
- * shell/common/shell/kernel_shell.c ("date" reads shell/port/zephyr_sys_clock.c).
- * That file also registers "fault", which is not listed and so is dropped
- * at link time: the fault record is laid out for a Cortex-M exception frame.
+ * shell/common/shell/kernel_shell.c ("date" reads shell/port/zephyr_sys_clock.c,
+ * "fault" the record of shell/port/fault_record.h).
  */
 SHELL_ENGINE_CMD_DECLARE(bootsel);
 SHELL_ENGINE_CMD_DECLARE(date);
 SHELL_ENGINE_CMD_DECLARE(devmem);
 SHELL_ENGINE_CMD_DECLARE(dmesg);
+SHELL_ENGINE_CMD_DECLARE(fault);
 SHELL_ENGINE_CMD_DECLARE(help);
 SHELL_ENGINE_CMD_DECLARE(id);
 SHELL_ENGINE_CMD_DECLARE(reboot);
@@ -316,6 +316,7 @@ const struct shell_engine_cmd shell_engine_cmds[] = {
     SHELL_ENGINE_CMD(date),
     SHELL_ENGINE_CMD(devmem),
     SHELL_ENGINE_CMD(dmesg),
+    SHELL_ENGINE_CMD(fault),
     SHELL_ENGINE_CMD(free),
     SHELL_ENGINE_CMD(help),
     SHELL_ENGINE_CMD(id),

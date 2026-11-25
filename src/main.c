@@ -13,6 +13,7 @@
 
 #include "app_log.h"
 #include "board.h"
+#include "fault_record.h"
 #include "log_ram.h"
 #include "shell_serial.h"
 
@@ -54,6 +55,16 @@ void tx_application_define(void *first_unused_memory)
     LOG_INF("%s: ThreadX %u.%u.%u, CPU clock %lu Hz", BOARD_NAME,
             THREADX_MAJOR_VERSION, THREADX_MINOR_VERSION, THREADX_PATCH_VERSION,
             (unsigned long) board_cpu_freq_hz());
+
+    /*
+     * The record of the fatal error that ended the last run, if any: into
+     * the RAM log after the mark of this start, and below the banner.
+     */
+    fault_boot();
+    if (fault_last() != NULL) {
+        printf("*** The last run ended with a fatal error (\"fault\" shows it again):\n");
+        fault_record_print(fault_last());
+    }
 
     tx_thread_create(&blink_thread, "blink", blink_entry, 0,
                      blink_stack, sizeof(blink_stack),

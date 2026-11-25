@@ -327,6 +327,18 @@ typedef unsigned short                          USHORT;
 
 #ifdef TX_ENABLE_STACK_CHECKING
 #undef TX_DISABLE_STACK_FILLING
+
+/*
+    The handler the stack check calls (port/panic.c).  Registered from
+    tx_initialize_kernel_enter() after the high-level initialization, which
+    clears the registration (_tx_thread_initialize()), and before
+    tx_application_define() creates the first thread.
+*/
+#define TX_INITIALIZE_KERNEL_ENTER_EXTENSION                                        \
+    {                                                                               \
+        extern VOID _tx_xtensa_stack_error_handler(TX_THREAD *thread);              \
+        (VOID) _tx_thread_stack_error_notify(_tx_xtensa_stack_error_handler);       \
+    }
 #endif
 
 

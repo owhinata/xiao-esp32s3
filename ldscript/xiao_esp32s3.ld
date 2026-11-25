@@ -46,8 +46,8 @@
  * stack area, 0x3FCE9710 (HEAP_END, ESP-IDF's APP_USABLE_DRAM_END), which
  * stays clear of the stack _start and tx_application_define() run on.
  *
- * .dram0.noinit (the RAM log) keeps its contents across a reset only if
- * nothing writes there between two runs.  The bootloader writes only its own
+ * .dram0.noinit (the RAM log and the record of a fatal error) keeps its
+ * contents across a reset only if nothing writes there between two runs.  The bootloader writes only its own
  * sections, its stack and the application's loaded segments, and clears only
  * its own .bss; the ROM writes its download-mode buffers when bootsel is
  * used.  .dram0.noinit is therefore kept below 0x3FCD7E00 (NOINIT_END).
@@ -128,7 +128,8 @@ SECTIONS
      *   - the start-up code, which reconfigures the cache that code in flash
      *     is fetched through (port/startup.c), and the ROM cache patches it
      *     calls (esp_rom_cache_esp32s2_esp32s3.c),
-     *   - fault reporting, which has to work when the flash mapping is the
+     *   - fault reporting (port/panic.c), which fills and seals the record of
+     *     the error before it reads flash: the flash mapping may be the
      *     thing that is broken,
      *   - what Espressif marks IRAM_ATTR (.iram1), and the objects ESP-IDF
      *     keeps out of flash in an application so that they work with the
@@ -198,8 +199,9 @@ SECTIONS
 
     /*
      * Not loaded and not cleared by _start: what is here keeps its contents
-     * across a reset that leaves the RAM powered (the RAM log).  It has to stay
-     * below what the ROM and the bootloader write (NOINIT_END, see the top).
+     * across a reset that leaves the RAM powered (the RAM log, and the record
+     * of a fatal error of port/panic.c).  It has to stay below what the ROM
+     * and the bootloader write (NOINIT_END, see the top).
      */
     .dram0.noinit (NOLOAD) :
     {

@@ -121,8 +121,11 @@ static void uart_tx_flush(void);
 
 /*
  * The UART's transmit ring is emptied first, so that the last lines (the
- * shell's "Rebooting", or the download-mode notice) are on the line before
- * the reset; uart_tx_flush() says how long that can take.
+ * shell's "Rebooting", the download-mode notice, or the register dump of
+ * port/panic.c) are on the line before the reset; uart_tx_flush() says how
+ * long that can take.  Polled, so usable with interrupts masked and from the
+ * fault handlers.  The software system reset resets the CPU and the digital
+ * peripherals and leaves the RAM as it is.
  */
 void board_restart(void)
 {

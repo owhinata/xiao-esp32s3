@@ -4,7 +4,9 @@
 [rp2040-connect](https://github.com/owhinata/rp2040-connect) at commit
 `72f3485`: the files of its `common/` directory that this firmware compiles or
 includes, at the same relative paths.  Nothing else of that repository is
-here (no driver, network, Telnet, sensor, Pico SDK or test file).
+here (no driver, network, Telnet, sensor, Pico SDK or test file), and not its
+`compat/include/fault_record.h`, whose record is laid out for a Cortex-M:
+this board has its own in `shell/port/`.
 
 `shell/port/` is written for this board and is not a copy.
 
@@ -16,7 +18,7 @@ diff -r shell/common /path/to/rp2040-connect/common | grep -v '^Only in /path/to
 
 ## Copied files
 
-All 62 files are byte-identical to the original, except the ones below:
+All 61 files are byte-identical to the original, except the ones below:
 
 | File | Change |
 |---|---|
@@ -33,7 +35,7 @@ relative to `shell/common/`; headers without a directory are in
   part and its ThreadX primitives (`compat/kernel_generic/`,
   `compat/port/threadx/`), the boundary headers (`compat/port/*.h`,
   `compat/port/generic/`, `shell/port/`), `shell/kernel_shell.c`,
-  `shell/dmesg_shell.c`, `shell/include/ps_interval.h`, and the headers `fault_record.h`, `shell_console.h`,
+  `shell/dmesg_shell.c`, `shell/include/ps_interval.h`, and the headers `shell_console.h`,
   `shell_engine.h`, `shell_serial.h`, `zephyr_compat_os.h`, `zephyr_heap.h`,
   `zephyr/logging/log.h`, `zephyr/toolchain.h`, `internal/cli.h`,
   `internal/shell_argv.h`, `internal/zephyr_os_internal.h`.
@@ -51,18 +53,14 @@ relative to `shell/common/`; headers without a directory are in
   `compat/subsys/portability/posix/c_lib_ext/fnmatch.c`,
   `compat/include/zephyr/posix/fnmatch.h`.
 
-Four of the copied files are compiled or included for a part only, and the
+Two of the copied files are compiled or included for a part only, and the
 rest of each is dropped at link time or never expanded:
 
-- `shell/kernel_shell.c` also holds `fault`, which the command table
-  (`shell/port/commands.c`) does not list.
 - `compat/port/cpu_load.h` gives `ps` the arithmetic of `cpu_active`
   (`cpu_load_ratio()`); `cpu_load_get()`, which it declares, is not
   defined here.
 - `shell/zshell.c` holds Zephyr's device-name helpers, which no command here
   calls.
-- `compat/include/fault_record.h` is included by `kernel_shell.c`; its
-  functions (`compat/log/fault_record.c`) are not built.
 
 ## This board's part (`shell/port/`)
 
@@ -72,7 +70,8 @@ rest of each is dropped at link time or never expanded:
 | `priorities_os.h` | Priority mapping, time slices, the shell thread's stack (`compat/include/priorities.h`) |
 | `shell_serial_os_impl.h` | Console transport and stdio redirection (`compat/port/shell_serial_os.h`) |
 | `log_ram_os_impl.h` | RAM log: retained section, lock, clock (`compat/port/log_ram_os.h`) |
-| `kernel_shell_os_impl.h` | Tick count, restart, download mode (`shell/port/kernel_shell_os.h`) |
+| `kernel_shell_os_impl.h` | Tick count, restart, download mode, the record for `fault` (`shell/port/kernel_shell_os.h`) |
+| `fault_record.h`, `fault_record.c` | The record of a fatal error that `port/panic.c` keeps across the restart, for an Xtensa exception frame: the counterpart of rp2040-connect's `compat/include/fault_record.h` and `compat/log/fault_record.c`, with the same name so that `shell/kernel_shell.c` includes it (`shell/port` is first on the include path); its text for `fault`, the banner and the RAM log, and taking it at the start |
 | `shell_port.c` | `hwinfo_get_device_id()`, the layer's tick (`zephyr_compat_tick()`) |
 | `zephyr_sys_clock.c` | `sys_clock_gettime()`/`sys_clock_settime()` (`compat/port/generic/zephyr/sys/clock.h`) on the SYSTIMER uptime, as rp2040-connect's `compat/port/pico_sdk/zephyr_sys_clock.c` on the RP2040 TIMER; newlib's `_gettimeofday_r()` and `settimeofday()` on the same clock |
 | `commands.c` | `version`, `free`, `ps` (with the run times of ThreadX's execution profile kit) and the command table `shell_engine_cmds[]` |
