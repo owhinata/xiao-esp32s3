@@ -15,7 +15,11 @@
 #include "freertos/FreeRTOS.h"
 #include "../pthread_local.h"
 
-/* State of the critical sections: the interrupt level to return to and the nesting depth. */
+/*
+ * State of the critical sections (freertos/FreeRTOS.h): the PS the outermost
+ * entry found, and the nesting depth.  Only the thread or handler inside a
+ * section changes them, with the interrupts masked.
+ */
 uint32_t esp_compat_critical_saved_ps;
 uint32_t esp_compat_critical_nesting;
 

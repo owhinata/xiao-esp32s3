@@ -18,8 +18,10 @@
  *                    0x42000000-0x44000000 (instruction bus)
  *                    0x3C000000-0x3E000000 (data bus)
  *
- * (The data cache takes its memory from the top of SRAM2, 0x3FCF0000-
- * 0x3FD00000, which this script does not use.)
+ * (SRAM2, 0x3FCF0000-0x3FD00000, which this script does not use: the
+ * 32 KiB data cache, CONFIG_ESP32S3_DATA_CACHE_32KB, takes its top half,
+ * 0x3FCF8000-0x3FD00000, and the heap its low half, heap/port/esp32s3/
+ * memory_layout.c.)
  *
  * SRAM1 is one memory with two addresses.  This script gives its low 96 KiB
  * to code and the rest to data; the split point below must name the same

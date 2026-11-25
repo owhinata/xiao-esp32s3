@@ -10,7 +10,8 @@
  *
  * (LOG_FORMAT() of esp_log_format.h, without colours); the binary Wi-Fi
  * libraries write the same text in several calls.  The pieces are joined
- * until the line ends.  Then the letter gives the level, the tag becomes the
+ * until the line ends; a piece that does not fit the line buffer
+ * (APP_LOG_LINE_MAX) is cut, and ends its line.  Then the letter gives the level, the tag becomes the
  * module of the RAM log's line, and the timestamp is left out: the RAM log
  * stamps every line with its own clock, the same for all of its lines.  So
  * a line reads
@@ -229,6 +230,10 @@ static int esp_log_ram_vprintf(const char *format, va_list args)
     }
 
     n = vsnprintf(message, sizeof(message), format, args);
+    if (n >= (int) sizeof(message)) {
+        /* Cut short: the rest is lost, the line end with it, so the line ends here. */
+        message[sizeof(message) - 2u] = '\n';
+    }
     if (n > 0) {
         collect(message);
     }

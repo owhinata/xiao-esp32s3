@@ -45,8 +45,10 @@
  * group 44 bytes.  The tasks: esp_timer (4096-byte stack), "main"
  * (src/main.c, 4096, ends after the start-up), the Wi-Fi driver's
  * (6656, WIFI_TASK_STACK_SIZE), the default event loop's "sys_evt"
- * (2816), lwIP's "tcpip" (3584); 26.8 KiB with their task blocks while
- * "main" runs, 21.9 KiB after.  The objects: the event loop's queue (32
+ * (2816), lwIP's "tcpip" (3584); 26.8 KiB with their task blocks.  When
+ * "main" ends, only its task block goes back: the layer's task deletion
+ * frees the block and not the stack xTaskCreate() allocated, so about 26 KiB
+ * stay taken.  The objects: the event loop's queue (32
  * items of 16 bytes) and mutex, the driver's queues, semaphores, mutexes
  * and event groups, lwIP's mutex (sys_arch_protect()), and one semaphore
  * for each thread that calls the driver (the OS adapter's
@@ -63,8 +65,8 @@
 
 /*
  * vTaskDelete() and returning from a task: the layer's own thread
- * "txfr_idle_task" (ThreadX priority 31) deletes the task and frees what it
- * allocated.  Its stack, in StackType_t.
+ * "txfr_idle_task" (ThreadX priority 31) deletes the task and frees its
+ * task block (not its stack, see above).  Its stack, in StackType_t.
  */
 #define INCLUDE_vTaskDelete             1
 #define TX_FREERTOS_IDLE_STACK          (1536u / 4u)

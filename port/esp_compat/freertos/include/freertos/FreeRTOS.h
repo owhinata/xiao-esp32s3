@@ -54,14 +54,27 @@
 
 /*
  * ESP-IDF's critical sections take a spinlock (portMUX_TYPE).  With one core
- * every critical section excludes every other one, so the lock carries no
- * state: entering masks the interrupts up to XCHAL_EXCM_LEVEL (every
- * interrupt with a C handler, what ThreadX's TX_DISABLE masks), never
- * lowering a higher level, and the level saved by the outermost entry and
- * the nesting depth are kept once (freertos_idf.c).  The same code serves
- * threads, interrupt handlers and the time before the kernel runs, as the
- * _ISR and _SAFE forms of ESP-IDF do.  Nothing that can block may be called
- * inside.
+ * a critical section excludes every other one and the lock itself carries no
+ * state: one nesting depth and the PS saved by the outermost entry serve
+ * them all (freertos_idf.c).  Entering masks the interrupts up to
+ * XCHAL_EXCM_LEVEL (every interrupt with a C handler, what ThreadX's
+ * TX_DISABLE masks), never lowering a higher level, and the outermost
+ * entry also disables ThreadX's preemption (_tx_thread_preempt_disable),
+ * as ESP-IDF's FreeRTOS does no switch inside: a service that readies a
+ * more urgent thread inside the section (a semaphore or queue given, also
+ * through the _FromISR forms the Wi-Fi driver uses with interrupts masked)
+ * leaves the switch pending.  The outermost exit restores the PS, enables
+ * preemption again and makes that switch, but only where the caller may
+ * switch: in a thread whose restored PS has the interrupts open.  In an
+ * interrupt handler ThreadX switches when the outermost handler returns;
+ * before the kernel runs and in tx_application_define() there is nothing
+ * to switch to; with the interrupts masked by the caller the switch waits
+ * for the next interrupt (the tick at the latest).  So a section is never
+ * left in another thread, the saved PS is always the entering thread's,
+ * and the same code serves threads, interrupt handlers, the start-up and
+ * the fault path, as the _ISR and _SAFE forms of ESP-IDF do.  Nothing that
+ * can block may be called inside: a ThreadX service that would wait
+ * returns its error at once while preemption is disabled.
  */
 typedef spinlock_t                      portMUX_TYPE;
 
@@ -71,19 +84,35 @@ typedef spinlock_t                      portMUX_TYPE;
 extern uint32_t esp_compat_critical_saved_ps;
 extern uint32_t esp_compat_critical_nesting;
 
+/* ThreadX's (tx_thread.h; freertos_idf.c includes it, which checks these against it). */
+extern volatile UINT _tx_thread_preempt_disable;
+extern TX_THREAD *_tx_thread_current_ptr;
+extern TX_THREAD *_tx_thread_execute_ptr;
+VOID _tx_thread_system_preempt_check(VOID);
+
 static inline __attribute__((always_inline)) void esp_compat_critical_enter(void)
 {
     uint32_t ps = XTOS_SET_MIN_INTLEVEL(XCHAL_EXCM_LEVEL);
 
     if (esp_compat_critical_nesting++ == 0u) {
         esp_compat_critical_saved_ps = ps;
+        _tx_thread_preempt_disable++;
     }
 }
 
 static inline __attribute__((always_inline)) void esp_compat_critical_exit(void)
 {
-    if (--esp_compat_critical_nesting == 0u) {
-        XTOS_RESTORE_INTLEVEL(esp_compat_critical_saved_ps);
+    uint32_t ps;
+
+    if (--esp_compat_critical_nesting != 0u) {
+        return;
+    }
+    ps = esp_compat_critical_saved_ps;
+    _tx_thread_preempt_disable--;
+    XTOS_RESTORE_INTLEVEL(ps);
+    if ((ps & (PS_INTLEVEL_MASK | PS_EXCM)) == 0u && _tx_thread_current_ptr != _tx_thread_execute_ptr) {
+        /* Switches only at thread level (no interrupt handler, no initialization). */
+        _tx_thread_system_preempt_check();
     }
 }
 
@@ -223,6 +252,20 @@ void esp_compat_task_delete(TaskHandle_t xTask);
  * tasks, queues, semaphores, mutexes and event groups are allocated.
  */
 size_t esp_compat_freertos_pool_free(void);
+
+/* ---- Mutexes ------------------------------------------------------------ */
+
+/*
+ * FreeRTOS's mutexes inherit the priority of the most urgent waiter; the
+ * layer's plain mutexes do not (TX_NO_INHERIT), its recursive ones do
+ * (TX_INHERIT), and that is all that differs between the two: both are the
+ * same ThreadX mutex, and xSemaphoreTake() refuses a second take by the
+ * owner whichever made it.  So a plain mutex is made as a recursive one,
+ * for lwIP's sys_mutex_new() (sys_arch_protect() among them) and the Wi-Fi
+ * OS adapter's mutex_create_wrapper().
+ */
+#define xSemaphoreCreateMutex()         xSemaphoreCreateRecursiveMutex()
+#define xSemaphoreCreateMutexStatic(pxMutexBuffer) xSemaphoreCreateRecursiveMutexStatic(pxMutexBuffer)
 
 /* ---- Queues ------------------------------------------------------------- */
 

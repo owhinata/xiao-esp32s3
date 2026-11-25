@@ -36,4 +36,4 @@ Espressif's dispatcher already has (`CONFIG_PM_TRACE`), which
 `inc/xtensa_rtos.h` maps to `_tx_execution_isr_enter`.  The FreeRTOS layer is
 configured by `port/esp_compat/freertos/include/FreeRTOSConfig.h`: FreeRTOS
 priority p is ThreadX priority 31 - p, and the objects it creates come from
-its own byte pool (10 KiB).  Its thread `txfr_idle_task` frees deleted tasks.
+its own byte pool (36 KiB, `configTOTAL_HEAP_SIZE`).  Its thread `txfr_idle_task` frees deleted tasks.

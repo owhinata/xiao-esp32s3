@@ -128,9 +128,10 @@ enum net_wifi_disconn_reason {
  * by itself; the address stays until ip_clear(), at most
  * WLANIF_ADDRESS_HOLD_MS (120 s) after the loss, and a connection that
  * comes back ends with ip_set(), link_up(), connect_result(0) again.
- * Addresses are 4 bytes in network order.  Called with port/net/wifi.c's
- * lock held, from the event loop's task, an esp_timer callback or the
- * caller of net_wifi_disconnect(): they must not block.
+ * Addresses are 4 bytes in network order.  Called one at a time, from the
+ * event loop's task ("sys_evt"), which also runs the requests of
+ * net_wifi_connect() and net_wifi_disconnect(): they must not block, and
+ * must not call those two (which wait for that task).
  */
 struct net_wifi_ops {
     void (*ip_set)(const uint8_t addr[4], const uint8_t netmask[4], const uint8_t gateway[4]);
@@ -155,21 +156,22 @@ struct net_wifi_connect_params {
  * Starts a connection: to an open network without a passphrase, else to
  * one with WPA2-PSK or better (WPA2/WPA3 transition, WPA3-SAE with
  * hash-to-element or hunt-and-peck), management frame protection offered.
+ * The request runs in the event loop's task, and this waits for it.
  * 0: the attempt runs and ends with connect_result() (at most 30 s, the
  * time rp2040-connect's NINA driver waits); -ENETDOWN: the driver is not
  * running; -EALREADY: connected, or connecting again after a loss
  * (net_wifi_disconnect() first); -EBUSY: a scan or an attempt is in
- * progress; -EINVAL: bad parameters; -EIO: the driver refused.  From a
- * thread.
+ * progress; -EINVAL: bad parameters; -EIO: the driver refused; -EDEADLK:
+ * called from the event loop's task.  From a thread.
  */
 int net_wifi_connect(const struct net_wifi_connect_params *params);
 
 /*
- * Ends the connection, the attempt or the reconnection: DHCP releases the
- * address, the driver disconnects, then link_down(), ip_clear() if there
- * was an address, disconnected(NET_WIFI_DISCONN_REQUESTED), before this
- * returns.  0, -ENETDOWN, or -EALREADY when there is nothing to end.
- * From a thread.
+ * Ends the connection, the attempt or the reconnection, in the event
+ * loop's task: DHCP releases the address, link_down(), ip_clear() if there
+ * was an address, disconnected(NET_WIFI_DISCONN_REQUESTED), then the driver
+ * disconnects, before this returns.  0, -ENETDOWN, -EALREADY when there is
+ * nothing to end, -EDEADLK from the event loop's task.  From a thread.
  */
 int net_wifi_disconnect(void);
 

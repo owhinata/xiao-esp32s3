@@ -115,10 +115,11 @@ static uint64_t ps_cycles_to_us(uint64_t cycles)
 _Static_assert(PS_TASKS_MAX <= PS_INTERVAL_TASKS_MAX, "ps keeps every task");
 
 struct ps_row {
-    const TX_THREAD *thread;
+    const TX_THREAD *thread;            /* the row's key only: not read after the lock */
     const char *name;
     UINT priority;
     char state;
+    size_t stack_free;
     uint64_t run_cycles;
     unsigned int permille;
 };
@@ -187,9 +188,14 @@ static size_t ps_stack_free(const TX_THREAD *t)
  * the same interval: 100% less "(idle)", rounded down, with the handlers
  * that interrupt the wait counted as load.
  *
- * The list and the run times are read with interrupts masked (the kit
- * changes them at switches and in interrupts), the stacks after: control
- * blocks and stacks are static.
+ * Everything is read with interrupts masked, the stacks too: the kit
+ * changes the run times at switches and in interrupts, and a FreeRTOS
+ * task's control block and stack go back to the layer's byte pool when
+ * "txfr_idle_task" deletes it.  The longest part is the search for the
+ * fill pattern over the unused part of every stack, a few CPU cycles per
+ * word: the threads' stacks add up to about 15 000 words (60 KiB), well
+ * under 1 ms.  The names are the threads' own strings, which here are all
+ * constants.
  */
 static K_MUTEX_DEFINE(ps_lock);
 
@@ -235,6 +241,7 @@ static int cmd_ps(const struct shell *sh, size_t argc, char **argv)
         row->name = t->tx_thread_name;
         row->priority = t->tx_thread_priority;
         row->state = ps_state(t);
+        row->stack_free = ps_stack_free(t);
         row->run_cycles = ps_thread_cycles(t);
     }
     idle_cycles = _tx_execution_idle_time_total;
@@ -267,7 +274,7 @@ static int cmd_ps(const struct shell *sh, size_t argc, char **argv)
         const struct ps_row *row = &rows[i];
 
         shell_print(sh, "%-20s %-5c %4lu %10lu %4u.%u%%", row->name, row->state,
-                    (unsigned long) row->priority, (unsigned long) ps_stack_free(row->thread),
+                    (unsigned long) row->priority, (unsigned long) row->stack_free,
                     row->permille / 10, row->permille % 10);
     }
     /* The scheduler's wait (waiti in _tx_thread_schedule): not a thread. */

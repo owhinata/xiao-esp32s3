@@ -4,7 +4,8 @@
  * esp_wifi/src/wifi_netif.c, with what esp_netif (esp_netif_lwip.c, not
  * built) does for a DHCP client station, written for the one interface.
  * The lwIP calls run in the tcpip thread (no core locking): the functions
- * of wlanif.h hand them over with tcpip_callback().
+ * of wlanif.h hand them over with tcpip_callback(), and wlanif_stop() waits
+ * until the thread has run them.
  *
  * Frames: the driver hands each received frame to wlanif_input() in its
  * task; as ESP-IDF does by default (CONFIG_LWIP_L2_TO_L3_COPY off,
@@ -17,8 +18,18 @@
  *
  * The address: DHCP's, reported with IP_EVENT_STA_GOT_IP once per
  * connection and on every change (as esp_netif_internal_dhcpc_cb()), and
- * IP_EVENT_STA_LOST_IP when it is gone.  When the access point is lost the
- * address and DHCP stay for WLANIF_ADDRESS_HOLD_MS (the time of esp_netif's
+ * IP_EVENT_STA_LOST_IP when it is gone, each tagged with the session of
+ * wlanif_link_up() (wlanif.h).  The tcpip thread posts them without
+ * waiting: the event loop's task waits for the tcpip thread
+ * (wlanif_stop()) and for the driver, whose task waits for room in the
+ * loop's queue, so the tcpip thread must never wait for the loop.  When the
+ * queue is full (or the heap has no room for the event's copy) the event is
+ * posted again WLANIF_EVENT_RETRY_MS later, until it goes out; what counts
+ * as announced (announced, told) changes only with an event that went
+ * out, and a newer state of the address replaces the event still waiting.
+ *
+ * When the access point is lost the address and DHCP stay for
+ * WLANIF_ADDRESS_HOLD_MS (the time of esp_netif's
  * IP-lost timer, esp_netif_start_ip_lost_timer(), also a sys_timeout() in
  * the tcpip thread), so that TCP connections survive a short loss.  For
  * that time lwIP's link stays up as well and the frames are dropped in
@@ -68,8 +79,11 @@ ESP_EVENT_DEFINE_BASE(IP_EVENT);
 /* The DHCP client's host name (DHCP option 12, what the access point lists). */
 #define WLANIF_HOSTNAME         "xiao-esp32s3"
 
-/* How long the tcpip thread waits for room in the event loop's queue. */
-#define WLANIF_EVENT_POST_MS    1000u
+/* Between the attempts to post an IP event while the event loop's queue is full. */
+#define WLANIF_EVENT_RETRY_MS   20u
+
+/* No event waiting to be posted. */
+#define WLANIF_NO_EVENT         (-1)
 
 /* The changes of esp_netif_lwip.c's DHCP_CB_CHANGE. */
 #define WLANIF_IPV4_CHANGED                                                    \
@@ -82,12 +96,21 @@ static netif_ext_callback_t ext_callback;
 /* Set once wlanif_start() has succeeded. */
 static volatile bool started;
 
+/* wlanif_start()'s and wlanif_stop()'s wait for the tcpip thread. */
+static sys_sem_t tcpip_done;
+
 /* The tcpip thread's own state. */
 static bool dhcp_running;
 static bool associated;         /* the station has an access point (tcpip thread) */
 static bool hold_pending;               /* hold_expired() is due */
-static bool announced;                  /* GOT_IP posted since the link came up */
-static esp_netif_ip_info_t last_info;   /* what GOT_IP last said */
+static uint32_t session;                /* of wlanif_link_up(); 0 when stopped: no events */
+static bool announced;                  /* a GOT_IP went out since the link came up */
+static esp_netif_ip_info_t told;        /* what the last GOT_IP that went out said; 0 after LOST_IP */
+static int32_t waiting_id = WLANIF_NO_EVENT;   /* the event still to post */
+static struct wlanif_ip_event waiting;
+static esp_err_t waiting_err;           /* the first refusal of the event waiting */
+static u32_t waiting_since;             /* sys_now() at that refusal */
+static bool retry_armed;                /* announce_retry() is due */
 
 /* A received frame: lwIP's pbuf on the driver's buffer. */
 struct wlanif_rx_pbuf {
@@ -190,13 +213,73 @@ static err_t wlanif_init(struct netif *netif)
     return ERR_OK;
 }
 
-static void post(int32_t id, const ip_event_got_ip_t *event)
-{
-    esp_err_t err = esp_event_post(IP_EVENT, id, event, sizeof(*event),
-                                   pdMS_TO_TICKS(WLANIF_EVENT_POST_MS));
+static void announce_retry(void *arg);
 
+/* Posts the event waiting, or tries again later. */
+static void announce(void)
+{
+    esp_err_t err;
+
+    if (waiting_id == WLANIF_NO_EVENT) {
+        return;
+    }
+    err = esp_event_post(IP_EVENT, waiting_id, &waiting, sizeof(waiting), 0);
     if (err != ESP_OK) {
-        LOG_ERR("IP event %ld not posted: 0x%x", (long) id, (unsigned int) err);
+        if (waiting_err == ESP_OK) {
+            waiting_err = err;
+            waiting_since = sys_now();
+        }
+        if (!retry_armed) {
+            retry_armed = true;
+            sys_timeout(WLANIF_EVENT_RETRY_MS, announce_retry, NULL);
+        }
+        return;
+    }
+    if (waiting_id == IP_EVENT_STA_GOT_IP) {
+        announced = true;
+        told = waiting.ip.ip_info;
+    } else {
+        announced = false;
+        memset(&told, 0, sizeof(told));
+    }
+    if (waiting_err != ESP_OK) {
+        LOG_WRN("IP event %ld posted %lu ms late: refused with 0x%x", (long) waiting_id,
+                (unsigned long) (sys_now() - waiting_since), (unsigned int) waiting_err);
+    }
+    waiting_id = WLANIF_NO_EVENT;
+    waiting_err = ESP_OK;
+}
+
+/* sys_timeout(), tcpip thread. */
+static void announce_retry(void *arg)
+{
+    (void) arg;
+    retry_armed = false;
+    announce();
+}
+
+/* What is to be announced from now on: id with info, or nothing (WLANIF_NO_EVENT). */
+static void announce_set(int32_t id, const esp_netif_ip_info_t *info, bool changed)
+{
+    if (id != waiting_id) {
+        waiting_err = ESP_OK;
+    }
+    waiting_id = id;
+    if (id == WLANIF_NO_EVENT) {
+        return;
+    }
+    memset(&waiting, 0, sizeof(waiting));
+    waiting.ip.ip_info = *info;
+    waiting.ip.ip_changed = changed;
+    waiting.session = session;
+    announce();
+}
+
+/* A GOT_IP still waiting is dropped: the next link confirms the address anew. */
+static void announce_drop_got_ip(void)
+{
+    if (waiting_id == IP_EVENT_STA_GOT_IP) {
+        announce_set(WLANIF_NO_EVENT, NULL, false);
     }
 }
 
@@ -204,37 +287,34 @@ static void post(int32_t id, const ip_event_got_ip_t *event)
  * The interface's changes, in the tcpip thread.  LWIP_NSC_IPV4_ADDR_VALID
  * comes with every address set, also an unchanged one (DHCP's reboot and
  * renewals): GOT_IP once per link and on changes.  An address that
- * becomes 0.0.0.0 (released, refused or expired): LOST_IP.
+ * becomes 0.0.0.0 (released, refused or expired): LOST_IP, if a GOT_IP
+ * went out for it.  Both are decided against what went out (told), so an
+ * event still waiting is replaced, or dropped, by the newer state.  None
+ * while stopped (session 0).
  */
 static void netif_changed(struct netif *netif, netif_nsc_reason_t reason,
                           const netif_ext_callback_args_t *args)
 {
-    ip_event_got_ip_t event = {0};
+    esp_netif_ip_info_t info = {0};
 
     (void) args;
-    if (netif != &sta_netif) {
+    if (netif != &sta_netif || session == 0u) {
         return;
     }
-    event.ip_info.ip.addr = ip4_addr_get_u32(netif_ip4_addr(netif));
-    event.ip_info.netmask.addr = ip4_addr_get_u32(netif_ip4_netmask(netif));
-    event.ip_info.gw.addr = ip4_addr_get_u32(netif_ip4_gw(netif));
+    info.ip.addr = ip4_addr_get_u32(netif_ip4_addr(netif));
+    info.netmask.addr = ip4_addr_get_u32(netif_ip4_netmask(netif));
+    info.gw.addr = ip4_addr_get_u32(netif_ip4_gw(netif));
 
-    if ((reason & LWIP_NSC_IPV4_ADDR_VALID) != 0 && event.ip_info.ip.addr != 0u) {
-        event.ip_changed = memcmp(&event.ip_info, &last_info, sizeof(last_info)) != 0;
+    if ((reason & LWIP_NSC_IPV4_ADDR_VALID) != 0 && info.ip.addr != 0u) {
+        bool changed = memcmp(&info, &told, sizeof(told)) != 0;
+
         if (hold_pending) {
             sys_untimeout(hold_expired, NULL);
             hold_pending = false;
         }
-        if (!announced || event.ip_changed) {
-            announced = true;
-            last_info = event.ip_info;
-            post(IP_EVENT_STA_GOT_IP, &event);
-        }
-    } else if ((reason & WLANIF_IPV4_CHANGED) != 0 && event.ip_info.ip.addr == 0u
-               && last_info.ip.addr != 0u) {
-        announced = false;
-        memset(&last_info, 0, sizeof(last_info));
-        post(IP_EVENT_STA_LOST_IP, &event);
+        announce_set(!announced || changed ? IP_EVENT_STA_GOT_IP : WLANIF_NO_EVENT, &info, changed);
+    } else if ((reason & WLANIF_IPV4_CHANGED) != 0 && info.ip.addr == 0u) {
+        announce_set(told.ip.addr != 0u ? IP_EVENT_STA_LOST_IP : WLANIF_NO_EVENT, &info, false);
     }
 }
 
@@ -265,8 +345,9 @@ static void hold_expired(void *arg)
 
 static void link_up_in_tcpip(void *arg)
 {
-    (void) arg;
+    session = (uint32_t) (uintptr_t) arg;
     announced = false;
+    announce_drop_got_ip();
     associated = true;
     if (!dhcp_running) {
         /* With the link down DHCP waits for netif_set_link_up(). */
@@ -288,6 +369,7 @@ static void link_down_in_tcpip(void *arg)
     (void) arg;
     associated = false;
     announced = false;
+    announce_drop_got_ip();
     if (!dhcp_running) {
         netif_set_link_down(&sta_netif);
     } else if (!hold_pending) {
@@ -297,9 +379,16 @@ static void link_down_in_tcpip(void *arg)
     }
 }
 
+/* The session ends first: the release's change of the address is announced to no one. */
 static void stop_in_tcpip(void *arg)
 {
     (void) arg;
+    session = 0;
+    announce_set(WLANIF_NO_EVENT, NULL, false);
+    sys_untimeout(announce_retry, NULL);
+    retry_armed = false;
+    announced = false;
+    memset(&told, 0, sizeof(told));
     sys_untimeout(hold_expired, NULL);
     hold_pending = false;
     if (dhcp_running) {
@@ -308,41 +397,44 @@ static void stop_in_tcpip(void *arg)
     }
     netif_set_link_down(&sta_netif);
     associated = false;
-    announced = false;
+    sys_sem_signal(&tcpip_done);
 }
 
-static void call_in_tcpip(tcpip_callback_fn fn)
+static bool call_in_tcpip(tcpip_callback_fn fn, void *arg)
 {
-    if (tcpip_callback(fn, NULL) != ERR_OK) {
+    if (tcpip_callback(fn, arg) != ERR_OK) {
         LOG_ERR("tcpip_callback failed");
+        return false;
     }
+    return true;
 }
 
-void wlanif_link_up(void)
+void wlanif_link_up(uint32_t new_session)
 {
     esp_err_t err = esp_wifi_internal_reg_rxcb(WIFI_IF_STA, wlanif_input);
 
     if (err != ESP_OK) {
         LOG_ERR("esp_wifi_internal_reg_rxcb failed: 0x%x", (unsigned int) err);
     }
-    call_in_tcpip(link_up_in_tcpip);
+    (void) call_in_tcpip(link_up_in_tcpip, (void *) (uintptr_t) new_session);
 }
 
 void wlanif_link_down(void)
 {
-    call_in_tcpip(link_down_in_tcpip);
+    (void) call_in_tcpip(link_down_in_tcpip, NULL);
 }
 
 void wlanif_stop(void)
 {
-    call_in_tcpip(stop_in_tcpip);
+    if (call_in_tcpip(stop_in_tcpip, NULL)) {
+        sys_arch_sem_wait(&tcpip_done, 0);
+    }
 }
 
 /* The rest of the start, in the tcpip thread (tcpip_init()'s callback). */
 static void start_in_tcpip(void *arg)
 {
-    sys_sem_t *done = arg;
-
+    (void) arg;
     if (netif_add(&sta_netif, IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4, NULL, wlanif_init,
                   tcpip_input) == NULL) {
         LOG_ERR("netif_add failed");
@@ -351,25 +443,23 @@ static void start_in_tcpip(void *arg)
         netif_set_default(&sta_netif);
         netif_set_up(&sta_netif);
     }
-    sys_sem_signal(done);
+    sys_sem_signal(&tcpip_done);
 }
 
 int wlanif_start(void)
 {
     uint8_t secret[16];
-    sys_sem_t done;
 
     /* esp_netif_init(): the secret of the TCP initial sequence numbers, then the thread. */
     esp_fill_random(secret, sizeof(secret));
     lwip_init_tcp_isn(esp_log_timestamp(), secret);
 
-    if (sys_sem_new(&done, 0) != ERR_OK) {
+    if (sys_sem_new(&tcpip_done, 0) != ERR_OK) {
         LOG_ERR("lwIP not started: no semaphore");
         return -1;
     }
-    tcpip_init(start_in_tcpip, &done);
-    sys_arch_sem_wait(&done, 0);
-    sys_sem_free(&done);
+    tcpip_init(start_in_tcpip, NULL);
+    sys_arch_sem_wait(&tcpip_done, 0);
     if (!netif_is_up(&sta_netif)) {
         return -1;
     }

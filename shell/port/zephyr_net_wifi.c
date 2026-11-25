@@ -258,7 +258,7 @@ static void wifi_evt_thread(void *p1, void *p2, void *p3)
 	}
 }
 
-/* The driver's side (struct net_wifi_ops; port/net/wifi.c's lock held) ---- */
+/* The driver's side (struct net_wifi_ops; in the event loop's task) ------- */
 
 static void ip_set(const uint8_t *addr, const uint8_t *netmask, const uint8_t *gateway)
 {

@@ -5,16 +5,32 @@
  *
  * The interface reports what happens to its IPv4 address as ESP-IDF's
  * esp_netif does, with the events of the default event loop:
- * IP_EVENT_STA_GOT_IP (ip_event_got_ip_t: the address, netmask and gateway
- * DHCP gave, after every connection and whenever they change) and
- * IP_EVENT_STA_LOST_IP (the address is gone), posted from the tcpip
- * thread.  The functions below hand their work to the tcpip thread and
- * return; it runs it in the order the calls were made.
+ * IP_EVENT_STA_GOT_IP (the address, netmask and gateway DHCP gave, after
+ * every connection and whenever they change) and IP_EVENT_STA_LOST_IP (the
+ * address is gone), posted from the tcpip thread, each until it goes out.
+ * Their data is struct wlanif_ip_event: ESP-IDF's ip_event_got_ip_t, then
+ * the session they belong to.  The functions below hand their work to the
+ * tcpip thread; it runs it in the order the calls were made.  Called from
+ * one thread at a time.
  */
 #ifndef PORT_NET_WLANIF_H
 #define PORT_NET_WLANIF_H
 
 #include <stdbool.h>
+#include <stdint.h>
+
+#include "esp_netif_types.h"
+
+/*
+ * A session runs from wlanif_link_up() with its number until
+ * wlanif_stop(); losses (wlanif_link_down()) and links that come back
+ * within it keep it.  No events outside one.  An event still in the
+ * loop's queue when its session has ended carries the old number.
+ */
+struct wlanif_ip_event {
+    ip_event_got_ip_t ip;
+    uint32_t session;
+};
 
 /*
  * Milliseconds the address is kept after the station loses its access
@@ -39,9 +55,11 @@ bool wlanif_started(void);
 /*
  * The station is associated (WIFI_EVENT_STA_CONNECTED): received frames go
  * to lwIP from now on, the link is up, and DHCP starts, or asks again for
- * the address the interface still has (DHCP's reboot).
+ * the address the interface still has (DHCP's reboot).  session (not 0)
+ * tags the IP events from now on: a new number after wlanif_stop(), the
+ * same while the session runs.
  */
-void wlanif_link_up(void);
+void wlanif_link_up(uint32_t session);
 
 /*
  * The station has lost its access point: the link is down; the address,
@@ -51,7 +69,11 @@ void wlanif_link_up(void);
  */
 void wlanif_link_down(void);
 
-/* The station leaves on request: DHCP releases the address and stops, the link is down. */
+/*
+ * The station leaves: the session ends, DHCP releases the address and
+ * stops, the link is down.  Returns when the tcpip thread has done it, so
+ * that the release goes out before the driver is told to disconnect.
+ */
 void wlanif_stop(void);
 
 #endif

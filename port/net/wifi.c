@@ -8,25 +8,42 @@
  * esp_wifi_start() powers the radio and enables the PHY, which on the
  * first start loads the init data compiled into esp_phy and runs the full
  * RF calibration; from then on esp_phy tracks the PLL against the
- * temperature once a second, in an esp_timer callback.  The driver's
- * events (WIFI_EVENT) and the interface's (IP_EVENT, wlanif.h) arrive in
- * the default event loop's task ("sys_evt"), where this file follows the
- * connection; the handlers only change the state and hand work on (to the
- * tcpip thread, to net_wifi_ops), so that the loop is never held up.
+ * temperature once a second, in an esp_timer callback.
+ *
+ * Everything that changes the connection runs in the default event loop's
+ * task ("sys_evt"), one event after the other: the driver's events
+ * (WIFI_EVENT), the interface's (IP_EVENT, wlanif.h), and this file's own
+ * (ctl_base): the requests of net_wifi_connect() and net_wifi_disconnect(),
+ * whose callers wait for the result, and the expiries of the two timers,
+ * which their callbacks post from the esp_timer task without waiting.  So
+ * the connection has one writer, and the driver, the interface
+ * (wlanif.h) and the interface's owner (net_wifi_ops) are called in the
+ * order of the events, from that task, as ESP-IDF's station examples call
+ * esp_wifi_connect() from their event handlers.  None of them waits for
+ * the loop: the tcpip thread posts its events without waiting (wlanif.c),
+ * and the driver's task only waits for room in the loop's queue.
  *
  * The connection:
  *
  *   IDLE --net_wifi_connect()--> CONNECTING: the driver associates (the
  *     passphrase's PMK, PBKDF2 in software, then the handshake), DHCP
- *     runs; 30 s for both (lease_timer).
+ *     runs; 30 s for both (lease timer).
  *   CONNECTING --address--> CONNECTED, connect_result(0); --driver's
  *     disconnection or 30 s--> IDLE, connect_result(status).
  *   CONNECTED --loss without a request--> RECONNECTING: link down (the
  *     address stays, wlanif.h), disconnected(reason); a new attempt every
- *     RETRY_DELAY_MS (retry_timer), 30 s for each after its association.
+ *     RETRY_DELAY_US (retry timer), 30 s for each after its association.
  *   RECONNECTING --address--> CONNECTED, connect_result(0); the address
  *     goes (ip_clear()) when the loss lasts WLANIF_ADDRESS_HOLD_MS.
  *   any --net_wifi_disconnect()--> IDLE.
+ *
+ * What belongs to an earlier attempt is told apart: the interface's events
+ * carry the session (wlanif.h), a new one for each attempt from IDLE; a
+ * timer's expiry counts only once its deadline is reached, so a callback
+ * that was already on its way when the timer was stopped or set again
+ * finds no deadline or a later one; and the driver's report of a
+ * disconnection this file asked for (WIFI_REASON_ASSOC_LEAVE) is taken as
+ * that, once, not as the failure of the attempt that may follow it.
  *
  * Reconnecting after a loss is this board's policy, in one place
  * (reconnect_*() below).
@@ -67,6 +84,9 @@ LOG_MODULE_REGISTER(net_wifi);
 /* Between the reconnection attempts after a loss. */
 #define RETRY_DELAY_US          (3 * 1000000LL)
 
+/* A timer's expiry that found the loop's queue full is posted again this much later. */
+#define TIMER_REPOST_US         (10 * 1000LL)
+
 enum conn_state {
     CONN_IDLE,
     CONN_CONNECTING,
@@ -74,29 +94,56 @@ enum conn_state {
     CONN_RECONNECTING,
 };
 
+/* This file's events, in the default event loop. */
+static const char ctl_base[] = "NET_WIFI_CTL";
+
+enum ctl_event {
+    CTL_CONNECT,                /* net_wifi_connect() */
+    CTL_DISCONNECT,             /* net_wifi_disconnect() */
+    CTL_LEASE,                  /* the lease timer expired */
+    CTL_RETRY,                  /* the retry timer expired */
+};
+
 /*
- * The state, under lock.  The driver's functions are called outside it:
- * its task posts events with the loop's queue full waiting for "sys_evt",
- * which may be waiting for the lock.
+ * What other threads read (net_wifi_status(), net_wifi_scan()), under
+ * lock, which is held only while these are read or written; the loop's
+ * task writes conn and associated, net_wifi_scan() and
+ * net_wifi_scan_end() scanning and the scan's callback.
  */
 static TX_MUTEX lock;
-static volatile bool sta_started;       /* set once the driver runs (WIFI_EVENT_STA_START) */
 static enum conn_state conn;
 static bool associated;                 /* WIFI_EVENT_STA_CONNECTED .. _DISCONNECTED */
 static bool scanning;
+static void (*scan_done)(int status, unsigned int count, void *arg);
+static void *scan_arg;
+
+static volatile bool sta_started;       /* set once the driver runs (WIFI_EVENT_STA_START) */
+static TX_THREAD *loop_thread;          /* the loop's task, from WIFI_EVENT_STA_START on */
+
+/* The loop's task's own. */
+static uint32_t session;                /* the attempt's interface session; 0 in IDLE */
+static uint32_t last_session;
+static bool leave_pending;              /* esp_wifi_disconnect() called, its report not seen */
 static bool have_address;
 static uint8_t address[4];              /* the address ip_set() gave, while have_address */
 static int64_t attempt_start;           /* esp_timer_get_time() of the attempt's start */
 static int64_t associated_at;
 static int64_t lost_at;                 /* of the connection that RECONNECTING replaces */
 static unsigned int retries;
+static int64_t lease_deadline;          /* esp_timer_get_time() it expires at; 0: stopped */
+static int64_t retry_deadline;
 static esp_timer_handle_t lease_timer;
 static esp_timer_handle_t retry_timer;
 static const struct net_wifi_ops *ops;
 
-/* The scan in progress. */
-static void (*scan_done)(int status, unsigned int count, void *arg);
-static void *scan_arg;
+/*
+ * The request in the loop: one at a time (request_lock), its network
+ * (CTL_CONNECT; wiped once taken) and its result (request_done).
+ */
+static TX_MUTEX request_lock;
+static TX_SEMAPHORE request_done;
+static wifi_config_t request_config;
+static int request_result;
 
 static void lock_take(void)
 {
@@ -106,6 +153,23 @@ static void lock_take(void)
 static void lock_give(void)
 {
     (void) tx_mutex_put(&lock);
+}
+
+static enum conn_state conn_get(void)
+{
+    enum conn_state c;
+
+    lock_take();
+    c = conn;
+    lock_give();
+    return c;
+}
+
+static void conn_set(enum conn_state c)
+{
+    lock_take();
+    conn = c;
+    lock_give();
 }
 
 static unsigned long ms_since(int64_t start)
@@ -275,13 +339,52 @@ static int disconn_reason_of(uint8_t reason)
     }
 }
 
-static void timer_restart(esp_timer_handle_t timer, int64_t timeout_us)
+/* Timers ------------------------------------------------------------------ */
+
+static void timer_arm(esp_timer_handle_t timer, int64_t *deadline, int64_t timeout_us)
 {
+    *deadline = esp_timer_get_time() + timeout_us;
     (void) esp_timer_stop(timer);
     (void) esp_timer_start_once(timer, (uint64_t) timeout_us);
 }
 
-/* The address goes, from the interface's owner too.  Under lock. */
+static void timer_disarm(esp_timer_handle_t timer, int64_t *deadline)
+{
+    *deadline = 0;
+    (void) esp_timer_stop(timer);
+}
+
+/* An expiry that counts: the timer is armed and its deadline is reached.  It is disarmed then. */
+static bool timer_due(int64_t *deadline)
+{
+    if (*deadline == 0 || esp_timer_get_time() < *deadline) {
+        return false;
+    }
+    *deadline = 0;
+    return true;
+}
+
+/* In the esp_timer task: the expiry goes to the loop; with its queue full, again a little later. */
+static void timer_post(esp_timer_handle_t timer, int32_t id)
+{
+    if (esp_event_post(ctl_base, id, NULL, 0, 0) != ESP_OK) {
+        (void) esp_timer_start_once(timer, (uint64_t) TIMER_REPOST_US);
+    }
+}
+
+static void lease_fired(void *arg)
+{
+    (void) arg;
+    timer_post(lease_timer, CTL_LEASE);
+}
+
+static void retry_fired(void *arg)
+{
+    (void) arg;
+    timer_post(retry_timer, CTL_RETRY);
+}
+
+/* The address goes, from the interface's owner too. */
 static void address_clear(void)
 {
     if (have_address) {
@@ -290,78 +393,187 @@ static void address_clear(void)
     }
 }
 
-/* Reconnection after a loss --------------------------------------------- */
+/* The driver is told to leave; its report of that is not an attempt's failure. */
+static void driver_leave(void)
+{
+    leave_pending = true;
+    (void) esp_wifi_disconnect();
+}
 
-/* A loss without a request: the attempts start.  Under lock. */
+/* The end of an attempt, or of a connection, back to IDLE: the session ends. */
+static void go_idle(void)
+{
+    timer_disarm(lease_timer, &lease_deadline);
+    conn_set(CONN_IDLE);
+    session = 0;
+    wlanif_stop();
+}
+
+/* Reconnection after a loss ----------------------------------------------- */
+
+/* A loss without a request: the attempts start. */
 static void reconnect_request(void)
 {
     retries = 0;
     lost_at = esp_timer_get_time();
-    timer_restart(retry_timer, RETRY_DELAY_US);
+    timer_arm(retry_timer, &retry_deadline, RETRY_DELAY_US);
 }
 
-/* An attempt failed: the next one later.  Under lock. */
+/* An attempt failed: the next one later. */
 static void reconnect_failed(void)
 {
     retries++;
-    timer_restart(retry_timer, RETRY_DELAY_US);
+    timer_arm(retry_timer, &retry_deadline, RETRY_DELAY_US);
 }
 
-/* net_wifi_disconnect(): no more attempts.  Under lock. */
+/* net_wifi_disconnect(): no more attempts. */
 static void reconnect_pause(void)
 {
-    (void) esp_timer_stop(retry_timer);
+    timer_disarm(retry_timer, &retry_deadline);
 }
 
-/* retry_timer, in the esp_timer task. */
-static void retry_expired(void *arg)
+/* The retry timer: the next attempt, unless a scan runs (then later). */
+static void retry_due(void)
 {
-    bool go;
+    bool busy;
     esp_err_t err;
 
-    (void) arg;
-    lock_take();
-    go = conn == CONN_RECONNECTING;
-    if (go) {
-        attempt_start = esp_timer_get_time();
-    }
-    lock_give();
-    if (!go) {
+    if (!timer_due(&retry_deadline)) {
         return;
     }
+    lock_take();
+    busy = scanning;
+    lock_give();
+    if (conn_get() != CONN_RECONNECTING) {
+        return;
+    }
+    if (busy) {
+        timer_arm(retry_timer, &retry_deadline, RETRY_DELAY_US);
+        return;
+    }
+    attempt_start = esp_timer_get_time();
     err = esp_wifi_connect();
     if (err != ESP_OK) {
         LOG_DBG("esp_wifi_connect failed: 0x%x", (unsigned int) err);
-        lock_take();
-        if (conn == CONN_RECONNECTING) {
-            reconnect_failed();
-        }
-        lock_give();
+        reconnect_failed();
     }
 }
 
 /* ------------------------------------------------------------------------ */
 
-/* lease_timer: the attempt has not reached an address in time (esp_timer task). */
-static void lease_expired(void *arg)
+/* The lease timer: the attempt has not reached an address in time. */
+static void lease_due(void)
 {
-    bool disconnect = false;
+    bool linked;
 
-    (void) arg;
+    if (!timer_due(&lease_deadline)) {
+        return;
+    }
     lock_take();
-    if (conn == CONN_CONNECTING) {
+    linked = associated;
+    lock_give();
+    switch (conn_get()) {
+    case CONN_CONNECTING:
         LOG_INF("connection failed: no address in %lu ms", ms_since(attempt_start));
-        conn = CONN_IDLE;
-        wlanif_stop();
+        go_idle();
         ops->connect_result(NET_WIFI_CONN_TIMEOUT);
-        disconnect = true;
-    } else if (conn == CONN_RECONNECTING && associated) {
-        /* WIFI_EVENT_STA_DISCONNECTED follows and schedules the next attempt. */
-        disconnect = true;
+        driver_leave();
+        break;
+    case CONN_RECONNECTING:
+        if (linked) {
+            LOG_DBG("attempt %u failed: no address", retries + 1u);
+            wlanif_link_down();
+            driver_leave();
+            reconnect_failed();
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* net_wifi_connect()'s request, with request_config. */
+static int connect_request(void)
+{
+    esp_err_t err;
+    int result = 0;
+
+    lock_take();
+    if (conn == CONN_CONNECTED || conn == CONN_RECONNECTING) {
+        result = -EALREADY;
+    } else if (conn == CONN_CONNECTING || scanning) {
+        result = -EBUSY;
+    } else {
+        conn = CONN_CONNECTING;
     }
     lock_give();
-    if (disconnect) {
-        (void) esp_wifi_disconnect();
+    if (result != 0) {
+        return result;
+    }
+    if (++last_session == 0u) {
+        last_session = 1;
+    }
+    session = last_session;
+    attempt_start = esp_timer_get_time();
+    timer_arm(lease_timer, &lease_deadline, CONNECT_TIMEOUT_US);
+
+    err = esp_wifi_set_config(WIFI_IF_STA, &request_config);
+    if (err == ESP_OK) {
+        err = esp_wifi_connect();
+    }
+    if (err != ESP_OK) {
+        LOG_ERR("connection refused by the driver: 0x%x", (unsigned int) err);
+        timer_disarm(lease_timer, &lease_deadline);
+        conn_set(CONN_IDLE);
+        session = 0;
+        return -EIO;
+    }
+    return 0;
+}
+
+/*
+ * net_wifi_disconnect()'s request.  The release goes out before the driver
+ * leaves: wlanif_stop() returns once the tcpip thread has sent it.
+ */
+static int disconnect_request(void)
+{
+    if (conn_get() == CONN_IDLE) {
+        return -EALREADY;
+    }
+    reconnect_pause();
+    go_idle();
+    ops->link_down();
+    address_clear();
+    ops->disconnected(NET_WIFI_DISCONN_REQUESTED);
+    driver_leave();
+    return 0;
+}
+
+/* This file's events, in the event loop's task. */
+static void on_ctl_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void) arg;
+    (void) base;
+    (void) data;
+
+    switch (id) {
+    case CTL_CONNECT:
+        request_result = connect_request();
+        memset(&request_config, 0, sizeof(request_config));
+        (void) tx_semaphore_put(&request_done);
+        break;
+    case CTL_DISCONNECT:
+        request_result = disconnect_request();
+        (void) tx_semaphore_put(&request_done);
+        break;
+    case CTL_LEASE:
+        lease_due();
+        break;
+    case CTL_RETRY:
+        retry_due();
+        break;
+    default:
+        break;
     }
 }
 
@@ -390,43 +602,52 @@ static void scan_finish(const wifi_event_sta_scan_done_t *info)
     }
 }
 
-static void sta_connected(const wifi_event_sta_connected_t *c)
+static void sta_connected(void)
 {
-    (void) c;
+    enum conn_state c;
+
     lock_take();
     associated = true;
-    associated_at = esp_timer_get_time();
-    if (conn == CONN_CONNECTING || conn == CONN_RECONNECTING) {
-        if (conn == CONN_CONNECTING) {
-            LOG_INF("associated in %lu ms", ms_since(attempt_start));
-        } else {
-            timer_restart(lease_timer, CONNECT_TIMEOUT_US);
-        }
-        wlanif_link_up();
-    }
+    c = conn;
     lock_give();
+    /* The driver reports in order: a disconnection asked for earlier has been reported by now. */
+    leave_pending = false;
+    associated_at = esp_timer_get_time();
+    if (c == CONN_CONNECTING) {
+        LOG_INF("associated in %lu ms", ms_since(attempt_start));
+        wlanif_link_up(session);
+    } else if (c == CONN_RECONNECTING) {
+        timer_arm(lease_timer, &lease_deadline, CONNECT_TIMEOUT_US);
+        wlanif_link_up(session);
+    }
 }
 
 static void sta_disconnected(const wifi_event_sta_disconnected_t *d)
 {
     bool was_associated;
+    enum conn_state c;
 
     lock_take();
     was_associated = associated;
     associated = false;
-    switch (conn) {
+    c = conn;
+    lock_give();
+    if (leave_pending && d->reason == WIFI_REASON_ASSOC_LEAVE) {
+        leave_pending = false;
+        LOG_INF("disconnected: %s (%u)", reason_name(d->reason), (unsigned int) d->reason);
+        return;
+    }
+    switch (c) {
     case CONN_CONNECTING:
         LOG_INF("connection failed: %s (%u), RSSI %d", reason_name(d->reason),
                 (unsigned int) d->reason, (int) d->rssi);
-        (void) esp_timer_stop(lease_timer);
-        conn = CONN_IDLE;
-        wlanif_stop();
+        go_idle();
         ops->connect_result(conn_status_of(d->reason));
         break;
     case CONN_CONNECTED:
         LOG_INF("connection lost: %s (%u), RSSI %d", reason_name(d->reason),
                 (unsigned int) d->reason, (int) d->rssi);
-        conn = CONN_RECONNECTING;
+        conn_set(CONN_RECONNECTING);
         wlanif_link_down();
         ops->link_down();
         ops->disconnected(disconn_reason_of(d->reason));
@@ -435,7 +656,7 @@ static void sta_disconnected(const wifi_event_sta_disconnected_t *d)
     case CONN_RECONNECTING:
         LOG_DBG("attempt %u failed: %s (%u)", retries + 1u, reason_name(d->reason),
                 (unsigned int) d->reason);
-        (void) esp_timer_stop(lease_timer);
+        timer_disarm(lease_timer, &lease_deadline);
         if (was_associated) {
             wlanif_link_down();
         }
@@ -445,7 +666,6 @@ static void sta_disconnected(const wifi_event_sta_disconnected_t *d)
         LOG_INF("disconnected: %s (%u)", reason_name(d->reason), (unsigned int) d->reason);
         break;
     }
-    lock_give();
 }
 
 /* The driver's events, in the event loop's task. */
@@ -456,6 +676,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
 
     switch (id) {
     case WIFI_EVENT_STA_START:
+        loop_thread = tx_thread_identify();
         sta_started = true;
         LOG_INF("station started");
         break;
@@ -467,7 +688,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         scan_finish(data);
         break;
     case WIFI_EVENT_STA_CONNECTED:
-        sta_connected(data);
+        sta_connected();
         break;
     case WIFI_EVENT_STA_DISCONNECTED:
         sta_disconnected(data);
@@ -477,38 +698,50 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
 }
 
-static void got_ip(const ip_event_got_ip_t *event)
+static void got_ip(const struct wlanif_ip_event *event)
 {
+    uint8_t got[4];
     uint8_t mask[4];
     uint8_t gw[4];
-    const uint8_t *a;
+    enum conn_state c;
+    bool linked;
     esp_err_t err;
 
     lock_take();
-    if (conn == CONN_IDLE) {
-        /* Bound just before a disconnection that released it. */
-        lock_give();
+    c = conn;
+    linked = associated;
+    lock_give();
+    /*
+     * Another session's (one that has ended), or one from before the loss
+     * that the loop delivers after it: the new link confirms the address.
+     */
+    if (session == 0u || event->session != session || (c != CONN_CONNECTED && !linked)) {
         return;
     }
-    memcpy(address, &event->ip_info.ip.addr, 4);
-    memcpy(mask, &event->ip_info.netmask.addr, 4);
-    memcpy(gw, &event->ip_info.gw.addr, 4);
-    have_address = true;
-    a = address;
-    if (conn == CONN_CONNECTING) {
+    memcpy(got, &event->ip.ip_info.ip.addr, 4);
+    memcpy(mask, &event->ip.ip_info.netmask.addr, 4);
+    memcpy(gw, &event->ip.ip_info.gw.addr, 4);
+    if (c == CONN_CONNECTING) {
         LOG_INF("%u.%u.%u.%u, netmask %u.%u.%u.%u, gateway %u.%u.%u.%u: DHCP in %lu ms, "
-                "connected in %lu ms", a[0], a[1], a[2], a[3], mask[0], mask[1], mask[2],
-                mask[3], gw[0], gw[1], gw[2], gw[3], ms_since(associated_at),
+                "connected in %lu ms", got[0], got[1], got[2], got[3], mask[0], mask[1],
+                mask[2], mask[3], gw[0], gw[1], gw[2], gw[3], ms_since(associated_at),
                 ms_since(attempt_start));
-    } else if (conn == CONN_RECONNECTING) {
+    } else if (c == CONN_RECONNECTING) {
         LOG_INF("%u.%u.%u.%u, netmask %u.%u.%u.%u, gateway %u.%u.%u.%u: reconnected "
-                "%lu ms after the loss, attempt %u", a[0], a[1], a[2], a[3], mask[0], mask[1],
-                mask[2], mask[3], gw[0], gw[1], gw[2], gw[3], ms_since(lost_at), retries + 1u);
+                "%lu ms after the loss, attempt %u", got[0], got[1], got[2], got[3], mask[0],
+                mask[1], mask[2], mask[3], gw[0], gw[1], gw[2], gw[3], ms_since(lost_at),
+                retries + 1u);
     } else {
         LOG_INF("%u.%u.%u.%u, netmask %u.%u.%u.%u, gateway %u.%u.%u.%u: new from DHCP",
-                a[0], a[1], a[2], a[3], mask[0], mask[1], mask[2], mask[3], gw[0], gw[1],
-                gw[2], gw[3]);
+                got[0], got[1], got[2], got[3], mask[0], mask[1], mask[2], mask[3], gw[0],
+                gw[1], gw[2], gw[3]);
     }
+    /* A different address replaces the one the interface's owner has. */
+    if (have_address && memcmp(address, got, 4) != 0) {
+        address_clear();
+    }
+    memcpy(address, got, 4);
+    have_address = true;
     /* wifi_default.c's handler of IP_EVENT_STA_GOT_IP. */
     err = esp_wifi_internal_set_sta_ip();
     if (err != ESP_OK) {
@@ -516,26 +749,26 @@ static void got_ip(const ip_event_got_ip_t *event)
     }
     ops->ip_set(address, mask, gw);
     ops->link_up();
-    if (conn != CONN_CONNECTED) {
-        (void) esp_timer_stop(lease_timer);
-        conn = CONN_CONNECTED;
+    if (c != CONN_CONNECTED) {
+        timer_disarm(lease_timer, &lease_deadline);
+        conn_set(CONN_CONNECTED);
         ops->connect_result(NET_WIFI_CONN_SUCCESS);
     }
-    lock_give();
 }
 
-static void lost_ip(void)
+static void lost_ip(const struct wlanif_ip_event *event)
 {
-    lock_take();
-    if (have_address) {
-        LOG_INF("%u.%u.%u.%u dropped%s", address[0], address[1], address[2], address[3],
-                conn == CONN_RECONNECTING ? ": no connection for 120 s" : " by DHCP");
-        if (conn == CONN_CONNECTED) {
-            ops->link_down();
-        }
-        address_clear();
+    enum conn_state c = conn_get();
+
+    if (session == 0u || event->session != session || !have_address) {
+        return;
     }
-    lock_give();
+    LOG_INF("%u.%u.%u.%u dropped%s", address[0], address[1], address[2], address[3],
+            c == CONN_RECONNECTING ? ": no connection for 120 s" : " by DHCP");
+    if (c == CONN_CONNECTED) {
+        ops->link_down();
+    }
+    address_clear();
 }
 
 /* The interface's events (wlanif.h), in the event loop's task. */
@@ -549,7 +782,7 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
         got_ip(data);
         break;
     case IP_EVENT_STA_LOST_IP:
-        lost_ip();
+        lost_ip(data);
         break;
     default:
         break;
@@ -573,8 +806,8 @@ void net_wifi_set_ops(const struct net_wifi_ops *table)
 
 int net_wifi_start(void)
 {
-    static const esp_timer_create_args_t lease_args = {.callback = lease_expired, .name = "wifi_lease"};
-    static const esp_timer_create_args_t retry_args = {.callback = retry_expired, .name = "wifi_retry"};
+    static const esp_timer_create_args_t lease_args = {.callback = lease_fired, .name = "wifi_lease"};
+    static const esp_timer_create_args_t retry_args = {.callback = retry_fired, .name = "wifi_retry"};
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     size_t heap_before;
     size_t pool_before;
@@ -584,7 +817,9 @@ int net_wifi_start(void)
         LOG_ERR("Wi-Fi left off: the last run ended with a fatal error in this bring-up (\"fault\")");
         return -1;
     }
-    if (ops == NULL || tx_mutex_create(&lock, "net_wifi", TX_INHERIT) != TX_SUCCESS) {
+    if (ops == NULL || tx_mutex_create(&lock, "net_wifi", TX_INHERIT) != TX_SUCCESS
+        || tx_mutex_create(&request_lock, "net_wifi_request", TX_INHERIT) != TX_SUCCESS
+        || tx_semaphore_create(&request_done, "net_wifi_request", 0) != TX_SUCCESS) {
         LOG_ERR("Wi-Fi left off: no interface owner or no lock");
         return -1;
     }
@@ -602,6 +837,8 @@ int net_wifi_start(void)
                   esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL))
         || failed("esp_event_handler_register",
                   esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, on_ip_event, NULL))
+        || failed("esp_event_handler_register",
+                  esp_event_handler_register(ctl_base, ESP_EVENT_ANY_ID, on_ctl_event, NULL))
         || failed("esp_wifi_set_mode", esp_wifi_set_mode(WIFI_MODE_STA))
         || failed("esp_wifi_start", esp_wifi_start())
         || failed("esp_wifi_set_ps", esp_wifi_set_ps(WIFI_PS_NONE))
@@ -614,6 +851,27 @@ int net_wifi_start(void)
             (unsigned int) heap_caps_get_free_size(MALLOC_CAP_DEFAULT), (unsigned int) pool_before,
             (unsigned int) esp_compat_freertos_pool_free());
     return 0;
+}
+
+/*
+ * Runs a request in the loop's task and returns its result; the caller
+ * holds request_lock.  -EDEADLK in that task itself, which would wait for
+ * itself.
+ */
+static int request(int32_t id)
+{
+    esp_err_t err;
+
+    if (tx_thread_identify() == loop_thread) {
+        return -EDEADLK;
+    }
+    err = esp_event_post(ctl_base, id, NULL, 0, portMAX_DELAY);
+    if (err != ESP_OK) {
+        LOG_ERR("request %ld not posted: 0x%x", (long) id, (unsigned int) err);
+        return -EIO;
+    }
+    (void) tx_semaphore_get(&request_done, TX_WAIT_FOREVER);
+    return request_result;
 }
 
 int net_wifi_mac(uint8_t mac[NET_WIFI_MAC_LEN])
@@ -678,8 +936,7 @@ void net_wifi_scan_end(void)
 
 int net_wifi_connect(const struct net_wifi_connect_params *params)
 {
-    wifi_config_t config;
-    esp_err_t err;
+    int result;
 
     if (params == NULL || params->ssid == NULL || params->ssid_len == 0u
         || params->ssid_len > NET_WIFI_SSID_MAX_LEN
@@ -691,73 +948,36 @@ int net_wifi_connect(const struct net_wifi_connect_params *params)
         return -ENETDOWN;
     }
 
+    (void) tx_mutex_get(&request_lock, TX_WAIT_FOREVER);
     /* Zephyr's ESP32 driver's (drivers/wifi/esp32/src/esp_wifi_drv.c) for the same request. */
-    memset(&config, 0, sizeof(config));
-    memcpy(config.sta.ssid, params->ssid, params->ssid_len);
+    memset(&request_config, 0, sizeof(request_config));
+    memcpy(request_config.sta.ssid, params->ssid, params->ssid_len);
     if (params->passphrase != NULL) {
-        memcpy(config.sta.password, params->passphrase, params->passphrase_len);
-        config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+        memcpy(request_config.sta.password, params->passphrase, params->passphrase_len);
+        request_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     } else {
-        config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+        request_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
     }
-    config.sta.pmf_cfg.capable = true;
-    config.sta.pmf_cfg.required = false;
-    config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-
-    lock_take();
-    if (conn == CONN_CONNECTED || conn == CONN_RECONNECTING) {
-        lock_give();
-        return -EALREADY;
-    }
-    if (conn == CONN_CONNECTING || scanning) {
-        lock_give();
-        return -EBUSY;
-    }
-    conn = CONN_CONNECTING;
-    attempt_start = esp_timer_get_time();
-    timer_restart(lease_timer, CONNECT_TIMEOUT_US);
-    lock_give();
-
-    err = esp_wifi_set_config(WIFI_IF_STA, &config);
-    if (err == ESP_OK) {
-        err = esp_wifi_connect();
-    }
-    memset(&config, 0, sizeof(config));
-    if (err != ESP_OK) {
-        LOG_ERR("connection refused by the driver: 0x%x", (unsigned int) err);
-        lock_take();
-        if (conn == CONN_CONNECTING) {
-            (void) esp_timer_stop(lease_timer);
-            conn = CONN_IDLE;
-        }
-        lock_give();
-        return -EIO;
-    }
-    return 0;
+    request_config.sta.pmf_cfg.capable = true;
+    request_config.sta.pmf_cfg.required = false;
+    request_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    result = request(CTL_CONNECT);
+    memset(&request_config, 0, sizeof(request_config));
+    (void) tx_mutex_put(&request_lock);
+    return result;
 }
 
 int net_wifi_disconnect(void)
 {
+    int result;
+
     if (!sta_started) {
         return -ENETDOWN;
     }
-    lock_take();
-    if (conn == CONN_IDLE) {
-        lock_give();
-        return -EALREADY;
-    }
-    reconnect_pause();
-    (void) esp_timer_stop(lease_timer);
-    conn = CONN_IDLE;
-    /* The release goes out before the driver leaves: the tcpip thread is more urgent than callers. */
-    wlanif_stop();
-    ops->link_down();
-    address_clear();
-    ops->disconnected(NET_WIFI_DISCONN_REQUESTED);
-    lock_give();
-
-    (void) esp_wifi_disconnect();
-    return 0;
+    (void) tx_mutex_get(&request_lock, TX_WAIT_FOREVER);
+    result = request(CTL_DISCONNECT);
+    (void) tx_mutex_put(&request_lock);
+    return result;
 }
 
 static enum net_wifi_phy phy_of(wifi_phy_mode_t mode)

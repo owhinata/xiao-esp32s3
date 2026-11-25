@@ -24,6 +24,7 @@
  *                         the CPU clock kept running in WAITI (see _start)
  *   system_early_init()   esp_clk_init(): RTC fast and slow clocks, the slow
  *                         clock's calibration, the final CPU clock; the
+ *                         peripheral clock gates (esp_perip_clk_init()); the
  *                         cache error interrupt (esp_cache_err_int_init())
  *   init_disable_rtc_wdt  RTC watchdog off (esp_system/startup_funcs.c)
  *   do_core_init()        the ESP_SYSTEM_INIT_FN(..., CORE, ...) hooks: the

@@ -215,6 +215,8 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    geometry and the boundary between code and data in the shared MMU table,
    `esp_rtc_init()` (the internal regulators trimmed from eFuse),
    `esp_clk_init()` (calibration of the RTC slow clock, CPU to 240 MHz), the
+   peripheral clock gates as ESP-IDF leaves them (`esp_perip_clk_init()`),
+   the cache error interrupt, the
    RTC watchdog the bootloader armed for the application off, the console,
    ESP-IDF's core start-up hooks (the heap, esp_timer's clock, the flash
    driver, which also checks that the partition table has `settings`), the
