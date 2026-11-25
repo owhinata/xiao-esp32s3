@@ -25,8 +25,9 @@ while the ROM still waits; the RTC watchdog reset of esptool's
 chip counts as booting from flash again, which lets timer group 0's
 flash-boot watchdog run (its enable bit is set by every reset and the ROM's
 download mode does not clear it); it would reset the chip within a second,
-so it is switched off before the bit is cleared.  If no shell answers (no
-firmware, or a hung one) the user has to put the chip into download mode by
+so it is switched off before the bit is cleared.  If no shell answers, or the
+firmware restarts before it runs the command (no firmware, a hung one, or one
+that keeps crashing), the user has to put the chip into download mode by
 hand (hold B, tap R, release B); the script waits a bounded time for that.
 
 Exit status: 0 on success, esptool's status if esptool fails, 2 otherwise.
@@ -144,15 +145,18 @@ def enter_download_mode(port, prompt, shell_timeout, rom_timeout, button_timeout
     if wait_for(port, prompt, shell_timeout):
         log("the shell answered; sending bootsel")
         port.write(b"bootsel\r")
-        if not wait_for(port, ROM_DOWNLOAD_BANNER, rom_timeout):
-            raise FlashError(
-                f"bootsel was sent, but the ROM did not report the download mode "
-                f"within {rom_timeout:g} s")
-        log("the ROM waits for download")
-        return
+        if wait_for(port, ROM_DOWNLOAD_BANNER, rom_timeout):
+            log("the ROM waits for download")
+            return
+        # A firmware that restarts over and over prints a prompt and is
+        # gone before it runs the command.
+        log(f"bootsel was sent, but the ROM did not report the download mode "
+            f"within {rom_timeout:g} s")
+    else:
+        log(f"no shell answered on {port.port}")
 
-    log(f"no shell answered on {port.port}.  Hold B (BOOT), tap R (RESET), "
-        f"release B; waiting {button_timeout:g} s for the ROM")
+    log(f"Hold B (BOOT), tap R (RESET), release B; waiting {button_timeout:g} s "
+        f"for the ROM")
     if not wait_for(port, ROM_DOWNLOAD_BANNER, button_timeout):
         raise FlashError(
             "the ROM did not report the download mode.  Check the wiring "
