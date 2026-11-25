@@ -27,8 +27,12 @@
 
 #include "spinlock.h"
 
-/* ESP-IDF's FreeRTOS.h brings these in (its idf_additions.h). */
+/*
+ * ESP-IDF's FreeRTOS.h brings these in (its idf_additions.h, and
+ * portmacro.h of its Xtensa port).
+ */
 #include "esp_heap_caps.h"
+#include "esp_rom_sys.h"
 
 #ifndef portNUM_PROCESSORS
 #define portNUM_PROCESSORS              1

@@ -50,7 +50,9 @@
  *   - _xt_coproc_release() taking the layer's (save area, core) arguments,
  *   - TX_THREAD_EXTENSION_3 empty unless TX_ENABLE_EXECUTION_CHANGE_NOTIFY
  *     (tx_api.h declares the execution profile fields for
- *     TX_EXECUTION_PROFILE_ENABLE).
+ *     TX_EXECUTION_PROFILE_ENABLE),
+ *   - no _tx_clib_heap_start/_end: the C library's malloc() is ESP-IDF's
+ *     heap (esp_libc heap.c on heap_caps), not newlib's on _sbrk_r().
  */
 
 /* Thread-safe C library support (port/threadx/src/tx_clib_newlib.c). */
@@ -87,7 +89,6 @@
 #ifdef TX_THREAD_SAFE_CLIB
 struct TX_THREAD_STRUCT;
 
-extern char *_tx_clib_heap_start, *_tx_clib_heap_end;
 extern void _tx_clib_reent_init (struct TX_THREAD_STRUCT *thread_ptr);
 extern void _tx_clib_reent_cleanup (struct TX_THREAD_STRUCT *thread_ptr, int partial);
 extern void _tx_clib_thread_setup(struct TX_THREAD_STRUCT *thread_ptr);

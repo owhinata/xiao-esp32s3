@@ -34,8 +34,6 @@ VOID _tx_initialize_low_level(VOID)
 {
     extern char _xt_interrupt_stack;
     extern char _xt_interrupt_stack_top;
-    extern char _end;
-    extern char __stack;
     extern void _tx_clib_init(void);
     extern void _xt_coproc_init(void);
     uint32_t ccount;
@@ -54,17 +52,12 @@ VOID _tx_initialize_low_level(VOID)
     memset(&_xt_interrupt_stack, 0xEF, (size_t) (&_xt_interrupt_stack_top - &_xt_interrupt_stack));
     _tx_thread_system_stack_ptr = &_xt_interrupt_stack_top;
 
-    /* First free RAM address, handed to tx_application_define(). */
-    _tx_initialize_unused_memory = (void *) (((UINT) &_end + 15u) & ~0xFu);
-
     /*
-     * Default C library heap: the upper half of the RAM between the end of
-     * the linked image and __stack.  tx_application_define() may override
-     * both bounds before the first allocation.
+     * No free RAM to hand to tx_application_define(): everything the image
+     * does not occupy already belongs to ESP-IDF's heap (heap_caps_init()
+     * in the start-up code), which malloc() and heap_caps_malloc() serve.
      */
-    _tx_clib_heap_end   = &__stack;
-    _tx_clib_heap_start =
-        (char *) (((UINT) _tx_initialize_unused_memory / 2u + (UINT) _tx_clib_heap_end / 2u) & ~0xFu);
+    _tx_initialize_unused_memory = TX_NULL;
 
 #if XCHAL_CP_NUM > 0
     /*

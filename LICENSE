@@ -42,9 +42,13 @@ notice.
   Copyright (c) The Regents of the University of California and
   contributors; its text is in those files.
 
-The sources that the build fetches into lib/ (Eclipse ThreadX, Espressif's
-HAL components and a few ESP-IDF components) are not part of this repository
-and carry their own licences.
+What the build fetches into lib/ is not part of this repository and carries
+its own licence: Eclipse ThreadX (MIT), Espressif's HAL components and a few
+ESP-IDF components (Apache-2.0, a few files under other licences named in
+them), the TLSF allocator of ESP-IDF's heap (espressif/tlsf, 3-Clause BSD
+License, Copyright (c) Matthew Conte), and Espressif's PHY and Wi-Fi
+binary libraries (espressif/esp-phy-lib, espressif/esp32-wifi-lib: Apache
+License, Version 2.0, in object form).
 
 
                                  Apache License

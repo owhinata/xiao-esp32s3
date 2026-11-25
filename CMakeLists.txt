@@ -35,11 +35,33 @@ fetch_upstream(esp-idf
     SPARSE
     components/esp_image_verify
     components/esp_bootloader_format
-    components/esp_mspi/include)
+    components/esp_mspi/include
+    components/esp_mspi/mspi_timing_tuning/include
+    components/esp_mspi/esp_mspi_align
+    components/esp_sleep/include
+    components/nvs_flash/include
+    components/esp_partition/include
+    components/esp_netif/include)
+# Git submodules of ESP-IDF that the mirror records only as commits (empty
+# directories), fetched at those commits: the TLSF allocator of the heap
+# component, and the PHY and Wi-Fi binary libraries (this chip's directory).
+fetch_upstream(tlsf
+    https://github.com/espressif/tlsf
+    2867f6883a12920b1969ff9624c0ab0e4185c2ce)
+fetch_upstream(esp-phy-lib
+    https://github.com/espressif/esp-phy-lib
+    11d2c35733d6ec14a5653930a4cd948a75cd2fde
+    SPARSE esp32s3)
+fetch_upstream(esp32-wifi-lib
+    https://github.com/espressif/esp32-wifi-lib
+    07e8d017cd5ed6a9d9fd7463fe254f0820a526da
+    SPARSE esp32s3)
 
 set(ESP_HAL  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-hal-3rdparty/components")
 set(ESP_IDF  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-idf/components")
 set(TX_DIR   "${CMAKE_CURRENT_LIST_DIR}/lib/threadx")
+set(TLSF_DIR "${CMAKE_CURRENT_LIST_DIR}/lib/tlsf")
+set(ESP_PHY_LIB "${CMAKE_CURRENT_LIST_DIR}/lib/esp-phy-lib/esp32s3")
 set(TX_PORT  "${TX_DIR}/ports/xtensa/xcc")
 set(PORT_DIR "${CMAKE_CURRENT_LIST_DIR}/port")
 
@@ -69,8 +91,9 @@ add_compile_options(
 # has a common include/ and a per-chip esp32s3/include/.  Only the ones whose
 # headers this firmware reaches are listed.
 set(ESP_HAL_PERIPHERALS
-    esp_hal_cache esp_hal_clock esp_hal_gpio esp_hal_gpspi esp_hal_regi2c
-    esp_hal_systimer esp_hal_timg esp_hal_uart esp_hal_usb esp_hal_wdt)
+    esp_hal_ana_conv esp_hal_cache esp_hal_clock esp_hal_dma esp_hal_gpio esp_hal_gpspi
+    esp_hal_regi2c esp_hal_rtc_timer esp_hal_systimer esp_hal_timg esp_hal_uart
+    esp_hal_usb esp_hal_wdt)
 set(ESP_HAL_PERIPHERAL_INCLUDES)
 foreach(_c IN LISTS ESP_HAL_PERIPHERALS)
     foreach(_d "${ESP_HAL}/${_c}/include" "${ESP_HAL}/${_c}/esp32s3/include")
@@ -88,9 +111,9 @@ target_include_directories(esp_hal INTERFACE
     "${ESP_HAL}/soc/include"
     "${ESP_HAL}/soc/esp32s3/include"
     "${ESP_HAL}/soc/esp32s3/register"
-    "${ESP_HAL}/hal/include"
-    "${ESP_HAL}/hal/esp32s3/include"
     "${ESP_HAL}/hal/platform_port/include"
+    "${ESP_HAL}/hal/esp32s3/include"
+    "${ESP_HAL}/hal/include"
     ${ESP_HAL_PERIPHERAL_INCLUDES}
     "${ESP_HAL}/esp_common/include"
     "${ESP_HAL}/esp_rom/include"
@@ -105,8 +128,13 @@ target_include_directories(esp_hal INTERFACE
     "${ESP_HAL}/esp_hw_support/port/esp32s3/include"
     "${ESP_HAL}/esp_system/include"
     "${ESP_HAL}/log/include"
-    # esp_sleep is not in esp-hal-3rdparty; the part rtc_clk.c needs
-    "${PORT_DIR}/esp_compat/esp_sleep/include")
+    "${ESP_HAL}/heap/include"
+    # Components that are not in esp-hal-3rdparty: headers from ESP-IDF
+    # (lib/esp-idf): esp_sleep's (rtc_clk.c) and esp_mspi's (rtc_init.c,
+    # heap_align_hw.c).
+    "${ESP_IDF}/esp_sleep/include"
+    "${ESP_IDF}/esp_mspi/mspi_timing_tuning/include"
+    "${ESP_IDF}/esp_mspi/esp_mspi_align/include")
 target_link_libraries(esp_hal INTERFACE "${ESP_HAL}/xtensa/esp32s3/libxt_hal.a")
 target_link_options(esp_hal INTERFACE
     "-T${ESP_HAL}/soc/esp32s3/ld/esp32s3.peripherals.ld"
@@ -190,8 +218,7 @@ add_library(freertos STATIC
     "${PORT_DIR}/esp_compat/freertos/freertos_idf.c")
 target_include_directories(freertos PUBLIC
     "${PORT_DIR}/esp_compat/freertos/include"
-    "${TX_FREERTOS}"
-    "${ESP_HAL}/heap/include")                  # esp_heap_caps.h, as in ESP-IDF
+    "${TX_FREERTOS}")
 target_link_libraries(freertos PUBLIC threadx esp_hal)
 # pcTaskGetName() hands a "const char **" where tx_thread_info_get() takes a
 # "CHAR **"; only the constness differs.
@@ -210,21 +237,68 @@ add_executable(app
     "${PORT_DIR}/panic.c"
     "${PORT_DIR}/watchdog.c"
     "${PORT_DIR}/syscalls.c"
-    "${PORT_DIR}/esp_compat/heap_caps.c"
-    # esp-hal-3rdparty sources this image needs, compiled as they are
+    "${PORT_DIR}/esp_log_ram.c"
+    "${PORT_DIR}/net/wifi.c"
+    "${PORT_DIR}/esp_compat/esp_sleep.c"
+    "${PORT_DIR}/esp_compat/mspi_timing.c")
+
+# ---------------------------------------------------------------------------
+# Espressif sources this image needs, compiled as they are
+# ---------------------------------------------------------------------------
+# From esp-hal-3rdparty, and from ESP-IDF and its TLSF (lib/esp-idf,
+# lib/tlsf) what the mirror does not carry.  An object library: its objects are linked as they are, nothing is dropped
+# for being unreferenced before --gc-sections, so every ESP-IDF start-up hook
+# they define (ESP_SYSTEM_INIT_FN() and friends, kept by the linker script)
+# runs.  These sources are built as in ESP-IDF, with esp_libc's
+# platform_include ahead of the C library's headers (ESP-IDF's _lock_t and
+# _lock_*(), POSIX additions); this repository's own sources are not.
+add_library(esp_idf OBJECT
     # The application description the second-stage bootloader reads from the
     # start of the read-only data (esp_app_desc_t; see the linker script).
     "${ESP_HAL}/esp_app_format/esp_app_desc.c"
     "${ESP_HAL}/esp_hal_wdt/wdt_hal_iram.c"
-    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_clk.c"
-    # rtc_init.c: only for the regulator bias variables rtc_clk.c reads;
-    # rtc_init() itself is not called yet (see README) and is dropped by
-    # --gc-sections together with what it would need.
-    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_init.c"
-    "${ESP_HAL}/esp_hw_support/regi2c_ctrl.c"
     "${ESP_HAL}/esp_rom/patches/esp_rom_sys.c"
     # Work-arounds for bugs in the ROM's cache suspend/write-back routines.
     "${ESP_HAL}/esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c"
+    # Clocks and the RTC domain as ESP-IDF's start-up sets them up
+    # (esp_rtc_init(), esp_clk_init()): regulators, RTC slow clock and its
+    # calibration, CPU clock, the SAR peripherals' default state.
+    "${ESP_HAL}/esp_system/port/soc/esp32s3/clk.c"
+    "${ESP_HAL}/esp_hw_support/esp_clk.c"
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_clk.c"
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_init.c"
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_time.c"
+    "${ESP_HAL}/esp_hw_support/regi2c_ctrl.c"
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_sleep.c"         # rtc_sleep_pu()
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/sar_periph_ctrl.c"
+    "${ESP_HAL}/esp_hw_support/sar_periph_ctrl_common.c"
+    # The temperature sensor, which the PHY reads (phy_override.c).
+    "${ESP_HAL}/esp_hw_support/sar_tsens_ctrl.c"
+    "${ESP_HAL}/esp_hw_support/adc_share_hw_ctrl.c"
+    "${ESP_HAL}/esp_hal_ana_conv/temperature_sensor_hal.c"
+    "${ESP_HAL}/esp_hal_ana_conv/esp32s3/temperature_sensor_periph.c"
+    # The heap: heap_caps on TLSF over the regions of memory_layout.c, and
+    # esp_libc's malloc() family on it (in place of newlib's).  The alignment
+    # of DMA-capable allocations comes from the cache driver.
+    "${ESP_HAL}/heap/heap_caps.c"
+    "${ESP_HAL}/heap/heap_caps_base.c"
+    "${ESP_HAL}/heap/heap_caps_init.c"
+    "${ESP_HAL}/heap/multi_heap.c"
+    "${ESP_HAL}/heap/port/memory_layout_utils.c"
+    "${ESP_HAL}/heap/port/esp32s3/memory_layout.c"
+    "${TLSF_DIR}/tlsf.c"
+    "${ESP_HAL}/esp_hw_support/heap_align_hw.c"
+    "${ESP_IDF}/esp_mspi/esp_mspi_align/esp_mspi_align.c"
+    "${ESP_HAL}/esp_hw_support/esp_memory_utils.c"
+    "${ESP_HAL}/esp_mm/esp_cache_msync.c"
+    "${ESP_HAL}/esp_hal_cache/cache_hal.c"
+    "${ESP_HAL}/esp_libc/src/heap.c"
+    # ESP-IDF's log, version 1 (sdkconfig.h): the parts its ESP_LOGx() and
+    # esp_log_write() reach; port/esp_log_ram.c is its output.
+    "${ESP_HAL}/log/src/log.c"
+    "${ESP_HAL}/log/src/os/log_timestamp.c"
+    "${ESP_HAL}/log/src/os/log_write.c"
+    "${ESP_HAL}/log/src/log_level/log_level.c"
     # esp_timer on SYSTIMER: timers, and the uptime clock (port/board.c).
     "${ESP_HAL}/esp_timer/src/esp_timer.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_impl_common.c"
@@ -236,22 +310,73 @@ add_executable(app
     # interrupts, and the reference-counted peripheral clock gates.
     "${ESP_HAL}/esp_hw_support/intr_alloc.c"
     "${ESP_HAL}/esp_hw_support/port/esp32s3/esp_cpu_intr.c"
+    "${ESP_HAL}/soc/esp32s3/interrupts.c"                       # names in its messages
     "${ESP_HAL}/esp_hw_support/periph_ctrl.c"
+    # eFuse: the chip's package (the PHY's init) and whether flash encryption
+    # is on (the alignment of DMA-capable allocations).
+    "${ESP_HAL}/efuse/src/esp_efuse_fields.c"
+    "${ESP_HAL}/hal/efuse_hal.c"
+    # The PHY: ESP-IDF's esp_phy component and the binary libraries below.
+    "${ESP_HAL}/esp_phy/src/phy_init.c"
+    "${ESP_HAL}/esp_phy/src/phy_common.c"
+    "${ESP_HAL}/esp_phy/src/phy_override.c"
+    "${ESP_HAL}/esp_phy/src/lib_printf.c"
+    "${ESP_HAL}/esp_phy/esp32s3/phy_init_data.c"
     # UART0: the console on D6/D7 (port/board.c), and the table of IO MUX
     # registers that gpio_ll_pullup_en() looks the RX pin up in.
     "${ESP_HAL}/esp_hal_uart/uart_hal.c"
     "${ESP_HAL}/soc/esp32s3/gpio_periph.c")
+target_include_directories(esp_idf PRIVATE
+    "${ESP_HAL}/esp_libc/platform_include"
+    "${ESP_HAL}/esp_timer/include"
+    "${ESP_HAL}/esp_hw_support/etm/include"
+    "${ESP_HAL}/esp_phy/include"
+    "${ESP_HAL}/esp_phy/esp32s3/include"
+    "${ESP_HAL}/efuse/include"
+    "${ESP_HAL}/efuse/esp32s3/include"
+    "${ESP_HAL}/esp_mm/include"
+    "${ESP_HAL}/esp_system/port/include")
+target_link_libraries(esp_idf PRIVATE freertos threadx esp_hal)
 set_source_files_properties(
     "${ESP_HAL}/esp_timer/src/esp_timer.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_impl_common.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_impl_systimer.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_init.c"
     PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/esp_timer/private_include")
-# esp_mspi's timing-tuning header is not fetched: rtc_init.c includes it for
-# one declaration (port/esp_compat/esp_mspi).
 set_source_files_properties(
-    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_init.c"
-    PROPERTIES INCLUDE_DIRECTORIES "${PORT_DIR}/esp_compat/esp_mspi/include")
+    "${ESP_HAL}/heap/heap_caps.c"
+    "${ESP_HAL}/heap/heap_caps_base.c"
+    "${ESP_HAL}/heap/heap_caps_init.c"
+    "${ESP_HAL}/heap/multi_heap.c"
+    "${ESP_HAL}/heap/port/memory_layout_utils.c"
+    "${ESP_HAL}/heap/port/esp32s3/memory_layout.c"
+    "${TLSF_DIR}/tlsf.c"
+    PROPERTIES
+        INCLUDE_DIRECTORIES "${ESP_HAL}/heap/private_include;${ESP_HAL}/heap;${TLSF_DIR};${TLSF_DIR}/include"
+        COMPILE_DEFINITIONS "MULTI_HEAP_FREERTOS")
+set_source_files_properties(
+    "${ESP_HAL}/log/src/log.c"
+    "${ESP_HAL}/log/src/os/log_timestamp.c"
+    "${ESP_HAL}/log/src/os/log_write.c"
+    "${ESP_HAL}/log/src/log_level/log_level.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/log/include/esp_private")
+set_source_files_properties("${ESP_HAL}/efuse/src/esp_efuse_fields.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/efuse/private_include;${ESP_HAL}/efuse/esp32s3/private_include")
+# The PHY's sources include headers of components they are built with in
+# ESP-IDF but that are not built here (nvs_flash and esp_partition, which
+# needs esp_blockdev's, esp_wifi's private wifi.h with esp_event's and
+# esp_netif's, the GPIO driver's types).
+set_source_files_properties(
+    "${ESP_HAL}/esp_phy/src/phy_init.c"
+    "${ESP_HAL}/esp_phy/src/phy_common.c"
+    "${ESP_HAL}/esp_phy/src/phy_override.c"
+    "${ESP_HAL}/esp_phy/src/lib_printf.c"
+    "${ESP_HAL}/esp_phy/esp32s3/phy_init_data.c"
+    PROPERTIES INCLUDE_DIRECTORIES
+        "${ESP_IDF}/nvs_flash/include;${ESP_IDF}/esp_partition/include;${ESP_HAL}/esp_blockdev/include;${ESP_HAL}/esp_wifi/include;${ESP_HAL}/esp_event/include;${ESP_IDF}/esp_netif/include;${ESP_HAL}/upper_hal_gpio/include")
+# clk.c includes the second-stage bootloader's clock header for a declaration.
+set_source_files_properties("${ESP_HAL}/esp_system/port/soc/esp32s3/clk.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/bootloader_support/include")
 # What ESP-IDF's esp_app_format component gives esp_app_desc.c: the project's
 # name and version (ESP-IDF takes the version from "git describe" of the
 # project, falling back to "1") and ESP-IDF's version.
@@ -266,6 +391,13 @@ set_source_files_properties("${ESP_HAL}/esp_app_format/esp_app_desc.c" PROPERTIE
     INCLUDE_DIRECTORIES "${ESP_HAL}/esp_app_format/include"
     COMPILE_DEFINITIONS "PROJECT_VER=\"${PROJECT_VER}\";PROJECT_NAME=\"${PROJECT_NAME}\";IDF_VER_DEF=\"${IDF_VER}\"")
 
+# The PHY's binary libraries (lib/esp-phy-lib): libphy, and libbtbb, which
+# ESP-IDF links on chips with Bluetooth (libphy's debug code calls into it).
+add_library(esp_phy_blobs INTERFACE)
+target_link_libraries(esp_phy_blobs INTERFACE
+    "${ESP_PHY_LIB}/libphy.a"
+    "${ESP_PHY_LIB}/libbtbb.a")
+
 set_target_properties(app PROPERTIES
     OUTPUT_NAME xiao_esp32s3_threadx
     SUFFIX      .elf
@@ -273,15 +405,23 @@ set_target_properties(app PROPERTIES
 target_include_directories(app PRIVATE
     "${PORT_DIR}"
     "${ESP_HAL}/esp_timer/include"
-    "${ESP_HAL}/esp_hw_support/etm/include")    # esp_timer.h includes esp_etm.h
+    "${ESP_HAL}/esp_hw_support/etm/include"     # esp_timer.h includes esp_etm.h
+    "${ESP_HAL}/esp_phy/include"
+    "${ESP_HAL}/esp_system/port/include")      # esp_clk_internal.h
 # xtensa_rtos is an object library: the vectors are reached only through the
 # linker script and VECBASE, so nothing would pull them out of an archive.
-target_link_libraries(app PRIVATE shell freertos threadx xtensa_rtos esp_hal)
+target_link_libraries(app PRIVATE shell esp_idf freertos threadx xtensa_rtos esp_phy_blobs esp_hal)
 # -u esp_app_desc: nothing refers to it by name (esp_app_format does the same).
+# heap.c's malloc() and phy_override.c's functions take precedence over
+# newlib's and libphy's because they are linked as objects (esp_idf), before
+# any archive is searched: ESP-IDF's "-u" options for them are not needed.
+# --orphan-handling=warn: every input section has a place in the linker
+# script (an orphan would end up wherever ld puts it).
 target_link_options(app PRIVATE
     -nostartfiles
     "-T${LDSCRIPT}"
     -Wl,-u,esp_app_desc
+    -Wl,--orphan-handling=warn
     -Wl,--gc-sections
     "-Wl,-Map=$<TARGET_FILE_DIR:app>/xiao_esp32s3_threadx.map")
 

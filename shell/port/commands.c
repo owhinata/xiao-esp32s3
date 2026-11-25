@@ -7,7 +7,6 @@
  * rp2040-connect's builds on the Pico SDK.
  */
 #include <errno.h>
-#include <malloc.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -22,6 +21,7 @@
 
 #include "board.h"
 #include "cpu_load.h"
+#include "esp_heap_caps.h"
 #include "esp_idf_version.h"
 #include "ps_interval.h"
 #include "shell_engine.h"
@@ -49,27 +49,25 @@ SHELL_CMD_REGISTER(version, NULL, "Show the versions of the kernel, HAL and comp
 /* ---- free ---------------------------------------------------------------- */
 
 /*
- * newlib's malloc(): what it has taken from _sbrk_r() (the heap region of
- * port/threadx/src/tx_clib_newlib.c), of that in use and free, and what it
- * can still take.  The kernel has no heap of its own.
+ * malloc(): ESP-IDF's heap (heap_caps; esp_libc's malloc() takes from the
+ * heaps of MALLOC_CAP_DEFAULT): the size of those heaps, of that in use and
+ * free, and what they can still take.  heap_caps_init() registers every
+ * region at the start and heap_caps_enable_nonos_stack_heaps() the start-up
+ * stack's once the first thread runs; nothing is added after that, so the
+ * last number is 0.  The kernel has no heap of its own.
  */
 static int cmd_free(const struct shell *sh, size_t argc, char **argv)
 {
-    struct mallinfo m = mallinfo();
-    /*
-     * malloc() is the only caller of _sbrk_r(), so what it holds is what has
-     * been taken from the region.  (sbrk() itself must not be called: the
-     * name resolves to the ROM's, which goes through a ROM syscall table that
-     * nothing here sets up.)
-     */
-    size_t region = (size_t) (_tx_clib_heap_end - _tx_clib_heap_start);
+    multi_heap_info_t info;
 
     (void) argc;
     (void) argv;
 
+    heap_caps_get_info(&info, MALLOC_CAP_DEFAULT);
     shell_print(sh, "malloc: %u bytes from the system, in use %u, free %u, more to take %u",
-                (unsigned int) m.arena, (unsigned int) m.uordblks, (unsigned int) m.fordblks,
-                (unsigned int) (region - (size_t) m.arena));
+                (unsigned int) (info.total_allocated_bytes + info.total_free_bytes),
+                (unsigned int) info.total_allocated_bytes, (unsigned int) info.total_free_bytes,
+                0u);
     return 0;
 }
 

@@ -89,10 +89,10 @@ list(APPEND BL_INCLUDES
     "${ESP_HAL}/esp_hw_support/power_supply/include"
     "${ESP_HAL}/esp_hw_support/modem/include"
     "${ESP_HAL}/esp_system/include"
-    # esp_sleep is not in esp-hal-3rdparty: the part rtc_clk.c includes
-    "${PORT_DIR}/esp_compat/esp_sleep/include"
-    # esp_mspi's timing-tuning header is not fetched: the declaration rtc_init.c includes
-    "${PORT_DIR}/esp_compat/esp_mspi/include")
+    # Not in esp-hal-3rdparty, from ESP-IDF: the headers of esp_sleep
+    # (rtc_clk.c) and of esp_mspi's timing tuning (rtc_init.c)
+    "${ESP_IDF}/esp_sleep/include"
+    "${ESP_IDF}/esp_mspi/mspi_timing_tuning/include")
 
 add_library(bl_includes INTERFACE)
 target_include_directories(bl_includes INTERFACE ${BL_INCLUDES})

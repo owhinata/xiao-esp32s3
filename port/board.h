@@ -27,11 +27,10 @@ void     board_led_set(int on);
 uint32_t board_cpu_freq_hz(void);
 
 /*
- * Microseconds since board_uptime_init(), esp_timer_get_time(); any context,
- * interrupts masked or not.  board_uptime_init() once, before the kernel
- * starts and before the first read: it is esp_timer's early initialization.
+ * Microseconds since the start of the application, esp_timer_get_time();
+ * any context, interrupts masked or not, once _start has run ESP-IDF's
+ * start-up hooks (esp_timer's early initialization is one of them).
  */
-void     board_uptime_init(void);
 uint64_t board_uptime_us(void);
 
 /* Spins for at least us microseconds; any context. */
@@ -69,6 +68,41 @@ void     board_watchdog_stop(void);
  * chip's reset reason, which every reset sets anew.
  */
 bool     board_reset_by_int_wdt(void);
+
+/*
+ * ESP-IDF's start-up hooks (ESP_SYSTEM_INIT_FN() and the other
+ * esp_sys_event registrations of the compiled Espressif sources; port/
+ * startup.c), each at the point where ESP-IDF's own start-up runs them.
+ * _start runs the core ones (the heap, esp_timer's counter).  The others:
+ *
+ *   board_sys_init_secondary()  ESP-IDF's do_secondary_init(): from
+ *                               tx_application_define(), once the FreeRTOS
+ *                               layer is set up (esp_timer's task and
+ *                               interrupt)
+ *   board_sys_pre_scheduler()   at the end of tx_application_define()
+ *   board_sys_pre_app_main()    from the first thread, as ESP-IDF's main
+ *                               task does before app_main() (the heap takes
+ *                               over the stack _start ran on)
+ *
+ * A hook that fails ends in abort(), as in ESP-IDF.
+ */
+void     board_sys_init_secondary(void);
+void     board_sys_pre_scheduler(void);
+void     board_sys_pre_app_main(void);
+
+/*
+ * ESP-IDF's log (ESP_LOGx() of the Espressif sources) into the RAM log, from
+ * then on (port/esp_log_ram.c).  Once, after log_ram_initialize().
+ */
+void     board_esp_log_attach(void);
+
+/*
+ * The CPU interrupts of the console (level 1, level-triggered), routed and
+ * served by port/board.c itself; _start keeps ESP-IDF's interrupt
+ * allocator off them.
+ */
+#define BOARD_CONSOLE_RX_CPU_INTR   12  /* USB Serial/JTAG receive */
+#define BOARD_CONSOLE_UART_CPU_INTR 13  /* UART0 */
 
 /*
  * Console on two transports at once: the built-in USB Serial/JTAG controller

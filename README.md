@@ -27,7 +27,10 @@ UART0.
 | Timers | ESP-IDF's esp_timer: a SYSTIMER alarm interrupt and its task on the FreeRTOS layer |
 | Run times | ThreadX execution profile kit on the CPU cycle counter |
 | LED | GPIO21, active low, toggled by an esp_timer periodic timer |
-| CPU clock | 240 MHz from the PLL (`BOARD_CPU_FREQ_MHZ`) |
+| CPU clock | 240 MHz from the PLL (`esp_clk_init()`, `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ`) |
+| Heap | ESP-IDF's heap (`heap_caps` on TLSF; `malloc()` is esp_libc's): about 400 KiB of internal RAM and the RTC FAST memory, usable from interrupt handlers |
+| Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
+| Radio | The PHY is powered and calibrated at boot (esp_phy with Espressif's binary PHY library); no Wi-Fi driver yet |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, the firmware as the factory application at 0x10000 |
 
 ## Build
@@ -40,8 +43,10 @@ cmake --build build
 
 The first configure downloads the compiler (~90 MB) into `tools/` and the
 upstream sources into `lib/`, each at the commit pinned in `CMakeLists.txt`:
-ThreadX and esp-hal-3rdparty (~370 MB), and three directories of ESP-IDF
-itself that the bootloader needs and the mirror does not carry (~4 MB).
+ThreadX and esp-hal-3rdparty (~370 MB), a few directories of ESP-IDF
+itself that the mirror does not carry (~4 MB), the TLSF allocator of
+ESP-IDF's heap, and the esp32s3 part of Espressif's binary PHY and Wi-Fi
+libraries (~6 MB).
 Neither directory is tracked by this repository.
 
 Outputs in `build/`: `bootloader.bin`, `partition-table.bin` and
@@ -174,8 +179,15 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
 3. `_start` (`port/startup.c`) does what ESP-IDF's application start-up does
    at this point, in the same order: vectors and CPU state, `.bss`, the cache
    geometry and the boundary between code and data in the shared MMU table,
-   CPU to 240 MHz, the RTC watchdog the bootloader armed for the application
-   off, then the console and `main()`.
+   `esp_rtc_init()` (the internal regulators trimmed from eFuse),
+   `esp_clk_init()` (calibration of the RTC slow clock, CPU to 240 MHz), the
+   RTC watchdog the bootloader armed for the application off, the console,
+   ESP-IDF's core start-up hooks (the heap, esp_timer's clock), the
+   constructors, then `main()`.  The later hooks run where ESP-IDF runs
+   them: in `tx_application_define()` (esp_timer's task) and in the first
+   task, "main", which then switches the PHY on and ends.  ESP-IDF's own
+   start-up lines (`app_init`, `heap_init`) appear on the console before
+   the banner.
 
 The memory layout and the list of code that has to run from RAM are in
 `ldscript/xiao_esp32s3.ld`, with the reasons.  Points that are easy to get
@@ -195,8 +207,8 @@ wrong:
 
 What ESP-IDF's application start-up does and this firmware does not:
 
-- `rtc_init()`, which trims the internal voltage regulators from eFuse
-  calibration values.  Needed before the radio is used.
+- `esp_perip_clk_init()`, which gates the clocks of unused peripherals: it
+  would stop the USB Serial/JTAG console.
 - PSRAM (8 MB on this board) is not initialized.
 - Only core 0 runs.  ThreadX (non-SMP) is single-core; core 1 is left as the
   ROM leaves it.

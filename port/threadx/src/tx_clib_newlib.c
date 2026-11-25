@@ -15,13 +15,18 @@
  *
  * The interface towards the rest of the port is unchanged: _tx_clib_init(),
  * _tx_clib_thread_setup(), _tx_clib_reent_init(), _tx_clib_reent_cleanup(),
- * _tx_clib_heap_start/_end, and the per-thread reent pointer that the
- * scheduler copies into _impure_ptr on every context switch.
+ * and the per-thread reent pointer that the scheduler copies into
+ * _impure_ptr on every context switch.  There is no heap here: malloc() and
+ * the rest of the family are ESP-IDF's (esp_libc heap.c on heap_caps), so
+ * newlib's allocator, its _sbrk_r() and its malloc lock are not linked.
+ *
+ * On top of that, the _lock_*() functions of ESP-IDF's
+ * esp_libc/platform_include/sys/lock.h, which Espressif sources (esp_phy)
+ * use, on the same locks.
  *
  * As in the original, the C library may be used from threads and from
  * tx_application_define(), never from interrupt handlers.
  */
-#include <errno.h>
 #include <reent.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -45,7 +50,6 @@ struct __lock {
 struct __lock __lock___sfp_recursive_mutex;
 struct __lock __lock___atexit_recursive_mutex;
 struct __lock __lock___at_quick_exit_mutex;
-struct __lock __lock___malloc_recursive_mutex;
 struct __lock __lock___env_recursive_mutex;
 struct __lock __lock___tz_mutex;
 struct __lock __lock___dd_hash_mutex;
@@ -55,7 +59,6 @@ static struct __lock * const static_locks[] = {
     &__lock___sfp_recursive_mutex,
     &__lock___atexit_recursive_mutex,
     &__lock___at_quick_exit_mutex,
-    &__lock___malloc_recursive_mutex,
     &__lock___env_recursive_mutex,
     &__lock___tz_mutex,
     &__lock___dd_hash_mutex,
@@ -129,6 +132,45 @@ int  __retarget_lock_try_acquire(_LOCK_T lock)              { return lock_try(lo
 int  __retarget_lock_try_acquire_recursive(_LOCK_T lock)    { return lock_try(lock); }
 void __retarget_lock_release(_LOCK_T lock)                  { lock_put(lock); }
 void __retarget_lock_release_recursive(_LOCK_T lock)        { lock_put(lock); }
+
+/*
+ * ESP-IDF's _lock_*() (the declarations are in esp_libc's
+ * platform_include/sys/lock.h, with _lock_t being _LOCK_T): a lock that is
+ * still NULL, as a static _lock_t starts, is created on first use.  Two
+ * threads may get there at once; the loser frees its lock again.  A lock
+ * that could not be allocated stays NULL and does not lock.
+ */
+static void lock_create_once(_LOCK_T *plock)
+{
+    TX_INTERRUPT_SAVE_AREA
+    _LOCK_T lock;
+
+    if (*plock != NULL) {
+        return;
+    }
+    lock_new(&lock);
+    if (lock == NULL) {
+        return;
+    }
+    TX_DISABLE
+    if (*plock == NULL) {
+        *plock = lock;
+        lock = NULL;
+    }
+    TX_RESTORE
+    lock_free(lock);
+}
+
+void _lock_init(_LOCK_T *plock)                             { *plock = NULL; lock_create_once(plock); }
+void _lock_init_recursive(_LOCK_T *plock)                   { *plock = NULL; lock_create_once(plock); }
+void _lock_close(_LOCK_T *plock)                            { lock_free(*plock); *plock = NULL; }
+void _lock_close_recursive(_LOCK_T *plock)                  { lock_free(*plock); *plock = NULL; }
+void _lock_acquire(_LOCK_T *plock)                          { lock_create_once(plock); lock_get(*plock); }
+void _lock_acquire_recursive(_LOCK_T *plock)                { lock_create_once(plock); lock_get(*plock); }
+int  _lock_try_acquire(_LOCK_T *plock)                      { lock_create_once(plock); return lock_try(*plock); }
+int  _lock_try_acquire_recursive(_LOCK_T *plock)            { lock_create_once(plock); return lock_try(*plock); }
+void _lock_release(_LOCK_T *plock)                          { lock_put(*plock); }
+void _lock_release_recursive(_LOCK_T *plock)                { lock_put(*plock); }
 
 /* ---- Per-thread reentrancy state ----------------------------------------- */
 
@@ -224,37 +266,4 @@ void _tx_clib_init(void)
     for (i = 0; i < sizeof(static_locks) / sizeof(static_locks[0]); i++) {
         lock_create(static_locks[i]);
     }
-}
-
-/* ---- Heap ---------------------------------------------------------------- */
-
-/*
- * Bounds of the C library heap.  _tx_initialize_low_level() sets a default
- * (upper half of the RAM left over by the linker); tx_application_define()
- * may overwrite both before the first allocation.
- */
-char *_tx_clib_heap_start = NULL;
-char *_tx_clib_heap_end   = NULL;
-
-void *_sbrk_r(struct _reent *reent, ptrdiff_t incr)
-{
-    static char *heap_ptr;
-    char *new_heap_ptr;
-    char *alloc_ptr;
-
-    if (heap_ptr == NULL) {
-        heap_ptr = _tx_clib_heap_start;
-    }
-
-    new_heap_ptr = heap_ptr + incr;
-    if (heap_ptr == NULL ||
-        new_heap_ptr >= _tx_clib_heap_end ||
-        new_heap_ptr < heap_ptr) {
-        reent->_errno = ENOMEM;
-        return (void *) -1;
-    }
-
-    alloc_ptr = heap_ptr;
-    heap_ptr  = new_heap_ptr;
-    return alloc_ptr;
 }

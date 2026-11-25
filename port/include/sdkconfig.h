@@ -27,6 +27,8 @@
 #define CONFIG_SOC_RTC_FAST_MEM_SUPPORTED       1
 #define CONFIG_SOC_RTC_SLOW_MEM_SUPPORTED       1
 #define CONFIG_SOC_SUPPORTS_SECURE_DL_MODE      1
+#define CONFIG_SOC_WIFI_SUPPORTED               1
+#define CONFIG_SOC_TEMP_SENSOR_SUPPORTED        1
 
 /* ---- Board: XIAO ESP32S3 ------------------------------------------------ */
 
@@ -34,6 +36,29 @@
 #define CONFIG_XTAL_FREQ                        40
 #define CONFIG_FREERTOS_UNICORE                 1
 #define CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE      1
+#define CONFIG_FREERTOS_NUMBER_OF_CORES         1
+
+/*
+ * CPU clock esp_clk_init() sets (ESP-IDF: 160 MHz); BOARD_CPU_FREQ_MHZ in
+ * port/board.h says the same (port/startup.c checks).
+ */
+#define CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ         240
+
+/*
+ * RTC slow clock: the internal 136 kHz RC oscillator (the XIAO has no 32 kHz
+ * crystal; esp_clk_init() takes it when no other CONFIG_RTC_CLK_SRC_* is
+ * defined), calibrated against the crystal over 1024 of its cycles at
+ * start-up, ESP-IDF's defaults.
+ */
+#define CONFIG_RTC_CLK_CAL_CYCLES               1024
+
+/*
+ * Cache sizes (ESP-IDF's defaults; port/startup.c and the linker script set
+ * the same): the heap's memory layout leaves SRAM0's instruction cache part
+ * out and takes the rest of SRAM0.
+ */
+#define CONFIG_ESP32S3_INSTRUCTION_CACHE_16KB   1
+#define CONFIG_ESP32S3_DATA_CACHE_32KB          1
 
 /*
  * 8 MB flash, run in DIO mode at 80 MHz (the image headers say the same, see
@@ -140,18 +165,59 @@
 #define CONFIG_ESP_TIMER_TASK_AFFINITY_CPU0     1
 #define CONFIG_ESP_TIMER_ISR_AFFINITY_CPU0      1
 
+/* ---- Heap (ESP-IDF's heap component, esp_libc's malloc()) ------------- */
+
+/*
+ * TLSF compiled from source (the ESP32-S3's ROM has none), no poisoning and
+ * no tracing (ESP-IDF's defaults, which no symbol here needs to say),
+ * memory that can execute is allocatable (no memory protection), the
+ * allocation functions in flash: this firmware never disables the cache,
+ * so the heap is usable from interrupt handlers without being in RAM.
+ */
+#define CONFIG_HEAP_HAS_EXEC_HEAP               1
+#define CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH   1
+
 /* ---- HAL and log in the application ----------------------------------- */
 
 #define CONFIG_HAL_DEFAULT_ASSERTION_LEVEL      0
 
 /*
- * The application does not use ESP-IDF's log: the HAL sources it compiles
- * need a log version and a timestamp source to compile (1 and "RTOS" are
- * ESP-IDF's defaults), and level 0 (none) removes their calls.
+ * ESP-IDF's log (log component, version 1, text), up to and by default at
+ * Info.  port/esp_log_ram.c puts its lines into the RAM log ("dmesg").
+ * Levels can be changed at run time (esp_log_level_set()), for all tags
+ * together: no per-tag table (ESP-IDF's default keeps one, which takes a
+ * mutex and allocates on a tag's first message; this way a message costs
+ * neither, in any context).
+ *
+ * The shell's log layer (shell/common/compat/include/app_log.h) reads
+ * CONFIG_LOG_DEFAULT_LEVEL too, as Zephyr's option of that name, wherever
+ * this file is visible.  Zephyr's level numbers are ESP-IDF's (3 = Info),
+ * so its default stays Info (port/esp_log_ram.c checks).
  */
 #define CONFIG_LOG_VERSION                      1
 #define CONFIG_LOG_TIMESTAMP_SOURCE_RTOS        1
-#define CONFIG_LOG_MAXIMUM_LEVEL                0
-#define CONFIG_LOG_DEFAULT_LEVEL                0
+#define CONFIG_LOG_MAXIMUM_LEVEL                3
+#define CONFIG_LOG_DEFAULT_LEVEL                3
+#define CONFIG_LOG_MODE_TEXT_EN                 1
+#define CONFIG_LOG_DYNAMIC_LEVEL_CONTROL        1
+#define CONFIG_LOG_TAG_LEVEL_IMPL_NONE          1
+
+/* ---- PHY (esp_phy and its binary libraries) ---------------------------- */
+
+/*
+ * ESP-IDF's defaults, except that no calibration data is kept in NVS
+ * (CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE off): every start does a
+ * full RF calibration.  The init data is the one compiled in
+ * (esp32s3/phy_init_data.c; the phy_init partition is not read).
+ * CONFIG_ESP_PHY_ENABLE_USB keeps the USB Serial/JTAG controller's PHY
+ * clock on while the PHY is set up (the console on the USB-C connector).
+ * CONFIG_ESP_WIFI_ENABLED: the PHY is enabled for Wi-Fi, which its PLL
+ * tracking (esp_phy/src/phy_common.c) tests.
+ */
+#define CONFIG_ESP_PHY_ENABLED                  1
+#define CONFIG_ESP_PHY_MAX_TX_POWER             20
+#define CONFIG_ESP_PHY_ENABLE_USB               1
+#define CONFIG_ESP_PHY_PLL_TRACK_PERIOD_MS      1000
+#define CONFIG_ESP_WIFI_ENABLED                 1
 
 #endif

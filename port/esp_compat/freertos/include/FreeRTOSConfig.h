@@ -38,14 +38,16 @@
  * Objects the layer creates dynamically (xTaskCreate(): TCB and stack,
  * xQueueCreate(), xSemaphoreCreate*(), xEventGroupCreate(), xTimerCreate())
  * come from a ThreadX byte pool over a static array of this size, not from
- * newlib's malloc(): the layer has no hook for another allocator, and its
- * task deletion frees through the pool.  Sized for the current user, the
- * esp_timer task: its 4096-byte stack, its 840-byte task block and 8 bytes
- * of the pool's bookkeeping for each and for the pool, about 150 bytes
- * spare.  Each further FreeRTOS object needs room here.  ESP-IDF code that
- * calls malloc() or heap_caps_malloc() itself still uses newlib's heap.
+ * the heap: the layer has no hook for another allocator, and its task
+ * deletion frees through the pool.  Sized for the two tasks there are, each
+ * a 4096-byte stack, an 840-byte task block and 8 bytes of the pool's
+ * bookkeeping for each block: the esp_timer task, and "main"
+ * (src/main.c), which ends after the start-up and leaves its room to
+ * whatever comes later; about 300 bytes spare.  Each further FreeRTOS
+ * object needs room here.  ESP-IDF code that calls malloc() or
+ * heap_caps_malloc() itself uses ESP-IDF's heap.
  */
-#define configTOTAL_HEAP_SIZE           (5u * 1024u)
+#define configTOTAL_HEAP_SIZE           (10u * 1024u)
 
 /*
  * vTaskDelete() and returning from a task: the layer's own thread

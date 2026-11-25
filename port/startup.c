@@ -11,51 +11,84 @@
  * runs (CONFIG_BOOTLOADER_WDT_ENABLE).
  *
  * What is left is what ESP-IDF's application start-up does on the ESP32-S3
- * after the bootloader (call_start_cpu0() in esp_system/port/cpu_start.c), in
- * the same order, for the parts this firmware uses:
+ * after the bootloader (call_start_cpu0() in esp_system/port/cpu_start.c and
+ * start_cpu0_default() in esp_system/startup.c), in the same order, for the
+ * parts this firmware uses:
  *
  *   init_cpu()            vectors
  *   init_bss()            .bss (there is no RTC .bss)
  *   ext_mem_init()        cache geometry, code/data split of the MMU table
- *   system_early_init()   final CPU clock (esp_clk_init())
+ *   sys_rtc_init()        esp_rtc_init(): rtc_init(), the regulators and the
+ *                         SAR peripherals (o-code calibration after power-on);
+ *                         the CPU clock kept running in WAITI (see _start)
+ *   system_early_init()   esp_clk_init(): RTC fast and slow clocks, the slow
+ *                         clock's calibration, the final CPU clock
  *   init_disable_rtc_wdt  RTC watchdog off (esp_system/startup_funcs.c)
+ *   do_core_init()        the ESP_SYSTEM_INIT_FN(..., CORE, ...) hooks: the
+ *                         heap (heap_caps_init()), esp_timer's counter, the
+ *                         application information on the console
+ *   __libc_init_array()   global constructors
+ *
+ * The rest of ESP-IDF's start-up hooks run later, where ESP-IDF runs them
+ * relative to its scheduler (board_sys_init_secondary(), board_sys_pre_
+ * scheduler(), board_sys_pre_app_main(); see board.h): the scheduler here is
+ * ThreadX, whose objects can only be made from tx_application_define() on.
  *
  * Left out, with the reason:
  *   - cache_hal_init()/mmu_hal_ctx_init() in ext_mem_init() only set up the
  *     HALs' state for the flash and MMU drivers, which are not built.
- *   - sys_rtc_init(): esp_rtc_init() is rtc_init(), not called yet (README);
- *     its RTC watchdog part applies only without CONFIG_BOOTLOADER_WDT_ENABLE.
  *   - mspi_init(): flash chip state and timing tuning for the flash driver,
  *     and the PSRAM, neither of which is used.
  *   - system_early_init(): the memory region protection the bootloader has
  *     already set (bootloader_init_mem()); stopping the second core and
  *     Cache_Set_IDROM_MMU_Info(), which only the PSRAM code reads; the
- *     peripheral clock gating, interrupt matrix clear and cache error
- *     interrupt of a full ESP-IDF system.
+ *     interrupt matrix clear and cache error interrupt of a full ESP-IDF
+ *     system; esp_perip_clk_init(), which gates the clocks of unused
+ *     peripherals, among them the USB Serial/JTAG controller's (the console)
+ *     unless ESP-IDF's console is configured on it.
+ *   - CONFIG_ESP_SYSTEM_BBPLL_RECALIB: a second PLL calibration that only
+ *     bootloaders older than ESP-IDF v5.2 need (bootloader/ is the same
+ *     ESP-IDF as the application).
  *
  * This file runs from RAM (see the linker script): it reconfigures the cache
  * that the code in flash is fetched through.
  */
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "sdkconfig.h"
+#include "esp_clk_internal.h"
 #include "esp_cpu.h"
+#include "esp_err.h"
+#include "esp_intr_alloc.h"
 #include "esp_rom_sys.h"
+#include "esp_private/esp_sys_event.h"
 #include "esp32s3/rom/cache.h"
 #include "hal/wdt_hal.h"
 #include "soc/ext_mem_defs.h"
-#include "soc/rtc.h"
 #include "soc/soc.h"
+#include "soc/system_reg.h"
 #include "xtensa/config/core.h"
 #include "xtensa/corebits.h"
 #include "xtensa/xtruntime.h"
 
 #include "board.h"
 
+_Static_assert(BOARD_CPU_FREQ_MHZ == CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+               "board.h and sdkconfig.h name different CPU clocks");
+
 extern char _vector_table;
 extern char _bss_start, _bss_end;
 extern char _flash_text_start, _flash_text_end;
 extern int  main(void);
+extern void __libc_init_array(void);
+
+/* The tables of ESP-IDF's start-up hooks, one per event (linker script). */
+extern const esp_sys_event_handler_t _esysev_initc_start[], _esysev_initc_end[];
+extern const esp_sys_event_handler_t _esysev_inits_start[], _esysev_inits_end[];
+extern const esp_sys_event_handler_t _esysev_presc_start[], _esysev_presc_end[];
+extern const esp_sys_event_handler_t _esysev_pream_start[], _esysev_pream_end[];
 
 /* ROM functions without a declaration in the esp_rom headers (cpu_start.c declares them the same way). */
 extern void rom_config_instruction_cache_mode(uint32_t cfg_cache_size, uint8_t cfg_cache_ways,
@@ -119,13 +152,60 @@ static void rtc_watchdog_disable(void)
     wdt_hal_write_protect_enable(&rwdt);
 }
 
-/* What ESP-IDF's application start-up does (esp_clk_init): the final CPU speed. */
-static void clock_set_cpu_mhz(uint32_t mhz)
+/*
+ * Runs the hooks of one event in the order of their priority, as ESP-IDF's
+ * do_system_init_event() does, which also stops at the first failure
+ * (abort(): a fault record and a restart here).
+ */
+static void sys_event_run(const esp_sys_event_handler_t *h, const esp_sys_event_handler_t *end)
 {
-    rtc_cpu_freq_config_t config;
+    for (; h < end; h++) {
+        if (h->handler(NULL, NULL) != ESP_OK) {
+            esp_rom_printf("Start-up hook %p failed\n", (void *) h->handler);
+            abort();
+        }
+    }
+}
 
-    if (rtc_clk_cpu_freq_mhz_to_config(mhz, &config)) {
-        rtc_clk_cpu_freq_set_config(&config);
+void board_sys_init_secondary(void)
+{
+    sys_event_run(_esysev_inits_start, _esysev_inits_end);
+}
+
+void board_sys_pre_scheduler(void)
+{
+    sys_event_run(_esysev_presc_start, _esysev_presc_end);
+}
+
+void board_sys_pre_app_main(void)
+{
+    sys_event_run(_esysev_pream_start, _esysev_pream_end);
+}
+
+/*
+ * CPU interrupts that this firmware routes and serves itself, outside
+ * ESP-IDF's interrupt allocator, which must therefore never hand them out
+ * (esp_intr_reserve()).  The allocator's table already keeps it off the
+ * tick's (6, a "special" timer interrupt), the interrupt watchdog's (24)
+ * and the other reserved ones; on one core it leaves 0 free, which the
+ * Wi-Fi driver takes for its MAC interrupt (ETS_WMAC_INUM) with
+ * xt_set_interrupt_handler() as it does under ESP-IDF, and which would
+ * otherwise be the first level-1 interrupt the allocator hands out.
+ */
+static void intr_reserve_own(void)
+{
+    static const int own[] = {
+        ETS_WMAC_INUM,              /* Wi-Fi MAC */
+        BOARD_CONSOLE_RX_CPU_INTR,  /* USB Serial/JTAG, port/board.c */
+        BOARD_CONSOLE_UART_CPU_INTR /* UART0, port/board.c */
+    };
+    unsigned int i;
+
+    for (i = 0; i < sizeof(own) / sizeof(own[0]); i++) {
+        if (esp_intr_reserve(own[i], 0) != ESP_OK) {
+            esp_rom_printf("CPU interrupt %d could not be reserved\n", own[i]);
+            abort();
+        }
     }
 }
 
@@ -156,19 +236,33 @@ void __attribute__((noreturn, section(".entry.text"))) _start(void)
 
     cache_init();
 
-    clock_set_cpu_mhz(BOARD_CPU_FREQ_MHZ);
+    /*
+     * The RTC domain, then the clocks.  esp_clk_init() ends with the CPU at
+     * CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ, the ROM's ticks-per-microsecond
+     * variable (delays, the ThreadX tick) and CCOUNT scaled to it.
+     */
+    esp_rtc_init();
+    esp_clk_init();
 
     /*
-     * ESP-IDF code takes the CPU clock from the ROM's ticks-per-microsecond
-     * variable (delays, and here the ThreadX tick).  rtc_clk keeps it current;
-     * set it once more from the clock registers so that it is right even if
-     * the requested frequency was refused.
+     * rtc_init() lets the CPU clock stop while the CPU waits in WAITI
+     * (RTC_CONFIG_DEFAULT()'s cpu_waiti_clk_gate), which ESP-IDF can do
+     * because its tick on this chip comes from SYSTIMER.  Here the tick is
+     * CCOMPARE0, which counts CPU cycles (CCOUNT), as do the run times of
+     * "ps": the clock keeps running while the scheduler idles in WAITI, as
+     * it does after reset.
      */
-    esp_rom_set_cpu_ticks_per_us(board_cpu_freq_hz() / 1000000u);
+    SET_PERI_REG_MASK(SYSTEM_CPU_PER_CONF_REG, SYSTEM_CPU_WAIT_MODE_FORCE_ON);
 
     rtc_watchdog_disable();
 
     console_init();
+
+    /* do_core_init(), then the allocator's bookkeeping (it needs the heap). */
+    sys_event_run(_esysev_initc_start, _esysev_initc_end);
+    intr_reserve_own();
+
+    __libc_init_array();
 
     main();
 

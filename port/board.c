@@ -72,16 +72,10 @@ uint32_t board_cpu_freq_hz(void)
  * esp_timer's clock: SYSTIMER counter 0, 52 bits at 16 MHz, derived from the
  * crystal.  It keeps counting whatever the CPU clock is and while interrupts
  * are masked, which a clock built from the tick count and CCOUNT would have
- * to work around.  esp_timer_early_init() resets SYSTIMER and starts the
- * counter from zero, as in ESP-IDF's start-up, and sets up the rest of what
- * esp_timer needs before its interrupt and task (esp_timer_init()).
+ * to work around.  esp_timer_early_init(), one of ESP-IDF's start-up hooks
+ * that _start runs, resets SYSTIMER and starts the counter from zero.  The
+ * HAL's read repeats itself when an interrupt handler read in between.
  */
-void board_uptime_init(void)
-{
-    (void) esp_timer_early_init();
-}
-
-/* The HAL's read repeats itself when an interrupt handler read in between. */
 uint64_t board_uptime_us(void)
 {
     return (uint64_t) esp_timer_get_time();
@@ -712,9 +706,6 @@ int console_host_present(void)
  * handler masks it; uart_read() unmasks it.  Only enabled bits show in the
  * status, and receive is enabled only once there is a callback.
  */
-#define CONSOLE_RX_CPU_INTR         12  /* level 1, level-triggered, otherwise unused */
-#define CONSOLE_UART_CPU_INTR       13  /* level 1, level-triggered, otherwise unused */
-
 static void console_rx_isr(void *arg)
 {
     (void) arg;
@@ -745,9 +736,9 @@ void console_rx_notify(void (*callback)(void))
     usb_serial_jtag_ll_disable_intr_mask(0xFFFFFFFFu);
     usb_serial_jtag_ll_clr_intsts_mask(0xFFFFFFFFu);
 
-    esp_rom_route_intr_matrix(0, ETS_USB_SERIAL_JTAG_INTR_SOURCE, CONSOLE_RX_CPU_INTR);
+    esp_rom_route_intr_matrix(0, ETS_USB_SERIAL_JTAG_INTR_SOURCE, BOARD_CONSOLE_RX_CPU_INTR);
     usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
-    xt_ints_on(1u << CONSOLE_RX_CPU_INTR);
+    xt_ints_on(1u << BOARD_CONSOLE_RX_CPU_INTR);
 
     uart_ll_clr_intsts_mask(console_uart.dev, UART_INTR_RXFIFO_FULL);
     uart_intr_enable(UART_INTR_RXFIFO_FULL, true);
@@ -758,20 +749,18 @@ void console_rx_notify(void (*callback)(void))
  * UART's handler is installed here rather than in console_rx_notify() so that
  * transmission is interrupt-driven from the first thread on, shell or not;
  * the UART raises nothing before a queued write or console_rx_notify()
- * enables it.  The USB handler is installed here too, although its source is
- * routed and enabled only by console_rx_notify(): an installed handler is
- * what tells ESP-IDF's interrupt allocator (esp_intr_alloc(), which esp_timer
- * uses) that both CPU interrupts are taken.
+ * enables it.  The USB handler is installed here too; its source is routed
+ * and enabled only by console_rx_notify().
  */
 void console_init(void)
 {
     uart_init();
 
-    xt_set_interrupt_handler(CONSOLE_RX_CPU_INTR, console_rx_isr, NULL);
+    xt_set_interrupt_handler(BOARD_CONSOLE_RX_CPU_INTR, console_rx_isr, NULL);
 
-    esp_rom_route_intr_matrix(0, ETS_UART0_INTR_SOURCE, CONSOLE_UART_CPU_INTR);
-    xt_set_interrupt_handler(CONSOLE_UART_CPU_INTR, console_uart_isr, NULL);
-    xt_ints_on(1u << CONSOLE_UART_CPU_INTR);
+    esp_rom_route_intr_matrix(0, ETS_UART0_INTR_SOURCE, BOARD_CONSOLE_UART_CPU_INTR);
+    xt_set_interrupt_handler(BOARD_CONSOLE_UART_CPU_INTR, console_uart_isr, NULL);
+    xt_ints_on(1u << BOARD_CONSOLE_UART_CPU_INTR);
     uart_tx_irq_installed = 1;
 
     esp_rom_install_channel_putc(1, console_rom_putc);
