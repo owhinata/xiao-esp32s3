@@ -79,9 +79,16 @@
 #define esp_pm_trace_exit       _tx_execution_isr_enter
 #endif
 
-/* Tick interrupt; C calling convention. */
+/*
+ * Tick interrupt; C calling convention.  The dispatcher calls it for the
+ * CCOMPARE interrupt in place of a table entry (dispatch_c_isr).  It is the
+ * board's board_tick_interrupt() (port/watchdog.c), which feeds the
+ * interrupt watchdog and then calls _tx_timer_interrupt: this keeps the feed
+ * out of the assembly of tx_timer_interrupt.S, whose own hook
+ * (tx_timer_user_isr) the shell uses.
+ */
 #ifndef TX_NO_TIMER
-#define XT_RTOS_TIMER_INT       _tx_timer_interrupt
+#define XT_RTOS_TIMER_INT       board_tick_interrupt
 #endif
 #ifndef TX_TIMER_TICKS_PER_SECOND
 #define TX_TIMER_TICKS_PER_SECOND 100

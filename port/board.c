@@ -1,6 +1,6 @@
 /*
  * XIAO ESP32S3 board support: LED, CPU clock readback, uptime, console,
- * device ID and restart.
+ * device ID, restart and reset reason (the watchdogs are port/watchdog.c).
  */
 #include <stdbool.h>
 #include <stddef.h>
@@ -101,7 +101,7 @@ void board_delay_us(uint32_t us)
     esp_rom_delay_us(us);
 }
 
-/* ---- Device ID and restart ----------------------------------------------- */
+/* ---- Device ID, restart and reset reason --------------------------------- */
 
 /* The factory MAC address in eFuse, in the order it is printed (esptool). */
 void board_device_id(uint8_t id[BOARD_DEVICE_ID_SIZE])
@@ -124,12 +124,17 @@ static void uart_tx_flush(void);
  * shell's "Rebooting", the download-mode notice, or the register dump of
  * port/panic.c) are on the line before the reset; uart_tx_flush() says how
  * long that can take.  Polled, so usable with interrupts masked and from the
- * fault handlers.  The software system reset resets the CPU and the digital
- * peripherals and leaves the RAM as it is.
+ * fault handlers.  Then the watchdogs are stopped, so that neither runs on
+ * into the bootloader or the ROM's download mode: the RTC watchdog, which
+ * the fault path arms, is not reset by the software reset, and the
+ * interrupt watchdog is stopped as ESP-IDF's esp_restart_noos() stops it.
+ * The software system reset resets the CPU and the digital peripherals and
+ * leaves the RAM as it is.
  */
 void board_restart(void)
 {
     uart_tx_flush();
+    board_watchdog_stop();
     esp_rom_software_reset_system();
     for (;;) {
     }
@@ -147,6 +152,15 @@ void board_restart_to_download(void)
 {
     REG_SET_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
     board_restart();
+}
+
+/*
+ * The ROM keeps the reason of the last reset; stage 1 of the interrupt
+ * watchdog (port/watchdog.c) is timer group 1's system reset.
+ */
+bool board_reset_by_int_wdt(void)
+{
+    return esp_rom_get_reset_reason(0) == RESET_REASON_CORE_MWDT1;
 }
 
 /* ---- Console ------------------------------------------------------------- */

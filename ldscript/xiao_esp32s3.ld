@@ -130,7 +130,8 @@ SECTIONS
      *     calls (esp_rom_cache_esp32s2_esp32s3.c),
      *   - fault reporting (port/panic.c), which fills and seals the record of
      *     the error before it reads flash: the flash mapping may be the
-     *     thing that is broken,
+     *     thing that is broken, and the watchdogs it stops and arms on the
+     *     way (port/watchdog.c, which also feeds on every tick),
      *   - what Espressif marks IRAM_ATTR (.iram1), and the objects ESP-IDF
      *     keeps out of flash in an application so that they work with the
      *     cache disabled: the clock code with its analog-register access
@@ -149,6 +150,7 @@ SECTIONS
         *(.iram1.literal .iram1 .iram1.*)
         *startup.c.obj(.literal .literal.* .text .text.*)
         *panic.c.obj(.literal .literal.* .text .text.*)
+        *watchdog.c.obj(.literal .literal.* .text .text.*)
         *rtc_clk.c.obj(.literal .literal.* .text .text.*)
         *regi2c_ctrl.c.obj(.literal .literal.* .text .text.*)
         *wdt_hal_iram.c.obj(.literal .literal.* .text .text.*)
@@ -172,6 +174,7 @@ SECTIONS
         /* Read-only data of the objects that run from RAM (see .iram0.text). */
         *startup.c.obj(.rodata .rodata.*)
         *panic.c.obj(.rodata .rodata.*)
+        *watchdog.c.obj(.rodata .rodata.*)
         *rtc_clk.c.obj(.rodata .rodata.*)
         *regi2c_ctrl.c.obj(.rodata .rodata.*)
         *wdt_hal_iram.c.obj(.rodata .rodata.*)

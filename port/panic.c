@@ -8,18 +8,21 @@
  *                             table: a user-mode exception nobody handles.
  *   panicHandler()            called by _xt_panic (esp_system) for kernel,
  *                             double and debug exceptions and for coprocessor
- *                             use outside a thread.  EXCCAUSE then holds a
- *                             PANIC_RSN_* pseudo cause.
+ *                             use outside a thread, and by xt_highint4
+ *                             (esp_system's highint_hdl.S) for stage 0 of the
+ *                             interrupt watchdog (port/watchdog.c).  EXCCAUSE
+ *                             then holds a PANIC_RSN_* pseudo cause.
  *   _tx_xtensa_stack_error_handler()
  *                             ThreadX's stack check (TX_ENABLE_STACK_CHECKING),
  *                             registered by tx_port.h.
  *   _exit()                   exit(), abort(), main() returning.
  *
- * Each masks every interrupt, fills fault_retained in .noinit, prints the
- * dump through the ROM printf and restarts the board with board_restart(),
- * which first lets the UART send what is queued.  Nothing here allocates,
- * locks, uses newlib's stdio or calls a ThreadX service.  fault_boot()
- * takes the record at the next start.
+ * Each masks every interrupt, stops the interrupt watchdog and arms the RTC
+ * watchdog (board_watchdog_fault()), fills fault_retained in .noinit, prints
+ * the dump through the ROM printf and restarts the board with
+ * board_restart(), which first lets the UART send what is queued.  Nothing
+ * here allocates, locks, uses newlib's stdio or calls a ThreadX service.
+ * fault_boot() takes the record at the next start.
  *
  * This file and its read-only data run from RAM (see the linker script), so
  * the record is filled and sealed without reading flash: the exception
@@ -40,6 +43,8 @@
 #include "tx_thread.h"
 #include "xtensa_api.h"
 #include "xtensa/xtruntime.h"
+#include "sdkconfig.h"
+#include "esp_private/panic_reason.h"
 #include "esp_rom_sys.h"
 #include "soc/soc.h"
 
@@ -117,9 +122,9 @@ static void copy_task_name(struct fault_record *r, const TX_THREAD *thread)
 }
 
 /*
- * Masks every interrupt and starts a cleared record with reason and the
- * kernel's state.  A second entry, a fault inside this path, resets at once
- * (a ROM function).
+ * Masks every interrupt, hands the watchdogs over to the fault path and
+ * starts a cleared record with reason and the kernel's state.  A second
+ * entry, a fault inside this path, resets at once (a ROM function).
  */
 static struct fault_record *fault_begin(uint32_t reason)
 {
@@ -132,6 +137,7 @@ static struct fault_record *fault_begin(uint32_t reason)
         }
     }
     fault_entered = true;
+    board_watchdog_fault();
 
     memset(r, 0, sizeof(*r));
     r->reason = reason;
@@ -229,13 +235,30 @@ void xt_unhandled_exception(XtExcFrame *frame)
     fault_dump_and_restart(r);
 }
 
+/*
+ * For the interrupt watchdog the frame's PS is the one xt_highint4 ran with
+ * (level 4); the PS of the code that was stuck is in EPS_4, which nothing
+ * has overwritten since (xt_highint4 calls this at level 5).
+ */
 void panicHandler(void *frame)
 {
-    struct fault_record *r = fault_begin(FAULT_REASON_PANIC);
+    const XtExcFrame *f = frame;
+    bool int_wdt = f->exccause == PANIC_RSN_INTWDT_CPU0;
+    struct fault_record *r = fault_begin(int_wdt ? FAULT_REASON_INT_WDT : FAULT_REASON_PANIC);
 
-    set_frame(r, frame);
+    set_frame(r, f);
+    if (int_wdt) {
+        uint32_t eps4;
+
+        __asm__ volatile ("rsr.eps4 %0" : "=a" (eps4));
+        r->ps = eps4;
+    }
     fault_seal(r, _tx_thread_current_ptr);
-    esp_rom_printf("\n*** Panic: %s\n", fault_cause_name(r));
+    if (int_wdt) {
+        esp_rom_printf("\n*** Interrupt watchdog: no tick for %d ms\n", CONFIG_ESP_INT_WDT_TIMEOUT_MS);
+    } else {
+        esp_rom_printf("\n*** Panic: %s\n", fault_cause_name(r));
+    }
     fault_dump_and_restart(r);
 }
 

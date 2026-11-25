@@ -13,6 +13,7 @@
 #include "tx_initialize.h"
 
 #include "app_log.h"
+#include "board.h"
 #include "fault_record.h"
 
 LOG_MODULE_REGISTER(fault);
@@ -38,6 +39,10 @@ const char *fault_reason_name(uint32_t reason)
         return "stack overflow";
     case FAULT_REASON_EXIT:
         return "exit";
+    case FAULT_REASON_INT_WDT:
+        return "interrupt watchdog";
+    case FAULT_REASON_INT_WDT_RESET:
+        return "interrupt watchdog reset";
     default:
         return "unknown";
     }
@@ -79,7 +84,7 @@ const char *fault_cause_name(const struct fault_record *r)
     if (r->reason == FAULT_REASON_EXCEPTION
         && r->exccause < sizeof(exccause_name) / sizeof(exccause_name[0])) {
         name = exccause_name[r->exccause];
-    } else if (r->reason == FAULT_REASON_PANIC
+    } else if ((r->reason == FAULT_REASON_PANIC || r->reason == FAULT_REASON_INT_WDT)
                && r->exccause < sizeof(panic_cause_name) / sizeof(panic_cause_name[0])) {
         name = panic_cause_name[r->exccause];
     }
@@ -97,6 +102,7 @@ enum line_kind {
     LINE_A8,
     LINE_A12,
     LINE_PC_SP,
+    LINE_NO_RECORD,
 };
 
 #define LINE_KINDS_MAX 8
@@ -106,6 +112,10 @@ static unsigned int line_kinds(const struct fault_record *r, enum line_kind kind
     unsigned int n = 0;
 
     kinds[n++] = LINE_REASON;
+    if (r->reason == FAULT_REASON_INT_WDT_RESET) {
+        kinds[n++] = LINE_NO_RECORD;
+        return n;
+    }
     kinds[n++] = LINE_WHERE;
     if ((r->flags & FAULT_RECORD_FRAME) != 0u) {
         kinds[n++] = LINE_CAUSE;
@@ -185,6 +195,10 @@ size_t fault_record_line(const struct fault_record *r, unsigned int index, char 
     case LINE_A12:
         ret = line_regs(r, 12, buf, len);
         break;
+    case LINE_NO_RECORD:
+        ret = snprintf(buf, len,
+                       "No record: the interrupt watchdog reset the chip before a fault handler ran");
+        break;
     case LINE_PC_SP:
     default:
         ret = snprintf(buf, len, "pc 0x%08" PRIx32 " sp 0x%08" PRIx32, r->pc, r->a[1]);
@@ -225,6 +239,10 @@ void fault_boot(void)
     last_valid = fault_record_valid(&fault_retained);
     if (last_valid) {
         last = fault_retained;
+    } else if (board_reset_by_int_wdt()) {
+        memset(&last, 0, sizeof(last));
+        last.reason = FAULT_REASON_INT_WDT_RESET;
+        last_valid = true;
     }
     memset(&fault_retained, 0, sizeof(fault_retained));
     if (last_valid) {

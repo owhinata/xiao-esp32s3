@@ -118,6 +118,15 @@
 #define CONFIG_ESP_EFUSE_BLOCK_REV_MIN_FULL     0
 #define CONFIG_ESP_EFUSE_BLOCK_REV_MAX_FULL     199
 
+/*
+ * Interrupt watchdog (port/watchdog.c), ESP-IDF's default timeout without
+ * PSRAM.  The application's own code and esp_private/esp_int_wdt.h read
+ * these; xtensa_vectors.S tests CONFIG_ESP_INT_WDT only together with
+ * ESP32-only options, and no source of the bootloader tests either.
+ */
+#define CONFIG_ESP_INT_WDT                      1
+#define CONFIG_ESP_INT_WDT_TIMEOUT_MS           300
+
 /* ---- HAL and log in the application ----------------------------------- */
 
 #define CONFIG_HAL_DEFAULT_ASSERTION_LEVEL      0

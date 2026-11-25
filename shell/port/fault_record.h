@@ -8,12 +8,15 @@
  * comes before shell/common/compat/include on the include path.
  *
  * The fault handlers (port/panic.c: an exception no handler takes, the
- * Xtensa layer's panic, ThreadX's stack check, _exit()) fill the record in
+ * Xtensa layer's panic, the interrupt watchdog, ThreadX's stack check,
+ * _exit()) fill the record in
  * .noinit (fault_retained), which neither the second-stage bootloader nor
  * _start loads or clears, print a register dump and restart the board.  At
  * the next start fault_boot() takes it once; "fault" and the banner show
  * it, and its lines go into the RAM log ("dmesg").  magic, size and check
  * (a CRC-32 of the rest) tell a record from what a power-on leaves in RAM.
+ * A reset by the interrupt watchdog's second stage leaves no record; the
+ * next start tells it from the chip's reset reason.
  */
 #ifndef SHELL_PORT_FAULT_RECORD_H
 #define SHELL_PORT_FAULT_RECORD_H
@@ -57,6 +60,17 @@ enum fault_reason {
     FAULT_REASON_STACK_OVERFLOW = 3,
     /* _exit(): exit(), abort() (newlib's assert()), main() returning. */
     FAULT_REASON_EXIT = 4,
+    /* Stage 0 of the interrupt watchdog (port/watchdog.c): no tick for its
+     * timeout.  Entered like FAULT_REASON_PANIC (panicHandler()), with the
+     * pseudo cause PANIC_RSN_INTWDT_CPU0 in exccause; pc is where the code
+     * was stuck and ps its PS (EPS_4).
+     */
+    FAULT_REASON_INT_WDT = 5,
+    /* Stage 1 of the interrupt watchdog reset the system, and the run left
+     * no record.  Never written by the fault handlers: fault_boot() makes it
+     * from the reset reason; only reason is set.
+     */
+    FAULT_REASON_INT_WDT_RESET = 6,
 };
 
 /* The record's flags. */
@@ -117,7 +131,8 @@ const char *fault_reason_name(uint32_t reason);
 /*
  * The name of r->exccause: an EXCCAUSE ("LoadProhibited", ...) for
  * FAULT_REASON_EXCEPTION, a PANIC_RSN_* pseudo cause ("double exception",
- * ...) for FAULT_REASON_PANIC; "unknown" for a value without a name.
+ * ...) for FAULT_REASON_PANIC and FAULT_REASON_INT_WDT; "unknown" for a
+ * value without a name.
  */
 const char *fault_cause_name(const struct fault_record *r);
 
@@ -136,7 +151,9 @@ const char *fault_cause_name(const struct fault_record *r);
  *
  * The second line says "With no task running" in place of "In task <task>"
  * when task is "", and "Before the scheduler started" when the error came
- * before it.
+ * before it.  FAULT_REASON_INT_WDT_RESET has the first line and
+ *
+ *   No record: the interrupt watchdog reset the chip before a fault handler ran
  */
 size_t fault_record_line(const struct fault_record *r, unsigned int index, char *buf, size_t len);
 
@@ -147,9 +164,12 @@ void fault_record_print(const struct fault_record *r);
 
 /*
  * At the start, after log_ram_initialize(): takes the record the last run
- * left in fault_retained, if it is valid, keeps a copy for fault_last(),
- * writes its lines into the RAM log, and clears fault_retained so that the
- * next start does not see it again.  Once, before the kernel runs threads.
+ * left in fault_retained, if it is valid, or else makes one of reason
+ * FAULT_REASON_INT_WDT_RESET when the chip's reset reason is the interrupt
+ * watchdog's second stage; keeps it for fault_last(), writes its lines into
+ * the RAM log, and clears fault_retained so that the next start does not see
+ * it again (the reset reason is that of each reset).  Once, before the
+ * kernel runs threads.
  */
 void fault_boot(void);
 

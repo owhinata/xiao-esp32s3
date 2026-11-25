@@ -128,7 +128,9 @@ target_link_options(esp_hal INTERFACE
 # Vectors, interrupt dispatch, context save/restore and the coprocessor
 # exception, shared by every RTOS on Espressif Xtensa chips.  It reaches the
 # RTOS through "xtensa_rtos.h", supplied by port/threadx/inc.  _xt_panic comes
-# from esp_system.  The sources are used unmodified.
+# from esp_system, and so does xt_highint4, the level-4 interrupt handler that
+# takes the interrupt watchdog to panicHandler() (it replaces the layer's weak
+# default).  The sources are used unmodified.
 #
 # portNUM_PROCESSORS sizes the layer's per-core tables; two of its files take
 # it from the build rather than from xtensa_rtos.h.
@@ -137,7 +139,8 @@ add_library(xtensa_rtos OBJECT
     "${ESP_HAL}/xtensa/xtensa_intr_asm.S"
     "${ESP_HAL}/xtensa/xtensa_intr.c"
     "${ESP_HAL}/xtensa/xtensa_vectors.S"
-    "${ESP_HAL}/esp_system/port/arch/xtensa/panic_handler_asm.S")
+    "${ESP_HAL}/esp_system/port/arch/xtensa/panic_handler_asm.S"
+    "${ESP_HAL}/esp_system/port/soc/esp32s3/highint_hdl.S")
 target_include_directories(xtensa_rtos PUBLIC "${PORT_DIR}/threadx/inc")
 target_compile_definitions(xtensa_rtos PUBLIC
     portNUM_PROCESSORS=1
@@ -182,6 +185,7 @@ add_executable(app
     "${PORT_DIR}/startup.c"
     "${PORT_DIR}/board.c"
     "${PORT_DIR}/panic.c"
+    "${PORT_DIR}/watchdog.c"
     "${PORT_DIR}/syscalls.c"
     "${PORT_DIR}/esp_compat/esp_stubs.c"
     # esp-hal-3rdparty sources this image needs, compiled as they are

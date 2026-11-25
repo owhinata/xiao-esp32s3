@@ -21,6 +21,7 @@ from flash at 240 MHz, with an interactive shell on the USB console.  See
 | Console | USB Serial/JTAG on the USB-C connector and UART0 on D6/D7 (115200 8N1), together; receive by interrupt on both, UART transmit by interrupt through a 4 KiB ring, USB transmit polled |
 | Shell | The shell of [rp2040-connect](https://github.com/owhinata/rp2040-connect), copied into `shell/common/` |
 | Tick | 1000 Hz from CCOMPARE0 (CPU interrupt 6, level 1) |
+| Watchdog | ESP-IDF's interrupt watchdog: timer group 1, fed by every tick; 300 ms without a tick ends in the fault report, 600 ms more in a system reset |
 | Uptime clock | SYSTIMER counter 0 (16 MHz, from the crystal) |
 | Run times | ThreadX execution profile kit on the CPU cycle counter |
 | LED | GPIO21, active low |
@@ -147,7 +148,13 @@ interrupted or resumed.
 After a fatal error the board restarts by itself.  `fault` then shows the
 record of the error that ended the last run (the reason, EXCCAUSE, the
 registers, the task, the time); the banner shows it once and `dmesg` has its
-lines.  The record is gone after the next restart.  Its layout is this
+lines.  The record is gone after the next restart.  No tick for 300 ms
+(interrupts masked that long, or an interrupt handler that does not return)
+is such an error too: the interrupt watchdog's first stage, a level-4
+interrupt, reports it with the registers of the code that was stuck (`Fatal
+error: interrupt watchdog`).  If even that cannot run, its second stage
+resets the chip 0.6 s later without a record, and the next start says so
+from the chip's reset reason (`Fatal error: interrupt watchdog reset`).  Its layout is this
 board's (`shell/port/fault_record.h`), not rp2040-connect's Cortex-M one.
 
 ## How it boots
@@ -221,7 +228,8 @@ as it is, and to write only what connects it to ThreadX and to this board.
 | `xtensa/xtensa_intr.c`, `xtensa_intr_asm.S` | Handler tables, `xt_set_interrupt_handler()`, `xt_ints_on/off()` |
 | `xtensa/esp32s3/libxt_hal.a` | Xtensa HAL (window spill, extra-state save) |
 | `esp_system/port/arch/xtensa/panic_handler_asm.S` | `_xt_panic` |
-| `esp_hal_wdt/wdt_hal_iram.c` | Watchdog control |
+| `esp_hal_wdt/wdt_hal_iram.c` | Watchdog control (interrupt watchdog, RTC watchdog) |
+| `esp_system/port/soc/esp32s3/highint_hdl.S` | `xt_highint4`: the interrupt watchdog's level-4 interrupt into `panicHandler` |
 | `bootloader/subproject/main/bootloader_start.c`, `bootloader_support/`, and what they need of `efuse`, `esp_rom`, `esp_hw_support`, `log`, `hal` | The second-stage bootloader, with ESP-IDF's own linker scripts |
 | `esp_app_format/esp_app_desc.c` | The application descriptor the bootloader expects at the start of the image |
 | `partition_table/gen_esp32part.py`, `check_sizes.py` | Partition table generation and size checks |
@@ -268,7 +276,7 @@ files were copied to `port/threadx/` and adapted to Espressif's layer.  The
 | `src/tx_port_asm.S` | new | Coprocessor save-area lookup (taken from upstream `xtensa_coproc_handler.S`), exception hook, interrupt stack |
 | `src/tx_port_offset_check.c` | new | Build-time check of the TCB offsets the assembly uses.  The upstream Xtensa port has no such check; the name follows the one upstream's Cortex-R ports use. |
 | `inc/tx_user.h` | new | Kernel options: 1 kHz tick, timers processed in the tick interrupt, and the per-thread pointer the shell's kernel layer needs |
-| `inc/xtensa_rtos.h` | new | Maps the layer's RTOS callouts to ThreadX (upstream has a file of the same name for its own copy of the layer) |
+| `inc/xtensa_rtos.h` | new | Maps the layer's RTOS callouts to ThreadX; the tick goes through the board's `board_tick_interrupt()`, which feeds the interrupt watchdog (upstream has a file of the same name for its own copy of the layer) |
 | `inc/freertos/xtensa_rtos.h` | new | Include-path shim for `panic_handler_asm.S` |
 
 **rp2040-connect**
@@ -290,9 +298,10 @@ fault record, and the commands only the board can answer (`version`, `free`,
 |---|---|
 | `startup.c` | Application start-up after the bootloader |
 | `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: a `freertos/FreeRTOS.h` that provides critical sections only, and small stand-in headers for `esp_sleep` and `esp_mspi` |
-| `board.c` | LED, clock readback, uptime, console on USB Serial/JTAG and UART0 (receive interrupts, UART transmit interrupt and queue), device ID, restart |
+| `board.c` | LED, clock readback, uptime, console on USB Serial/JTAG and UART0 (receive interrupts, UART transmit interrupt and queue), device ID, restart, reset reason |
+| `watchdog.c` | The interrupt watchdog (started by the first tick, fed by every tick), and the watchdogs of the fault path and the restart |
 | `syscalls.c` | newlib fd 0-2 on the console; once the shell runs, stdout and stderr go through the shell's console layer |
-| `panic.c` | Fatal errors (`xt_unhandled_exception`, `panicHandler`, ThreadX's stack check, `_exit`): register dump, record kept across the restart in `.noinit`, restart |
+| `panic.c` | Fatal errors (`xt_unhandled_exception`, `panicHandler` including the interrupt watchdog, ThreadX's stack check, `_exit`): register dump, record kept across the restart in `.noinit`, restart |
 | `include/sdkconfig.h` | The `CONFIG_` symbols the compiled sources need, shared by the bootloader and the application |
 
 The C library is usable from threads and from `tx_application_define()`, not
@@ -329,11 +338,21 @@ yet.  In the order a failure would show up:
    lines of earlier boots after a `reboot`, and `app-flash` alone updates the
    firmware.
 8. The LED blinks at 1 Hz.
+9. The interrupt watchdog, with temporary code: a thread that keeps
+   interrupts masked, or an interrupt handler that does not return, ends in
+   `*** Interrupt watchdog: no tick for 300 ms` and a restart, and `fault`
+   names the thread and the PC.  With every level masked
+   (`tx_interrupt_control(15)`) the ROM log shows `rst:0x8 (TG1WDT_SYS_RST)`
+   and the banner `Fatal error: interrupt watchdog reset`.  Idle, nothing
+   restarts.
 
 Every unhandled exception, including kernel and double exceptions, a thread's
-stack overflow and `_exit()` print a register dump through the ROM printf,
+stack overflow, a tick that stalls for 300 ms (the interrupt watchdog) and
+`_exit()` print a register dump through the ROM printf,
 keep a record in RAM that survives the reset, and restart the board.  The
 handler runs from RAM and seals the record before it reads flash, so the
 record survives even when the flash mapping is what failed (the dump itself
 goes through console code in flash).  Not exercised on the board: `_exit()`,
-a break instruction, and a second fault inside the handler.
+a break instruction, a second fault inside the handler, and a handler that
+hangs (it stops the interrupt watchdog and arms the RTC watchdog for 2 s, so
+that the board still restarts).

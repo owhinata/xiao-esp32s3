@@ -88,7 +88,10 @@ VOID _tx_initialize_low_level(VOID)
 #else
 #error "Unsupported XT_TIMER_INDEX"
 #endif
-    /* The layer dispatches this interrupt straight to _tx_timer_interrupt. */
+    /*
+     * The layer dispatches this interrupt straight to XT_RTOS_TIMER_INT,
+     * which ends in _tx_timer_interrupt (xtensa_rtos.h).
+     */
     xt_ints_on(XT_TIMER_INTEN);
 #else
     (void) ccount;

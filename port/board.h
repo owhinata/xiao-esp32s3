@@ -4,6 +4,7 @@
 #ifndef BOARD_H
 #define BOARD_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -42,9 +43,31 @@ void     board_device_id(uint8_t id[BOARD_DEVICE_ID_SIZE]);
 /*
  * Restart, into this firmware or into the ROM's download mode (esptool),
  * once what is queued for the UART is on the line (at most about 0.4 s).
+ * The watchdogs below are stopped just before the reset.
  */
 void     board_restart(void) __attribute__((noreturn));
 void     board_restart_to_download(void) __attribute__((noreturn));
+
+/*
+ * Watchdogs (port/watchdog.c, in RAM).  The interrupt watchdog starts with
+ * the first tick and is fed by every tick interrupt, through
+ * board_tick_interrupt(), the Xtensa layer's tick handler.  Its first stage
+ * ends in panicHandler() (port/panic.c); its second resets the system.
+ *
+ * board_watchdog_fault(): at the entry of the fault path, interrupts
+ * masked.  The interrupt watchdog off, the RTC watchdog armed to reset the
+ * system if the fault path does not get to its restart.
+ * board_watchdog_stop(): both off (board_restart(), right before the reset).
+ */
+void     board_tick_interrupt(void);
+void     board_watchdog_fault(void);
+void     board_watchdog_stop(void);
+
+/*
+ * Whether the last reset was the interrupt watchdog's second stage: the
+ * chip's reset reason, which every reset sets anew.
+ */
+bool     board_reset_by_int_wdt(void);
 
 /*
  * Console on two transports at once: the built-in USB Serial/JTAG controller
