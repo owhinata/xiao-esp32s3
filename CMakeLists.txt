@@ -56,6 +56,23 @@ fetch_upstream(esp32-wifi-lib
     https://github.com/espressif/esp32-wifi-lib
     07e8d017cd5ed6a9d9fd7463fe254f0820a526da
     SPARSE esp32s3)
+# mbedTLS, Espressif's fork, at the commit of the mirror's components/mbedtls/
+# mbedtls: the PSA crypto core (TF-PSA-Crypto) and its built-in software
+# drivers, which the Wi-Fi supplicant's crypto calls, and the headers of the
+# TLS part, which its sources include.  The TLS library itself, the tests,
+# programs and the other drivers are not downloaded.
+fetch_upstream(mbedtls
+    https://github.com/espressif/mbedtls
+    f5c91881be98b4da0bf57c217bf45b668fb84f9f
+    SPARSE
+    include
+    tf-psa-crypto/include
+    tf-psa-crypto/core
+    tf-psa-crypto/dispatch
+    tf-psa-crypto/drivers/builtin
+    tf-psa-crypto/extras
+    tf-psa-crypto/platform
+    tf-psa-crypto/utilities)
 
 set(ESP_HAL  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-hal-3rdparty/components")
 set(ESP_IDF  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-idf/components")
@@ -240,7 +257,276 @@ add_executable(app
     "${PORT_DIR}/esp_log_ram.c"
     "${PORT_DIR}/net/wifi.c"
     "${PORT_DIR}/esp_compat/esp_sleep.c"
-    "${PORT_DIR}/esp_compat/mspi_timing.c")
+    "${PORT_DIR}/esp_compat/mspi_timing.c"
+    "${PORT_DIR}/esp_compat/nvs.c"
+    "${PORT_DIR}/esp_compat/pthread_local.c")
+
+# ---------------------------------------------------------------------------
+# mbedTLS: the PSA crypto core and its software drivers (lib/mbedtls)
+# ---------------------------------------------------------------------------
+# Configured as ESP-IDF configures it, by its port's esp_config.h (as both
+# the mbedTLS and the TF-PSA-Crypto user configuration), which reads the
+# CONFIG_MBEDTLS_* of sdkconfig.h.  The port's include directory comes first:
+# some of its headers wrap mbedTLS's of the same name (#include_next).
+# mbedtls_config is what every user of the headers needs.
+set(MBEDTLS_DIR  "${CMAKE_CURRENT_LIST_DIR}/lib/mbedtls")
+set(TF_PSA_DIR   "${MBEDTLS_DIR}/tf-psa-crypto")
+set(MBEDTLS_PORT "${ESP_HAL}/mbedtls/port")
+add_library(mbedtls_config INTERFACE)
+target_include_directories(mbedtls_config INTERFACE
+    "${MBEDTLS_PORT}/include"
+    "${MBEDTLS_PORT}/psa_driver/include"
+    "${MBEDTLS_DIR}/include"
+    "${TF_PSA_DIR}/include"
+    "${TF_PSA_DIR}/drivers/builtin/include")
+target_compile_definitions(mbedtls_config INTERFACE
+    "MBEDTLS_CONFIG_FILE=\"mbedtls/esp_config.h\""
+    "TF_PSA_CRYPTO_USER_CONFIG_FILE=\"mbedtls/esp_config.h\""
+    MBEDTLS_MAJOR_VERSION=4
+    __STDC_WANT_LIB_EXT1__=0)
+
+# A static library, as in ESP-IDF: only what the supplicant reaches is
+# linked.  esp_psa_crypto_init.c's start-up hook (psa_crypto_init()) is
+# pulled in by name ("-u", as ESP-IDF does), and esp_mem.c's allocator with
+# it (the configuration names it as mbedTLS's calloc and free).
+file(GLOB MBEDTLS_SOURCES CONFIGURE_DEPENDS
+    "${TF_PSA_DIR}/core/*.c"
+    "${TF_PSA_DIR}/drivers/builtin/src/*.c"
+    "${TF_PSA_DIR}/extras/*.c"
+    "${TF_PSA_DIR}/platform/*.c"
+    "${TF_PSA_DIR}/utilities/*.c")
+add_library(mbedtls STATIC
+    ${MBEDTLS_SOURCES}
+    "${MBEDTLS_PORT}/esp_mem.c"
+    "${MBEDTLS_PORT}/esp_hardware.c"
+    "${MBEDTLS_PORT}/esp_psa_crypto_init.c"
+    "${MBEDTLS_PORT}/esp_platform_time.c"
+    "${MBEDTLS_PORT}/psa_driver/esp_md/psa_crypto_driver_esp_md5.c"
+    "${MBEDTLS_PORT}/psa_driver/esp_mac/psa_crypto_driver_esp_hmac_opaque.c")
+target_include_directories(mbedtls PRIVATE
+    "${TF_PSA_DIR}/core"
+    "${TF_PSA_DIR}/dispatch"
+    "${TF_PSA_DIR}/drivers/builtin/src"
+    "${TF_PSA_DIR}/extras"
+    "${TF_PSA_DIR}/platform"
+    "${TF_PSA_DIR}/utilities"
+    "${ESP_HAL}/esp_libc/platform_include"
+    "${ESP_HAL}/esp_security/include"
+    "${ESP_HAL}/esp_hal_security/include"
+    "${ESP_HAL}/esp_hal_security/esp32s3/include"
+    "${ESP_HAL}/efuse/include"
+    "${ESP_HAL}/efuse/esp32s3/include")
+target_link_libraries(mbedtls PUBLIC mbedtls_config PRIVATE freertos esp_hal)
+target_compile_options(mbedtls PRIVATE -UNDEBUG)
+
+# ---------------------------------------------------------------------------
+# Wi-Fi: headers, the supplicant, the binary libraries
+# ---------------------------------------------------------------------------
+set(WPA_DIR       "${ESP_HAL}/wpa_supplicant")
+set(ESP_WIFI_LIB  "${CMAKE_CURRENT_LIST_DIR}/lib/esp32-wifi-lib/esp32s3")
+
+# The headers of the Wi-Fi driver and what they include: esp_event, the
+# coexistence adapter, the supplicant's public part, esp_pm (wifi_init.c),
+# and of components that are not built here, headers only: esp_netif
+# (wifi_init.c; no network interface code is built), nvs_flash and
+# esp_partition with esp_blockdev (phy_init.c and the OS adapter include
+# nvs.h; port/esp_compat/nvs.c), the GPIO driver's types (phy_common.c).
+add_library(esp_wifi_headers INTERFACE)
+target_include_directories(esp_wifi_headers INTERFACE
+    "${ESP_HAL}/esp_wifi/include"
+    "${ESP_HAL}/esp_wifi/include/local"
+    "${ESP_HAL}/esp_wifi/wifi_apps/include"
+    "${ESP_HAL}/esp_wifi/wifi_apps/nan_app/include"
+    "${ESP_HAL}/esp_event/include"
+    "${ESP_HAL}/esp_coex/include"
+    "${WPA_DIR}/include"
+    "${WPA_DIR}/port/include"
+    "${WPA_DIR}/esp_supplicant/include"
+    "${ESP_HAL}/esp_pm/include"
+    "${ESP_HAL}/esp_timer/include"
+    "${ESP_HAL}/esp_hw_support/etm/include"
+    "${ESP_HAL}/esp_phy/include"
+    "${ESP_HAL}/esp_phy/esp32s3/include"
+    "${ESP_IDF}/esp_netif/include"
+    "${ESP_IDF}/nvs_flash/include"
+    "${ESP_IDF}/esp_partition/include"
+    "${ESP_HAL}/esp_blockdev/include"
+    "${ESP_HAL}/upper_hal_gpio/include")
+
+# wpa_supplicant, built as ESP-IDF builds it (its CMakeLists.txt: sources,
+# definitions, include directories) for the options of sdkconfig.h: station
+# with WPA2-PSK, WPA3-SAE with hash-to-element, OWE, PMF (802.11w) and
+# GMAC, the crypto on mbedTLS.  Without SoftAP the hostap glue
+# (esp_hostap.c) is left out.  The parts ESP-IDF compiles unconditionally
+# (the AP side, WPS, EAP peer methods, the internal TLS client that EAP
+# uses when mbedTLS's TLS is not, as here) are compiled too; a static
+# library links only what the driver reaches.
+add_library(wpa_supplicant STATIC
+    "${WPA_DIR}/port/os_xtensa.c"
+    "${WPA_DIR}/port/eloop.c"
+    "${WPA_DIR}/src/ap/ap_config.c"
+    "${WPA_DIR}/src/ap/ieee802_1x.c"
+    "${WPA_DIR}/src/ap/wpa_auth.c"
+    "${WPA_DIR}/src/ap/wpa_auth_ie.c"
+    "${WPA_DIR}/src/ap/pmksa_cache_auth.c"
+    "${WPA_DIR}/src/ap/sta_info.c"
+    "${WPA_DIR}/src/ap/ieee802_11.c"
+    "${WPA_DIR}/src/ap/comeback_token.c"
+    "${WPA_DIR}/src/common/sae.c"
+    "${WPA_DIR}/src/common/dragonfly.c"
+    "${WPA_DIR}/src/common/wpa_common.c"
+    "${WPA_DIR}/src/utils/bitfield.c"
+    "${WPA_DIR}/src/crypto/aes-siv.c"
+    "${WPA_DIR}/src/crypto/sha256-kdf.c"
+    "${WPA_DIR}/src/crypto/ccmp.c"
+    "${WPA_DIR}/src/crypto/aes-gcm.c"
+    "${WPA_DIR}/src/crypto/crypto_ops.c"
+    "${WPA_DIR}/src/crypto/dh_group5.c"
+    "${WPA_DIR}/src/crypto/dh_groups.c"
+    "${WPA_DIR}/src/crypto/ms_funcs.c"
+    "${WPA_DIR}/src/crypto/sha1-tlsprf.c"
+    "${WPA_DIR}/src/crypto/sha256-tlsprf.c"
+    "${WPA_DIR}/src/crypto/sha384-tlsprf.c"
+    "${WPA_DIR}/src/crypto/sha256-prf.c"
+    "${WPA_DIR}/src/crypto/sha1-prf.c"
+    "${WPA_DIR}/src/crypto/sha384-prf.c"
+    "${WPA_DIR}/src/crypto/md4-internal.c"
+    "${WPA_DIR}/src/crypto/sha1-tprf.c"
+    "${WPA_DIR}/src/eap_common/eap_wsc_common.c"
+    "${WPA_DIR}/src/common/ieee802_11_common.c"
+    "${WPA_DIR}/src/eap_peer/chap.c"
+    "${WPA_DIR}/src/eap_peer/eap.c"
+    "${WPA_DIR}/src/eap_peer/eap_common.c"
+    "${WPA_DIR}/src/eap_peer/eap_mschapv2.c"
+    "${WPA_DIR}/src/eap_peer/eap_peap.c"
+    "${WPA_DIR}/src/eap_peer/eap_peap_common.c"
+    "${WPA_DIR}/src/eap_peer/eap_gtc.c"
+    "${WPA_DIR}/src/eap_peer/eap_tls.c"
+    "${WPA_DIR}/src/eap_peer/eap_tls_common.c"
+    "${WPA_DIR}/src/eap_peer/eap_ttls.c"
+    "${WPA_DIR}/src/eap_peer/mschapv2.c"
+    "${WPA_DIR}/src/eap_peer/eap_fast.c"
+    "${WPA_DIR}/src/eap_peer/eap_fast_common.c"
+    "${WPA_DIR}/src/eap_peer/eap_fast_pac.c"
+    "${WPA_DIR}/src/rsn_supp/pmksa_cache.c"
+    "${WPA_DIR}/src/rsn_supp/wpa.c"
+    "${WPA_DIR}/src/rsn_supp/wpa_ie.c"
+    "${WPA_DIR}/src/utils/base64.c"
+    "${WPA_DIR}/src/utils/common.c"
+    "${WPA_DIR}/src/utils/ext_password.c"
+    "${WPA_DIR}/src/utils/uuid.c"
+    "${WPA_DIR}/src/utils/wpabuf.c"
+    "${WPA_DIR}/src/utils/wpa_debug.c"
+    "${WPA_DIR}/src/utils/json.c"
+    "${WPA_DIR}/src/wps/wps.c"
+    "${WPA_DIR}/src/wps/wps_attr_build.c"
+    "${WPA_DIR}/src/wps/wps_attr_parse.c"
+    "${WPA_DIR}/src/wps/wps_attr_process.c"
+    "${WPA_DIR}/src/wps/wps_common.c"
+    "${WPA_DIR}/src/wps/wps_dev_attr.c"
+    "${WPA_DIR}/src/wps/wps_enrollee.c"
+    "${WPA_DIR}/esp_supplicant/src/esp_eap_client.c"
+    "${WPA_DIR}/esp_supplicant/src/esp_wpa_main.c"
+    "${WPA_DIR}/esp_supplicant/src/esp_wpas_glue.c"
+    "${WPA_DIR}/esp_supplicant/src/esp_common.c"
+    "${WPA_DIR}/esp_supplicant/src/esp_wps.c"
+    "${WPA_DIR}/esp_supplicant/src/esp_wpa3.c"
+    "${WPA_DIR}/esp_supplicant/src/esp_owe.c"
+    "${WPA_DIR}/esp_supplicant/src/esp_nan_supplicant.c"
+    # The internal TLS client (CONFIG_ESP_WIFI_MBEDTLS_TLS_CLIENT off).
+    "${WPA_DIR}/src/tls/asn1.c"
+    "${WPA_DIR}/src/tls/bignum.c"
+    "${WPA_DIR}/src/tls/pkcs1.c"
+    "${WPA_DIR}/src/tls/pkcs5.c"
+    "${WPA_DIR}/src/tls/pkcs8.c"
+    "${WPA_DIR}/src/tls/rsa.c"
+    "${WPA_DIR}/src/crypto/tls_internal.c"
+    "${WPA_DIR}/src/tls/tlsv1_client.c"
+    "${WPA_DIR}/src/tls/tlsv1_client_read.c"
+    "${WPA_DIR}/src/tls/tlsv1_client_write.c"
+    "${WPA_DIR}/src/tls/tlsv1_common.c"
+    "${WPA_DIR}/src/tls/tlsv1_cred.c"
+    "${WPA_DIR}/src/tls/tlsv1_record.c"
+    "${WPA_DIR}/src/tls/tlsv1_client_ocsp.c"
+    "${WPA_DIR}/src/tls/x509v3.c"
+    # The crypto on mbedTLS (CONFIG_ESP_WIFI_MBEDTLS_CRYPTO), and the
+    # internal implementations of what mbedTLS is configured without:
+    # RC4, DES (CONFIG_MBEDTLS_DES_C off), AES key wrap
+    # (CONFIG_MBEDTLS_NIST_KW_C off) and with it AES-CCM.
+    "${WPA_DIR}/esp_supplicant/src/crypto/crypto_mbedtls.c"
+    "${WPA_DIR}/esp_supplicant/src/crypto/crypto_mbedtls-bignum.c"
+    "${WPA_DIR}/esp_supplicant/src/crypto/crypto_mbedtls-rsa.c"
+    "${WPA_DIR}/esp_supplicant/src/crypto/crypto_mbedtls-ec.c"
+    "${WPA_DIR}/src/crypto/rc4.c"
+    "${WPA_DIR}/src/crypto/des-internal.c"
+    "${WPA_DIR}/src/crypto/aes-wrap.c"
+    "${WPA_DIR}/src/crypto/aes-unwrap.c"
+    "${WPA_DIR}/src/crypto/aes-ccm.c")
+target_include_directories(wpa_supplicant BEFORE PRIVATE
+    "${ESP_HAL}/esp_wifi/wifi_apps/roaming_app/include")
+target_include_directories(wpa_supplicant PRIVATE
+    "${WPA_DIR}/src"
+    "${WPA_DIR}/src/utils"
+    "${WPA_DIR}/src/common"
+    "${WPA_DIR}/esp_supplicant/src"
+    "${WPA_DIR}/src/crypto"
+    "${WPA_DIR}/esp_supplicant/include/esp_private"
+    "${ESP_HAL}/esp_libc/platform_include")
+# ESP_PLATFORM, which ESP-IDF defines for every component: the supplicant's
+# common.h takes its integer types from <stdint.h> with it.
+target_compile_definitions(wpa_supplicant PRIVATE
+    ESP_PLATFORM
+    __ets__
+    ESP_SUPPLICANT
+    IEEE8021X_EAPOL
+    EAP_PEER_METHOD
+    EAP_MSCHAPv2
+    EAP_TTLS
+    EAP_TLS
+    EAP_PEAP
+    EAP_GTC
+    USE_WPA2_TASK
+    CONFIG_WPS
+    ESPRESSIF_USE
+    CONFIG_ECC
+    CONFIG_IEEE80211W
+    CONFIG_SHA256
+    CONFIG_NO_RADIUS
+    CONFIG_WPA3_SAE
+    CONFIG_SAE_H2E
+    CONFIG_GMAC
+    CONFIG_TLS_INTERNAL_CLIENT
+    CONFIG_TLSV11
+    CONFIG_TLSV12
+    EAP_FAST
+    CONFIG_CRYPTO_MBEDTLS
+    CONFIG_OWE_STA)
+target_link_libraries(wpa_supplicant PRIVATE esp_wifi_headers mbedtls_config freertos esp_hal)
+target_compile_options(wpa_supplicant PRIVATE -UNDEBUG)
+# As in ESP-IDF (its TODO: variables of the upstream code that are set and unused).
+set_source_files_properties("${WPA_DIR}/esp_supplicant/src/esp_common.c"
+    PROPERTIES COMPILE_OPTIONS "-Wno-unused-but-set-variable")
+
+# The Wi-Fi driver's binary libraries (lib/esp32-wifi-lib), the ones
+# ESP-IDF links for this chip, and the PHY's (lib/esp-phy-lib): libphy, and
+# libbtbb, which ESP-IDF links on chips with Bluetooth (libphy's debug code
+# calls into it).  They refer to each other, to the supplicant and to
+# mbedTLS: one group, searched until nothing more resolves.  Members that
+# nothing reaches (most of mesh, espnow, smartconfig, wapi) are not linked.
+set(ESP_WIFI_GROUP
+    -Wl,--start-group
+    "${ESP_WIFI_LIB}/libcore.a"
+    "${ESP_WIFI_LIB}/libespnow.a"
+    "${ESP_WIFI_LIB}/libmesh.a"
+    "${ESP_WIFI_LIB}/libnet80211.a"
+    "${ESP_WIFI_LIB}/libpp.a"
+    "${ESP_WIFI_LIB}/libsmartconfig.a"
+    "${ESP_WIFI_LIB}/libwapi.a"
+    $<TARGET_FILE:wpa_supplicant>
+    $<TARGET_FILE:mbedtls>
+    "${ESP_PHY_LIB}/libphy.a"
+    "${ESP_PHY_LIB}/libbtbb.a"
+    -Wl,--end-group)
 
 # ---------------------------------------------------------------------------
 # Espressif sources this image needs, compiled as they are
@@ -299,11 +585,13 @@ add_library(esp_idf OBJECT
     "${ESP_HAL}/log/src/os/log_timestamp.c"
     "${ESP_HAL}/log/src/os/log_write.c"
     "${ESP_HAL}/log/src/log_level/log_level.c"
+    "${ESP_HAL}/log/src/log_level/tag_log_level/tag_log_level.c"
     # esp_timer on SYSTIMER: timers, and the uptime clock (port/board.c).
     "${ESP_HAL}/esp_timer/src/esp_timer.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_impl_common.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_impl_systimer.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_init.c"
+    "${ESP_HAL}/esp_timer/src/ets_timer_legacy.c"               # ets_timer_*(): Wi-Fi's timers
     "${ESP_HAL}/esp_hal_systimer/systimer_hal.c"
     "${ESP_HAL}/esp_hw_support/port/esp32s3/systimer.c"
     # The interrupt allocator (esp_intr_alloc()) with the table of the CPU's
@@ -322,6 +610,36 @@ add_library(esp_idf OBJECT
     "${ESP_HAL}/esp_phy/src/phy_override.c"
     "${ESP_HAL}/esp_phy/src/lib_printf.c"
     "${ESP_HAL}/esp_phy/esp32s3/phy_init_data.c"
+    # The Wi-Fi driver: esp_wifi's sources around its binary libraries (the
+    # init, the OS adapter on the FreeRTOS layer, the regulatory domains, the
+    # libraries' log output) and the coexistence adapter's part that the OS
+    # adapter's table calls; the default event loop it posts to; the random
+    # number generator; the MAC addresses, from eFuse through the eFuse API.
+    "${ESP_HAL}/esp_wifi/src/wifi_init.c"
+    "${ESP_HAL}/esp_wifi/src/lib_printf.c"
+    "${ESP_HAL}/esp_wifi/regulatory/esp_wifi_regulatory.c"
+    "${ESP_HAL}/esp_wifi/esp32s3/esp_adapter.c"
+    "${ESP_HAL}/esp_coex/esp32s3/esp_coex_adapter.c"
+    "${ESP_HAL}/esp_event/esp_event.c"
+    "${ESP_HAL}/esp_event/default_event_loop.c"
+    "${ESP_HAL}/esp_event/esp_event_private.c"
+    "${ESP_HAL}/esp_hw_support/hw_random.c"
+    "${ESP_HAL}/esp_hw_support/mac_addr.c"
+    "${ESP_HAL}/efuse/src/esp_efuse_api.c"
+    "${ESP_HAL}/efuse/src/esp_efuse_utility.c"
+    "${ESP_HAL}/efuse/esp32s3/esp_efuse_table.c"
+    "${ESP_HAL}/efuse/esp32s3/esp_efuse_utility.c"
+    "${ESP_HAL}/efuse/esp32s3/esp_efuse_fields.c"
+    "${ESP_HAL}/efuse/src/efuse_controller/keys/with_key_purposes/esp_efuse_api_key.c"
+    # The HMAC peripheral with keys in eFuse (esp_security), the PSA crypto
+    # core's opaque HMAC driver for this chip goes to it.
+    "${ESP_HAL}/esp_security/src/esp_hmac.c"
+    "${ESP_HAL}/esp_security/src/esp_crypto_lock.c"
+    "${ESP_HAL}/esp_security/src/esp_crypto_periph_clk.c"
+    "${ESP_HAL}/esp_security/src/esp32s3/esp_crypto_clk.c"
+    "${ESP_HAL}/esp_hal_security/hmac_hal.c"
+    # esp_get_free_internal_heap_size() and friends (the OS adapter's table).
+    "${ESP_HAL}/esp_system/port/esp_system_chip.c"
     # UART0: the console on D6/D7 (port/board.c), and the table of IO MUX
     # registers that gpio_ll_pullup_en() looks the RX pin up in.
     "${ESP_HAL}/esp_hal_uart/uart_hal.c"
@@ -335,13 +653,23 @@ target_include_directories(esp_idf PRIVATE
     "${ESP_HAL}/efuse/include"
     "${ESP_HAL}/efuse/esp32s3/include"
     "${ESP_HAL}/esp_mm/include"
-    "${ESP_HAL}/esp_system/port/include")
-target_link_libraries(esp_idf PRIVATE freertos threadx esp_hal)
+    "${ESP_HAL}/esp_system/port/include"
+    "${ESP_HAL}/esp_security/include"
+    "${ESP_HAL}/esp_hal_security/include"
+    "${ESP_HAL}/esp_hal_security/esp32s3/include")
+target_link_libraries(esp_idf PRIVATE esp_wifi_headers freertos threadx esp_hal)
+# Assertions on, as ESP-IDF builds them by default (assert(),
+# ESP_ERROR_CHECK(), configASSERT(); CONFIG_COMPILER_OPTIMIZATION_
+# ASSERTIONS_ENABLE), whatever the build type: a failure ends in the fault
+# path with its file and line (port/panic.c).  Also for the supplicant and
+# mbedTLS below.
+target_compile_options(esp_idf PRIVATE -UNDEBUG)
 set_source_files_properties(
     "${ESP_HAL}/esp_timer/src/esp_timer.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_impl_common.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_impl_systimer.c"
     "${ESP_HAL}/esp_timer/src/esp_timer_init.c"
+    "${ESP_HAL}/esp_timer/src/ets_timer_legacy.c"
     PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/esp_timer/private_include")
 set_source_files_properties(
     "${ESP_HAL}/heap/heap_caps.c"
@@ -359,21 +687,53 @@ set_source_files_properties(
     "${ESP_HAL}/log/src/os/log_timestamp.c"
     "${ESP_HAL}/log/src/os/log_write.c"
     "${ESP_HAL}/log/src/log_level/log_level.c"
+    "${ESP_HAL}/log/src/log_level/tag_log_level/tag_log_level.c"
     PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/log/include/esp_private")
-set_source_files_properties("${ESP_HAL}/efuse/src/esp_efuse_fields.c"
-    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/efuse/private_include;${ESP_HAL}/efuse/esp32s3/private_include")
-# The PHY's sources include headers of components they are built with in
-# ESP-IDF but that are not built here (nvs_flash and esp_partition, which
-# needs esp_blockdev's, esp_wifi's private wifi.h with esp_event's and
-# esp_netif's, the GPIO driver's types).
 set_source_files_properties(
-    "${ESP_HAL}/esp_phy/src/phy_init.c"
-    "${ESP_HAL}/esp_phy/src/phy_common.c"
-    "${ESP_HAL}/esp_phy/src/phy_override.c"
-    "${ESP_HAL}/esp_phy/src/lib_printf.c"
-    "${ESP_HAL}/esp_phy/esp32s3/phy_init_data.c"
+    "${ESP_HAL}/efuse/src/esp_efuse_fields.c"
+    "${ESP_HAL}/efuse/src/esp_efuse_api.c"
+    "${ESP_HAL}/efuse/src/esp_efuse_utility.c"
+    "${ESP_HAL}/efuse/esp32s3/esp_efuse_table.c"
+    "${ESP_HAL}/efuse/esp32s3/esp_efuse_utility.c"
+    "${ESP_HAL}/efuse/esp32s3/esp_efuse_fields.c"
+    "${ESP_HAL}/efuse/src/efuse_controller/keys/with_key_purposes/esp_efuse_api_key.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/efuse/private_include;${ESP_HAL}/efuse/esp32s3/private_include")
+set_source_files_properties(
+    "${ESP_HAL}/esp_event/esp_event.c"
+    "${ESP_HAL}/esp_event/default_event_loop.c"
+    "${ESP_HAL}/esp_event/esp_event_private.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/esp_event/private_include")
+# esp_security's private headers.  esp_crypto_periph_clk.c's first
+# headers reach esp_private/periph_ctrl.h, which uses bool without
+# <stdbool.h> (in ESP-IDF a header included earlier has brought it in):
+# included ahead of the source.
+set_source_files_properties(
+    "${ESP_HAL}/esp_security/src/esp_hmac.c"
+    "${ESP_HAL}/esp_security/src/esp_crypto_lock.c"
+    "${ESP_HAL}/esp_security/src/esp32s3/esp_crypto_clk.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/esp_security/src/esp32s3")
+set_source_files_properties("${ESP_HAL}/esp_security/src/esp_crypto_periph_clk.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/esp_security/src/esp32s3"
+               COMPILE_OPTIONS "-include;stdbool.h")
+set_source_files_properties("${ESP_HAL}/esp_system/port/esp_system_chip.c"
+    PROPERTIES COMPILE_DEFINITIONS "IDF_VER_DEF=\"${IDF_VER}\"")
+# The ThreadX layer's semaphores and queues are different structures (in
+# FreeRTOS a semaphore is a queue, and SemaphoreHandle_t is QueueHandle_t).
+# The two adapters keep a semaphore's handle in a QueueHandle_t member and
+# hand a pointer to a handle where a handle is meant; the value passed is
+# always the handle the layer returned, only the C types differ.
+set_source_files_properties(
+    "${ESP_HAL}/esp_wifi/esp32s3/esp_adapter.c"
+    "${ESP_HAL}/esp_coex/esp32s3/esp_coex_adapter.c"
+    PROPERTIES COMPILE_OPTIONS "-Wno-incompatible-pointer-types")
+# esp_wifi's sources see the supplicant's internal headers, as in ESP-IDF.
+set_source_files_properties(
+    "${ESP_HAL}/esp_wifi/src/wifi_init.c"
+    "${ESP_HAL}/esp_wifi/src/lib_printf.c"
+    "${ESP_HAL}/esp_wifi/regulatory/esp_wifi_regulatory.c"
+    "${ESP_HAL}/esp_wifi/esp32s3/esp_adapter.c"
     PROPERTIES INCLUDE_DIRECTORIES
-        "${ESP_IDF}/nvs_flash/include;${ESP_IDF}/esp_partition/include;${ESP_HAL}/esp_blockdev/include;${ESP_HAL}/esp_wifi/include;${ESP_HAL}/esp_event/include;${ESP_IDF}/esp_netif/include;${ESP_HAL}/upper_hal_gpio/include")
+        "${WPA_DIR}/src;${WPA_DIR}/esp_supplicant/src;${ESP_HAL}/esp_wifi/wifi_apps/roaming_app/include")
 # clk.c includes the second-stage bootloader's clock header for a declaration.
 set_source_files_properties("${ESP_HAL}/esp_system/port/soc/esp32s3/clk.c"
     PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/bootloader_support/include")
@@ -391,13 +751,6 @@ set_source_files_properties("${ESP_HAL}/esp_app_format/esp_app_desc.c" PROPERTIE
     INCLUDE_DIRECTORIES "${ESP_HAL}/esp_app_format/include"
     COMPILE_DEFINITIONS "PROJECT_VER=\"${PROJECT_VER}\";PROJECT_NAME=\"${PROJECT_NAME}\";IDF_VER_DEF=\"${IDF_VER}\"")
 
-# The PHY's binary libraries (lib/esp-phy-lib): libphy, and libbtbb, which
-# ESP-IDF links on chips with Bluetooth (libphy's debug code calls into it).
-add_library(esp_phy_blobs INTERFACE)
-target_link_libraries(esp_phy_blobs INTERFACE
-    "${ESP_PHY_LIB}/libphy.a"
-    "${ESP_PHY_LIB}/libbtbb.a")
-
 set_target_properties(app PROPERTIES
     OUTPUT_NAME xiao_esp32s3_threadx
     SUFFIX      .elf
@@ -410,7 +763,9 @@ target_include_directories(app PRIVATE
     "${ESP_HAL}/esp_system/port/include")      # esp_clk_internal.h
 # xtensa_rtos is an object library: the vectors are reached only through the
 # linker script and VECBASE, so nothing would pull them out of an archive.
-target_link_libraries(app PRIVATE shell esp_idf freertos threadx xtensa_rtos esp_phy_blobs esp_hal)
+target_link_libraries(app PRIVATE esp_wifi_headers shell esp_idf ${ESP_WIFI_GROUP} freertos threadx xtensa_rtos
+                      esp_hal)
+add_dependencies(app wpa_supplicant mbedtls)
 # -u esp_app_desc: nothing refers to it by name (esp_app_format does the same).
 # heap.c's malloc() and phy_override.c's functions take precedence over
 # newlib's and libphy's because they are linked as objects (esp_idf), before
@@ -421,6 +776,8 @@ target_link_options(app PRIVATE
     -nostartfiles
     "-T${LDSCRIPT}"
     -Wl,-u,esp_app_desc
+    -Wl,-u,mbedtls_psa_crypto_init_include_impl
+    -Wl,-u,esp_mbedtls_mem_calloc
     -Wl,--orphan-handling=warn
     -Wl,--gc-sections
     "-Wl,-Map=$<TARGET_FILE_DIR:app>/xiao_esp32s3_threadx.map")
@@ -461,10 +818,17 @@ add_library(shell OBJECT
     # Commands
     "${SHELL_COMMON}/shell/kernel_shell.c"
     "${SHELL_COMMON}/shell/dmesg_shell.c"
+    # "wifi" and the network management layer under it
+    "${SHELL_COMMON}/compat/zephyr_net_mgmt.c"
+    "${SHELL_COMMON}/compat/zephyr_wifi_mgmt.c"
+    "${SHELL_COMMON}/compat/zephyr_wifi_shell.c"
+    "${SHELL_COMMON}/compat/zephyr_wifi_utils.c"
     # This board's part
     "${SHELL_PORT}/commands.c"
     "${SHELL_PORT}/fault_record.c"
     "${SHELL_PORT}/shell_port.c"
+    "${SHELL_PORT}/zephyr_net_if.c"
+    "${SHELL_PORT}/zephyr_net_wifi.c"
     "${SHELL_PORT}/zephyr_sys_clock.c")
 # The order is rp2040-connect's (common/compat/port/pico_sdk/compat.cmake):
 # the board's and the OS's parts first, then the parts for an OS without its
@@ -480,7 +844,7 @@ target_include_directories(shell PUBLIC
     "${SHELL_COMMON}/shell/port"
     "${SHELL_COMMON}/shell/port/generic"
     "${SHELL_COMMON}/compat/lib/utils/getopt"
-    "${PORT_DIR}")                              # board.h
+    "${PORT_DIR}")                              # board.h, net/wifi.h
 # Z_SHELL_CMD_ROOT_GLOBAL: SHELL_CMD_REGISTER() makes a global root entry for
 # the table.  CONFIG_GETOPT_LONG changes a structure every command sees.
 target_compile_definitions(shell PUBLIC

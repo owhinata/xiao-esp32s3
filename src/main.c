@@ -1,7 +1,7 @@
 /*
  * ThreadX on the XIAO ESP32S3: a shell on the console (USB Serial/JTAG and
  * UART0 together), ESP-IDF's esp_timer, whose periodic timer blinks the
- * user LED, and the radio's PHY.
+ * user LED, and ESP-IDF's Wi-Fi driver in station mode.
  *
  * The shell is rp2040-connect's (shell/common, with this board's part in
  * shell/port).  Its thread "console" is started by the Zephyr compatibility
@@ -10,7 +10,7 @@
  * by the SYSTIMER alarm interrupt, so the LED rate is a direct check of
  * esp_timer, its interrupt and the FreeRTOS layer.  The FreeRTOS task
  * "main", like ESP-IDF's main task, finishes the start-up from a thread and
- * then ends: ESP-IDF's last start-up hooks, then the radio
+ * then ends: ESP-IDF's last start-up hooks, then the Wi-Fi driver
  * (port/net/wifi.c).
  */
 #include <stdio.h>
@@ -28,6 +28,7 @@
 #include "log_ram.h"
 #include "net/wifi.h"
 #include "shell_serial.h"
+#include "zephyr_net_wifi.h"
 
 LOG_MODULE_REGISTER(main);
 
@@ -65,8 +66,8 @@ static int blink_start(void)
  * ESP-IDF's main task (esp_system's main_task()): the start-up hooks that
  * ESP-IDF runs in it, among them the heap's taking over the stack _start
  * ran on, then what app_main() would do.  Its stack is ESP-IDF's default
- * of 3584 bytes plus room for the RF calibration in libphy, whose depth is
- * not documented.
+ * of 3584 bytes plus room for the RF calibration in libphy (esp_wifi_start()),
+ * whose depth is not documented.
  */
 #define MAIN_TASK_STACK_SIZE    4096u
 
@@ -125,6 +126,14 @@ void tx_application_define(void *first_unused_memory)
     }
     if (xTaskCreate(main_task, "main", MAIN_TASK_STACK_SIZE, NULL, ESP_TASK_MAIN_PRIO, NULL) != pdPASS) {
         printf("The main task did not start\n");
+    }
+
+    /*
+     * The shell's network layer and its "wifi" command; the driver comes up
+     * later, in "main".
+     */
+    if (zephyr_net_initialize() != 0) {
+        printf("The network layer did not start\n");
     }
 
     /*

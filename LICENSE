@@ -45,10 +45,15 @@ notice.
 What the build fetches into lib/ is not part of this repository and carries
 its own licence: Eclipse ThreadX (MIT), Espressif's HAL components and a few
 ESP-IDF components (Apache-2.0, a few files under other licences named in
-them), the TLSF allocator of ESP-IDF's heap (espressif/tlsf, 3-Clause BSD
-License, Copyright (c) Matthew Conte), and Espressif's PHY and Wi-Fi
-binary libraries (espressif/esp-phy-lib, espressif/esp32-wifi-lib: Apache
-License, Version 2.0, in object form).
+them; the wpa_supplicant component, from hostap, under the 3-Clause BSD
+License, Copyright (c) Jouni Malinen and contributors), the TLSF allocator
+of ESP-IDF's heap (espressif/tlsf, 3-Clause BSD License, Copyright (c)
+Matthew Conte), Espressif's PHY and Wi-Fi binary libraries
+(espressif/esp-phy-lib, espressif/esp32-wifi-lib: Apache License, Version
+2.0, in object form), and Espressif's fork of Mbed TLS with TF-PSA-Crypto
+(espressif/mbedtls: Apache-2.0 OR GPL-2.0-or-later, at the user's choice;
+this firmware uses it under the Apache License, Version 2.0, Copyright
+The Mbed TLS Contributors).
 
 
                                  Apache License

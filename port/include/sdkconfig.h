@@ -84,6 +84,7 @@
  * here.
  */
 #define CONFIG_ESP_CONSOLE_UART                 1
+#define CONFIG_USJ_ENABLE_USB_SERIAL_JTAG       1   /* esp_perip_clk_init() keeps the controller's clock */
 #define CONFIG_ESP_CONSOLE_UART_NUM             0
 #define CONFIG_ESP_CONSOLE_ROM_SERIAL_PORT_NUM  0
 #define CONFIG_ESP_CONSOLE_UART_BAUDRATE        115200
@@ -216,8 +217,157 @@
  */
 #define CONFIG_ESP_PHY_ENABLED                  1
 #define CONFIG_ESP_PHY_MAX_TX_POWER             20
+#define CONFIG_ESP_PHY_MAX_WIFI_TX_POWER        20
 #define CONFIG_ESP_PHY_ENABLE_USB               1
 #define CONFIG_ESP_PHY_PLL_TRACK_PERIOD_MS      1000
+
+/*
+ * MAC addresses (mac_addr.c), ESP-IDF's default for the ESP32-S3: four
+ * universally administered addresses from the factory base MAC in eFuse,
+ * Wi-Fi station = base, SoftAP + 1, Bluetooth + 2, Ethernet + 3.
+ */
+#define CONFIG_ESP32S3_UNIVERSAL_MAC_ADDRESSES_FOUR 1
+#define CONFIG_ESP32S3_UNIVERSAL_MAC_ADDRESSES  4
+#define CONFIG_ESP_MAC_UNIVERSAL_MAC_ADDRESSES_FOUR 1
+#define CONFIG_ESP_MAC_UNIVERSAL_MAC_ADDRESSES  4
+#define CONFIG_ESP_MAC_ADDR_UNIVERSE_WIFI_STA   1
+#define CONFIG_ESP_MAC_ADDR_UNIVERSE_WIFI_AP    1
+#define CONFIG_ESP_MAC_ADDR_UNIVERSE_BT         1
+#define CONFIG_ESP_MAC_ADDR_UNIVERSE_ETH        1
+
+/* ---- Event loop (esp_event) -------------------------------------------- */
+
+/*
+ * ESP-IDF's defaults: events may be posted from interrupt handlers, the
+ * default loop's queue holds 32 events, its task has 2304 bytes of stack
+ * (esp_task.h adds 512).
+ */
+#define CONFIG_ESP_EVENT_POST_FROM_ISR          1
+#define CONFIG_ESP_EVENT_POST_FROM_IRAM_ISR     1
+#define CONFIG_ESP_SYSTEM_EVENT_QUEUE_SIZE      32
+#define CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE 2304
+
+/* ---- Wi-Fi (esp_wifi, its binary libraries, wpa_supplicant) ------------ */
+
+/*
+ * Station mode with WPA2-PSK and WPA3-SAE (with hash-to-element) and OWE,
+ * the supplicant's crypto on mbedTLS (ESP-IDF's defaults), with these
+ * differences:
+ *   - no NVS (CONFIG_ESP_WIFI_NVS_ENABLED off): the driver keeps its
+ *     configuration in RAM only, and nvs_flash is not built
+ *     (port/esp_compat/nvs.c);
+ *   - no SoftAP (CONFIG_ESP_WIFI_SOFTAP_SUPPORT off): wifi_init.c then
+ *     supplies the stubs the libraries' SoftAP hooks take, and the
+ *     supplicant's hostap part is not built; SAE for SoftAP, OWE for SoftAP
+ *     and WPA3 compatibility mode go with it;
+ *   - no enterprise (802.1X/EAP) and no SAE-PK, so no TLS for the
+ *     supplicant;
+ *   - CONFIG_ESP_WIFI_IRAM_OPT and CONFIG_ESP_WIFI_RX_IRAM_OPT off: the
+ *     libraries' code stays in flash (see the linker script), which
+ *     nothing here ever disables.
+ * Buffers: 10 static and 32 dynamic receive buffers, 32 dynamic transmit
+ * buffers, 5 static management receive buffers; A-MPDU both ways with a
+ * block-ack window of 6.  The Wi-Fi task is not pinned (one core).
+ */
 #define CONFIG_ESP_WIFI_ENABLED                 1
+#define CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM    10
+#define CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM   32
+#define CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER       1
+#define CONFIG_ESP_WIFI_TX_BUFFER_TYPE          1
+#define CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM   32
+#define CONFIG_ESP_WIFI_STATIC_RX_MGMT_BUFFER   1
+#define CONFIG_ESP_WIFI_DYNAMIC_RX_MGMT_BUF     0
+#define CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF     5
+#define CONFIG_ESP_WIFI_AMPDU_TX_ENABLED        1
+#define CONFIG_ESP_WIFI_TX_BA_WIN               6
+#define CONFIG_ESP_WIFI_AMPDU_RX_ENABLED        1
+#define CONFIG_ESP_WIFI_RX_BA_WIN               6
+#define CONFIG_ESP_WIFI_SOFTAP_BEACON_MAX_LEN   752
+#define CONFIG_ESP_WIFI_MGMT_SBUF_NUM           32
+#define CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM  7
+#define CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE 1
+#define CONFIG_ESP_WIFI_SLP_DEFAULT_MIN_ACTIVE_TIME 50
+#define CONFIG_ESP_WIFI_SLP_DEFAULT_MAX_ACTIVE_TIME 10
+#define CONFIG_ESP_WIFI_SLP_DEFAULT_WAIT_BROADCAST_DATA_TIME 15
+#define CONFIG_ESP_WIFI_TX_HETB_QUEUE_NUM       3
+#define CONFIG_ESP_WIFI_RMAC_AUTO_RESET_INTERVAL 12
+#define CONFIG_ESP_WIFI_MBEDTLS_CRYPTO          1
+#define CONFIG_ESP_WIFI_ENABLE_WPA3_SAE         1
+#define CONFIG_ESP_WIFI_ENABLE_SAE_H2E          1
+#define CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA     1
+#define CONFIG_ESP_WIFI_GMAC_SUPPORT            1
+
+/*
+ * Coexistence: the adapter's part of esp_coex (esp_coex_adapter.c), which
+ * the Wi-Fi adapter's table uses.  Software coexistence
+ * (CONFIG_ESP_COEX_SW_COEXIST_ENABLE) needs Bluetooth and is off, so its
+ * library (libcoexist) is not linked.
+ */
+#define CONFIG_ESP_COEX_ENABLED                 1
+
+/* ---- mbedTLS (the supplicant's crypto) ---------------------------------- */
+
+/*
+ * Read by mbedtls/port/include/mbedtls/esp_config.h.  The PSA crypto core
+ * with the software drivers of what the supplicant uses for WPA2-PSK,
+ * WPA3-SAE (with hash-to-element) and OWE: AES (CBC, CTR, CCM, GCM, CMAC),
+ * SHA-1, SHA-256, SHA-384, SHA-512, MD5 (the ROM's, ESP-IDF's default),
+ * PBKDF2, bignum and elliptic curves (ECDH, ECDSA) on the NIST curves P-256,
+ * P-384 and P-521 (SAE groups 19 to 21), ASN.1 and keys (PK) for the curves'
+ * public keys, HMAC-DRBG for deterministic ECDSA and CTR-DRBG for the random
+ * generator, time for its timing; RSA with PKCS#1 v1.5 and v2.1, which the
+ * PSA core's default algorithm set requires (and the supplicant's RSA
+ * wrappers use).  Allocation goes to ESP-IDF's heap, internal RAM
+ * (esp_mem.c, ESP-IDF's default).
+ *
+ * Different from ESP-IDF: no hardware acceleration (AES, SHA, MPI, ECC;
+ * ESP-IDF's default uses the peripherals, through drivers that need
+ * GDMA and the crypto locks), no TLS, no file system, no self tests, and
+ * no threading (CONFIG_MBEDTLS_THREADING_C: ESP-IDF's is on pthread
+ * mutexes, which are not here).  X.509 certificate parsing is configured
+ * only for the declarations the supplicant's RSA wrappers
+ * (crypto_mbedtls-rsa.c) compile against: mbedTLS's X.509 and TLS
+ * library is not built, and nothing reaches those wrappers without
+ * enterprise authentication.
+ */
+#define CONFIG_MBEDTLS_HAVE_TIME                1
+#define CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC       1
+#define CONFIG_MBEDTLS_AES_C                    1
+#define CONFIG_MBEDTLS_AES_ROM_TABLES           1
+#define CONFIG_MBEDTLS_CIPHER_MODE_CBC          1
+#define CONFIG_MBEDTLS_CIPHER_MODE_CTR          1
+#define CONFIG_MBEDTLS_CCM_C                    1
+#define CONFIG_MBEDTLS_GCM_C                    1
+#define CONFIG_MBEDTLS_CMAC_C                   1
+#define CONFIG_MBEDTLS_MD_C                     1
+#define CONFIG_MBEDTLS_MD5_C                    1
+#define CONFIG_MBEDTLS_ROM_MD5                  1
+#define CONFIG_MBEDTLS_SHA1_C                   1
+#define CONFIG_MBEDTLS_SHA256_C                 1
+#define CONFIG_MBEDTLS_SHA384_C                 1
+#define CONFIG_MBEDTLS_SHA512_C                 1
+#define CONFIG_MBEDTLS_PKCS5_C                  1
+#define CONFIG_MBEDTLS_ECP_C                    1
+#define CONFIG_MBEDTLS_ECP_NIST_OPTIM           1
+#define CONFIG_MBEDTLS_ECDH_C                   1
+#define CONFIG_MBEDTLS_ECDSA_C                  1
+#define CONFIG_MBEDTLS_ECDSA_DETERMINISTIC      1
+#define CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED 1
+#define CONFIG_MBEDTLS_ECP_DP_SECP384R1_ENABLED 1
+#define CONFIG_MBEDTLS_ECP_DP_SECP521R1_ENABLED 1
+#define CONFIG_MBEDTLS_ASN1_PARSE_C             1
+#define CONFIG_MBEDTLS_ASN1_WRITE_C             1
+#define CONFIG_MBEDTLS_PK_C                     1
+#define CONFIG_MBEDTLS_PK_PARSE_C               1
+#define CONFIG_MBEDTLS_PK_WRITE_C               1
+#define CONFIG_MBEDTLS_PK_PARSE_EC_EXTENDED     1
+#define CONFIG_MBEDTLS_PK_PARSE_EC_COMPRESSED   1
+#define CONFIG_MBEDTLS_RSA_C                    1
+#define CONFIG_MBEDTLS_PKCS1_V15                1
+#define CONFIG_MBEDTLS_PKCS1_V21                1
+#define CONFIG_MBEDTLS_X509_USE_C               1
+#define CONFIG_MBEDTLS_X509_CRT_PARSE_C         1
+#define CONFIG_MBEDTLS_CTR_DRBG_C               1
+#define CONFIG_MBEDTLS_HMAC_DRBG_C              1
 
 #endif

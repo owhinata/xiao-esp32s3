@@ -30,7 +30,7 @@ UART0.
 | CPU clock | 240 MHz from the PLL (`esp_clk_init()`, `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ`) |
 | Heap | ESP-IDF's heap (`heap_caps` on TLSF; `malloc()` is esp_libc's): about 400 KiB of internal RAM and the RTC FAST memory, usable from interrupt handlers |
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
-| Radio | The PHY is powered and calibrated at boot (esp_phy with Espressif's binary PHY library); no Wi-Fi driver yet |
+| Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) started in station mode at boot; `wifi scan` lists the access points.  No connection and no TCP/IP yet |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, the firmware as the factory application at 0x10000 |
 
 ## Build
@@ -45,8 +45,9 @@ The first configure downloads the compiler (~90 MB) into `tools/` and the
 upstream sources into `lib/`, each at the commit pinned in `CMakeLists.txt`:
 ThreadX and esp-hal-3rdparty (~370 MB), a few directories of ESP-IDF
 itself that the mirror does not carry (~4 MB), the TLSF allocator of
-ESP-IDF's heap, and the esp32s3 part of Espressif's binary PHY and Wi-Fi
-libraries (~6 MB).
+ESP-IDF's heap, the esp32s3 part of Espressif's binary PHY and Wi-Fi
+libraries (~6 MB), and the parts of Espressif's mbedTLS that are built
+(~7 MB).
 Neither directory is tracked by this repository.
 
 Outputs in `build/`: `bootloader.bin`, `partition-table.bin` and
@@ -89,7 +90,8 @@ switches off the flash-boot watchdog of timer group 0 (which would reset the
 chip once the next step is done), clears the bit that forced the download
 mode, writes at `ESPBAUD` (460800 by default) and restarts the firmware with a
 watchdog reset.  No button is needed.  Only when
-no shell answers (no firmware, or a hung one) does it ask for the buttons:
+no shell answers or the firmware restarts before it runs the command (no
+firmware, a hung one, or one that keeps crashing) does it ask for the buttons:
 hold **B** (BOOT), tap **R** (RESET), release **B**.
 
 On the console (any terminal on the board's `/dev/ttyACM*`, or on the adapter
@@ -113,6 +115,7 @@ Available commands:
   sleep    : Sleep for <ms> milliseconds (Zephyr's kernel sleep)
   uptime   : Show the time since the start (SYSTIMER) and the ticks
   version  : Show the versions of the kernel, HAL and compiler
+  wifi     : Wi-Fi commands
 ```
 
 The orange LED toggles every 0.5 s.  The banner is printed at boot; a terminal
@@ -162,7 +165,9 @@ is such an error too: the interrupt watchdog's first stage, a level-4
 interrupt, reports it with the registers of the code that was stuck (`Fatal
 error: interrupt watchdog`).  If even that cannot run, its second stage
 resets the chip 0.6 s later without a record, and the next start says so
-from the chip's reset reason (`Fatal error: interrupt watchdog reset`).  Its layout is this
+from the chip's reset reason (`Fatal error: interrupt watchdog reset`).  A failed
+`assert()`, `ESP_ERROR_CHECK()` or `abort()` in the Espressif sources (their
+assertions are on, as in ESP-IDF) is recorded with the file and line.  Its layout is this
 board's (`shell/port/fault_record.h`), not rp2040-connect's Cortex-M one.
 
 ## How it boots
@@ -185,7 +190,9 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    ESP-IDF's core start-up hooks (the heap, esp_timer's clock), the
    constructors, then `main()`.  The later hooks run where ESP-IDF runs
    them: in `tx_application_define()` (esp_timer's task) and in the first
-   task, "main", which then switches the PHY on and ends.  ESP-IDF's own
+   task, "main", which then starts the Wi-Fi driver in station mode
+   (ESP-IDF's event loop, `esp_wifi_init()`, `esp_wifi_start()`, which
+   calibrates the PHY) and ends.  ESP-IDF's own
    start-up lines (`app_init`, `heap_init`) appear on the console before
    the banner.
 

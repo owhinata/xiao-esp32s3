@@ -58,7 +58,7 @@ enum fault_reason {
      * whose stack overflowed.
      */
     FAULT_REASON_STACK_OVERFLOW = 3,
-    /* _exit(): exit(), abort() (newlib's assert()), main() returning. */
+    /* _exit(): exit(), main() returning; text is "status <n>". */
     FAULT_REASON_EXIT = 4,
     /* Stage 0 of the interrupt watchdog (port/watchdog.c): no tick for its
      * timeout.  Entered like FAULT_REASON_PANIC (panicHandler()), with the
@@ -71,6 +71,18 @@ enum fault_reason {
      * from the reset reason; only reason is set.
      */
     FAULT_REASON_INT_WDT_RESET = 6,
+    /* abort() (port/panic.c); pc is where it was called from. */
+    FAULT_REASON_ABORT = 7,
+    /* A failed assert() (__assert_func(), port/panic.c): text is
+     * "<file>:<line>" of the assertion, the file without its directory;
+     * pc is in the function that asserted.
+     */
+    FAULT_REASON_ASSERT = 8,
+    /* ESP-IDF's ESP_ERROR_CHECK() (_esp_error_check_failed(), port/
+     * panic.c): text is "0x<esp_err_t> <file>:<line>"; pc is in the
+     * function that checked.
+     */
+    FAULT_REASON_ESP_ERROR_CHECK = 9,
 };
 
 /* The record's flags. */

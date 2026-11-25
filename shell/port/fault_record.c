@@ -43,6 +43,12 @@ const char *fault_reason_name(uint32_t reason)
         return "interrupt watchdog";
     case FAULT_REASON_INT_WDT_RESET:
         return "interrupt watchdog reset";
+    case FAULT_REASON_ABORT:
+        return "abort";
+    case FAULT_REASON_ASSERT:
+        return "assertion failed";
+    case FAULT_REASON_ESP_ERROR_CHECK:
+        return "ESP_ERROR_CHECK failed";
     default:
         return "unknown";
     }

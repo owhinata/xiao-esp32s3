@@ -3,6 +3,7 @@
  */
 #include <errno.h>
 #include <reent.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -115,6 +116,36 @@ int _isatty_r(struct _reent *r, int fd)
 {
     (void) r;
     return fd >= 0 && fd <= STDERR_FILENO;
+}
+
+/*
+ * POSIX sleeps, which newlib leaves to the system (the Wi-Fi supplicant's
+ * os_sleep() calls them): the calling thread sleeps for at least the time
+ * asked, in whole ticks, rounded up.  Only from a thread.
+ */
+int usleep(useconds_t us)
+{
+    const uint64_t us_per_tick = 1000000u / TX_TIMER_TICKS_PER_SECOND;
+    uint64_t ticks = ((uint64_t) us + us_per_tick - 1u) / us_per_tick;
+
+    while (ticks > 0u) {
+        ULONG n = ticks > 0x7FFFFFFFu ? 0x7FFFFFFFu : (ULONG) ticks;
+
+        tx_thread_sleep(n);
+        ticks -= n;
+    }
+    return 0;
+}
+
+unsigned int sleep(unsigned int seconds)
+{
+    while (seconds > 0u) {
+        unsigned int n = seconds > 1000u ? 1000u : seconds;
+
+        (void) usleep((useconds_t) n * 1000000u);
+        seconds -= n;
+    }
+    return 0;
 }
 
 int _getpid_r(struct _reent *r)

@@ -39,15 +39,24 @@
  * xQueueCreate(), xSemaphoreCreate*(), xEventGroupCreate(), xTimerCreate())
  * come from a ThreadX byte pool over a static array of this size, not from
  * the heap: the layer has no hook for another allocator, and its task
- * deletion frees through the pool.  Sized for the two tasks there are, each
- * a 4096-byte stack, an 840-byte task block and 8 bytes of the pool's
- * bookkeeping for each block: the esp_timer task, and "main"
- * (src/main.c), which ends after the start-up and leaves its room to
- * whatever comes later; about 300 bytes spare.  Each further FreeRTOS
- * object needs room here.  ESP-IDF code that calls malloc() or
- * heap_caps_malloc() itself uses ESP-IDF's heap.
+ * deletion frees through the pool.  Each block costs 8 bytes of the pool's
+ * bookkeeping on top; a task is its stack and an 856-byte task block, a
+ * semaphore or mutex 96 bytes, a queue 96 bytes and its items, an event
+ * group 44 bytes.  The tasks: esp_timer (4096-byte stack), "main"
+ * (src/main.c, 4096, ends after the start-up), the Wi-Fi driver's
+ * (6656, WIFI_TASK_STACK_SIZE), the default event loop's "sys_evt"
+ * (2816); 22.4 KiB with their task blocks while "main" runs, 17.5 KiB
+ * after.  The objects: the event loop's queue (32 items of 16 bytes) and
+ * mutex, the driver's queues, semaphores, mutexes and event groups, and one
+ * semaphore for each thread that calls the driver (the OS adapter's
+ * wifi_thread_semphr_get): a few KiB, not documented.  32 KiB leaves
+ * some KiB for those; port/net/wifi.c logs how much the Wi-Fi start took
+ * from the pool, which is the measure to size it by.  The queues and
+ * semaphores the OS adapter makes with xQueueCreateStatic() (its
+ * _queue_create) and all of ESP-IDF's malloc() and heap_caps_malloc() use
+ * ESP-IDF's heap.
  */
-#define configTOTAL_HEAP_SIZE           (10u * 1024u)
+#define configTOTAL_HEAP_SIZE           (32u * 1024u)
 
 /*
  * vTaskDelete() and returning from a task: the layer's own thread
@@ -60,9 +69,17 @@
 /* Started from tx_application_define() (tx_freertos_init()). */
 #define TX_FREERTOS_AUTO_INIT           0
 
-/* Argument checks and internal failures, like ESP-IDF's configASSERT(). */
+/*
+ * The layer's argument checks (configASSERT()) follow the build type, and
+ * the build type of this firmware turns them off (NDEBUG): some of them
+ * are stricter than FreeRTOS, among them a queue item of at least 4 bytes,
+ * which the layer's queues (items copied with memcpy()) do not need.  Its
+ * internal failures (TX_FREERTOS_ASSERT_FAIL(): a ThreadX service that
+ * failed where it cannot, such as freeing to the byte pool) always end in
+ * the fault path, as a failed assertion (port/panic.c).
+ */
 #define configASSERT(x)                 assert(x)
-#define TX_FREERTOS_ASSERT_FAIL()       assert(0)
+#define TX_FREERTOS_ASSERT_FAIL()       __assert_func(__FILE__, __LINE__, __func__, "TX_FREERTOS_ASSERT_FAIL()")
 
 /*
  * The port macros the layer leaves to the configuration: an interrupt

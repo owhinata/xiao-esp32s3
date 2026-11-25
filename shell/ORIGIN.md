@@ -4,9 +4,11 @@
 [rp2040-connect](https://github.com/owhinata/rp2040-connect) at commit
 `72f3485`: the files of its `common/` directory that this firmware compiles or
 includes, at the same relative paths.  Nothing else of that repository is
-here (no driver, network, Telnet, sensor, Pico SDK or test file), and not its
-`compat/include/fault_record.h`, whose record is laid out for a Cortex-M:
-this board has its own in `shell/port/`.
+here (no driver, socket or offloaded network stack, credentials store,
+Telnet, sensor, Pico SDK or test file), and not its
+`compat/include/fault_record.h`, whose record is laid out for a Cortex-M,
+nor its `compat/net_offload/include/zephyr/net/net_if.h`, made for an
+offloaded network stack: this board has its own of both in `shell/port/`.
 
 `shell/port/` is written for this board and is not a copy.
 
@@ -18,7 +20,7 @@ diff -r shell/common /path/to/rp2040-connect/common | grep -v '^Only in /path/to
 
 ## Copied files
 
-All 61 files are byte-identical to the original, except the ones below:
+All 68 files are byte-identical to the original, except the ones below:
 
 | File | Change |
 |---|---|
@@ -43,7 +45,11 @@ relative to `shell/common/`; headers without a directory are in
   `shell/include/subcmd.h`, `compat/shell_engine/shell_argv.c`,
   `compat/port/cpu_load.h`,
   `compat/log/log_ram.c`, `compat/log/log_ring.c`, `internal/log_ring.h`,
-  `compat/lib/utils/getopt/getopt_common.h`, and the headers `app_log.h`,
+  `compat/lib/utils/getopt/getopt_common.h`, the `wifi` command and the
+  network management layer under it (`compat/zephyr_wifi_shell.c`,
+  `compat/zephyr_wifi_mgmt.c`, `compat/zephyr_wifi_utils.c`,
+  `compat/zephyr_net_mgmt.c`, `zephyr/net/net_mgmt.h`,
+  `zephyr/net/wifi_mgmt.h`, `zephyr/net/wifi_utils.h`), and the headers `app_log.h`,
   `log_ram.h`, `priorities.h`, `zephyr_compat.h` and `zephyr/` (`device.h`,
   `devicetree.h`, `drivers/hwinfo.h`, `kernel.h`, `shell/shell.h`,
   `spinlock.h`, `sys/atomic.h`, `sys/printk.h`, `sys/sys_getopt.h`,
@@ -53,7 +59,7 @@ relative to `shell/common/`; headers without a directory are in
   `compat/subsys/portability/posix/c_lib_ext/fnmatch.c`,
   `compat/include/zephyr/posix/fnmatch.h`.
 
-Two of the copied files are compiled or included for a part only, and the
+Some of the copied files are compiled or included for a part only, and the
 rest of each is dropped at link time or never expanded:
 
 - `compat/port/cpu_load.h` gives `ps` the arithmetic of `cpu_active`
@@ -61,17 +67,24 @@ rest of each is dropped at link time or never expanded:
   defined here.
 - `shell/zshell.c` holds Zephyr's device-name helpers, which no command here
   calls.
+- `compat/zephyr_wifi_mgmt.c` and `zephyr/net/wifi_mgmt.h` have the stored
+  credentials' parts (`CONFIG_WIFI_CREDENTIALS`, not defined here) and the
+  connect and disconnect result events, which nothing raises yet;
+  `compat/zephyr_wifi_utils.c` has `net_bytes_from_str()`, which nothing
+  calls.
 
 ## This board's part (`shell/port/`)
 
 | File | The boundary it implements |
 |---|---|
 | `zephyr_os_port.h` | What `compat/port/threadx/zephyr_kernel_os_impl.h` takes from the ThreadX port and the board: interrupt context, interrupt lockout, busy wait, microsecond clock, assertion |
-| `priorities_os.h` | Priority mapping, time slices, the shell thread's stack (`compat/include/priorities.h`) |
+| `priorities_os.h` | Priority mapping, time slices, the stacks of the shell's and the network event thread (`compat/include/priorities.h`) |
 | `shell_serial_os_impl.h` | Console transport and stdio redirection (`compat/port/shell_serial_os.h`) |
 | `log_ram_os_impl.h` | RAM log: retained section, lock, clock (`compat/port/log_ram_os.h`) |
 | `kernel_shell_os_impl.h` | Tick count, restart, download mode, the record for `fault` (`shell/port/kernel_shell_os.h`) |
-| `fault_record.h`, `fault_record.c` | The record of a fatal error that `port/panic.c` keeps across the restart, for an Xtensa exception frame: the counterpart of rp2040-connect's `compat/include/fault_record.h` and `compat/log/fault_record.c`, with the same name so that `shell/kernel_shell.c` includes it (`shell/port` is first on the include path); its text for `fault`, the banner and the RAM log, and taking it at the start |
+| `fault_record.h`, `fault_record.c` | The record of a fatal error that `port/panic.c` keeps across the restart (with this board's reasons: abort, failed assertion, failed `ESP_ERROR_CHECK()`), for an Xtensa exception frame: the counterpart of rp2040-connect's `compat/include/fault_record.h` and `compat/log/fault_record.c`, with the same name so that `shell/kernel_shell.c` includes it (`shell/port` is first on the include path); its text for `fault`, the banner and the RAM log, and taking it at the start |
 | `shell_port.c` | `hwinfo_get_device_id()`, the layer's tick (`zephyr_compat_tick()`) |
+| `zephyr/net/net_if.h`, `zephyr_net_if.c` | The network interface of `<zephyr/net/net_if.h>` as far as `compat/zephyr_wifi_mgmt.c` and `compat/zephyr_wifi_shell.c` use it: the one interface, its driver's operations, whether it is up (rp2040-connect's is `compat/net_offload/include/zephyr/net/net_if.h`, which also has the addresses of an offloaded network stack) |
+| `zephyr_net_wifi.c`, `zephyr_net_wifi.h` | ESP-IDF's Wi-Fi driver (`port/net/wifi.h`) as the offloaded Wi-Fi interface (`struct wifi_mgmt_ops`: scan, status; connect not yet), the counterpart of rp2040-connect's `drivers/nina/port/zephyr/nina_net.c`; the start-up of the network event thread, the interface and the `wifi` command (`zephyr_net_initialize()`, as rp2040-connect's `compat/net_offload/zephyr_net_init.c`) |
 | `zephyr_sys_clock.c` | `sys_clock_gettime()`/`sys_clock_settime()` (`compat/port/generic/zephyr/sys/clock.h`) on the SYSTIMER uptime, as rp2040-connect's `compat/port/pico_sdk/zephyr_sys_clock.c` on the RP2040 TIMER; newlib's `_gettimeofday_r()` and `settimeofday()` on the same clock |
 | `commands.c` | `version`, `free`, `ps` (with the run times of ThreadX's execution profile kit) and the command table `shell_engine_cmds[]` |

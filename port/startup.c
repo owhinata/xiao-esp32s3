@@ -43,9 +43,7 @@
  *     already set (bootloader_init_mem()); stopping the second core and
  *     Cache_Set_IDROM_MMU_Info(), which only the PSRAM code reads; the
  *     interrupt matrix clear and cache error interrupt of a full ESP-IDF
- *     system; esp_perip_clk_init(), which gates the clocks of unused
- *     peripherals, among them the USB Serial/JTAG controller's (the console)
- *     unless ESP-IDF's console is configured on it.
+ *     system.
  *   - CONFIG_ESP_SYSTEM_BBPLL_RECALIB: a second PLL calibration that only
  *     bootloaders older than ESP-IDF v5.2 need (bootloader/ is the same
  *     ESP-IDF as the application).
@@ -243,6 +241,16 @@ void __attribute__((noreturn, section(".entry.text"))) _start(void)
      */
     esp_rtc_init();
     esp_clk_init();
+
+    /*
+     * Peripheral clock gates as ESP-IDF leaves them: the clocks of unused
+     * peripherals off, and the modem clock bits, its low-power clock source
+     * and the RNG clock set the way esp_phy and the Wi-Fi driver expect
+     * (esp_phy_enable() asserts on them).  The USB Serial/JTAG controller
+     * keeps its clock because CONFIG_USJ_ENABLE_USB_SERIAL_JTAG is set, and
+     * UART0 because it is CONFIG_ESP_CONSOLE_UART_NUM.
+     */
+    esp_perip_clk_init();
 
     /*
      * rtc_init() lets the CPU clock stop while the CPU waits in WAITI

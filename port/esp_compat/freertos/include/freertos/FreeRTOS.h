@@ -33,6 +33,7 @@
  */
 #include "esp_heap_caps.h"
 #include "esp_rom_sys.h"
+#include "esp_system.h"
 
 #ifndef portNUM_PROCESSORS
 #define portNUM_PROCESSORS              1
@@ -194,6 +195,34 @@ TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t pxTaskCode,
                           puxStackBuffer, pxTaskBuffer)                                        \
     xTaskCreateStaticPinnedToCore((pxTaskCode), (pcName), (ulStackDepth), (pvParameters),      \
                                   (uxPriority), (puxStackBuffer), (pxTaskBuffer), tskNO_AFFINITY)
+
+/*
+ * The calling task, and deleting a task, redirected as the two above.
+ * The layer's xTaskGetCurrentTaskHandle() reads the control block of
+ * tx_thread_identify() without a check, which is NULL in an interrupt
+ * handler that interrupted the scheduler's idle wait and before the
+ * kernel runs: this one returns NULL there.  It is also NULL in a thread
+ * that is not a FreeRTOS task (made with tx_thread_create(), as the
+ * shell's), as with the layer.  vTaskDelete(NULL) first runs the calling
+ * thread's thread-specific data destructors (port/esp_compat/
+ * pthread_local.c), as a POSIX thread's exit does: the Wi-Fi driver
+ * keeps a semaphore per thread there.  Being object-like, the macros
+ * also redirect where the functions' addresses are taken (the Wi-Fi OS
+ * adapter's table).
+ */
+TaskHandle_t esp_compat_task_get_current(void);
+void esp_compat_task_delete(TaskHandle_t xTask);
+
+#define xTaskGetCurrentTaskHandle       esp_compat_task_get_current
+#define vTaskDelete                     esp_compat_task_delete
+
+/* ---- Memory ------------------------------------------------------------- */
+
+/*
+ * Bytes free in the layer's byte pool (configTOTAL_HEAP_SIZE), where its
+ * tasks, queues, semaphores, mutexes and event groups are allocated.
+ */
+size_t esp_compat_freertos_pool_free(void);
 
 /* ---- Queues ------------------------------------------------------------- */
 

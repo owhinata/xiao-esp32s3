@@ -3,13 +3,17 @@
  * layer (tx_freertos.c) does not have, on top of it.  Declared in
  * include/freertos/FreeRTOS.h, which says what each one assumes.
  */
+#include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "tx_api.h"
 #include "tx_initialize.h"
 #include "tx_thread.h"
+#include "tx_byte_pool.h"
 
 #include "freertos/FreeRTOS.h"
+#include "../pthread_local.h"
 
 /* State of the critical sections: the interrupt level to return to and the nesting depth. */
 uint32_t esp_compat_critical_saved_ps;
@@ -62,6 +66,25 @@ TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t pxTaskCode,
                                uxPriority, puxStackBuffer, pxTaskBuffer);
 }
 
+/* The layer's functions; freertos/FreeRTOS.h redirects their names here. */
+#undef xTaskGetCurrentTaskHandle
+#undef vTaskDelete
+
+TaskHandle_t esp_compat_task_get_current(void)
+{
+    TX_THREAD *thread = tx_thread_identify();
+
+    return thread != TX_NULL ? (TaskHandle_t) thread->txfr_thread_ptr : NULL;
+}
+
+void esp_compat_task_delete(TaskHandle_t xTask)
+{
+    if (xTask == NULL || xTask == esp_compat_task_get_current()) {
+        esp_compat_pthread_exit_destructors();
+    }
+    vTaskDelete(xTask);
+}
+
 BaseType_t xQueueGenericSend(QueueHandle_t xQueue,
                              const void *const pvItemToQueue,
                              TickType_t xTicksToWait,
@@ -95,4 +118,25 @@ BaseType_t xQueueGetStaticBuffers(QueueHandle_t xQueue,
         *ppxStaticQueue = xQueue;
     }
     return pdTRUE;
+}
+
+/*
+ * The layer's byte pool is static in tx_freertos.c; it is found by its
+ * name among the kernel's byte pools.
+ */
+size_t esp_compat_freertos_pool_free(void)
+{
+    TX_BYTE_POOL *pool = _tx_byte_pool_created_ptr;
+    ULONG n;
+    ULONG available = 0;
+
+    for (n = _tx_byte_pool_created_count; n > 0u && pool != TX_NULL; n--) {
+        if (pool->tx_byte_pool_name != TX_NULL
+            && strcmp(pool->tx_byte_pool_name, "txfr_byte_pool") == 0) {
+            (void) tx_byte_pool_info_get(pool, TX_NULL, &available, TX_NULL, TX_NULL, TX_NULL, TX_NULL);
+            break;
+        }
+        pool = pool->tx_byte_pool_created_next;
+    }
+    return (size_t) available;
 }

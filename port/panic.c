@@ -2,7 +2,7 @@
  * Fatal errors: the register dump, the record kept across the restart
  * (shell/port/fault_record.h) and the restart.
  *
- * Four entry points, all named by code elsewhere:
+ * The entry points, all named by code elsewhere:
  *
  *   xt_unhandled_exception()  default entry of the Xtensa layer's exception
  *                             table: a user-mode exception nobody handles.
@@ -15,7 +15,14 @@
  *   _tx_xtensa_stack_error_handler()
  *                             ThreadX's stack check (TX_ENABLE_STACK_CHECKING),
  *                             registered by tx_port.h.
- *   _exit()                   exit(), abort(), main() returning.
+ *   _exit()                   exit(), main() returning.
+ *   abort()                   in place of newlib's, which goes through
+ *                             raise() and _exit(): where it was called.
+ *   __assert_func()           a failed assert(), in place of newlib's,
+ *                             which prints with stdio: file and line.
+ *   _esp_error_check_failed() ESP-IDF's ESP_ERROR_CHECK(), in place of
+ *                             esp_system's esp_err.c (not built): the
+ *                             error code, file and line.
  *
  * Each masks every interrupt, stops the interrupt watchdog and arms the RTC
  * watchdog (board_watchdog_fault()), fills fault_retained in .noinit, prints
@@ -44,6 +51,7 @@
 #include "xtensa_api.h"
 #include "xtensa/xtruntime.h"
 #include "sdkconfig.h"
+#include "esp_err.h"
 #include "esp_private/panic_reason.h"
 #include "esp_rom_sys.h"
 #include "soc/soc.h"
@@ -170,27 +178,73 @@ static void set_caller(struct fault_record *r, uint32_t pc)
     r->a[1] = sp;
 }
 
-/* text = "status <n>": the decimal digits by hand (no stdio here). */
-static void set_status_text(struct fault_record *r, int status)
+/*
+ * The record's text, built by hand (no stdio here): characters past the
+ * end of r->text are dropped, and the text stays terminated.
+ */
+static size_t text_put(struct fault_record *r, size_t i, char c)
 {
-    static const char prefix[] = "status ";
-    char digits[12];
-    uint32_t v = status < 0 ? 0u - (uint32_t) status : (uint32_t) status;
-    size_t n = 0;
-    size_t i = sizeof(prefix) - 1u;
+    if (i < sizeof(r->text) - 1u) {
+        r->text[i++] = c;
+        r->text[i] = '\0';
+    }
+    return i;
+}
 
-    memcpy(r->text, prefix, i);
+static size_t text_str(struct fault_record *r, size_t i, const char *s)
+{
+    while (s != NULL && *s != '\0') {
+        i = text_put(r, i, *s++);
+    }
+    return i;
+}
+
+static size_t text_dec(struct fault_record *r, size_t i, int value)
+{
+    char digits[12];
+    uint32_t v = value < 0 ? 0u - (uint32_t) value : (uint32_t) value;
+    size_t n = 0;
+
     do {
         digits[n++] = (char) ('0' + v % 10u);
         v /= 10u;
     } while (v != 0u);
-    if (status < 0) {
-        r->text[i++] = '-';
+    if (value < 0) {
+        i = text_put(r, i, '-');
     }
     while (n > 0) {
-        r->text[i++] = digits[--n];
+        i = text_put(r, i, digits[--n]);
     }
-    r->text[i] = '\0';
+    return i;
+}
+
+static size_t text_hex(struct fault_record *r, size_t i, uint32_t v)
+{
+    int shift = 28;
+
+    i = text_str(r, i, "0x");
+    while (shift > 0 && (v >> shift) == 0u) {
+        shift -= 4;
+    }
+    for (; shift >= 0; shift -= 4) {
+        i = text_put(r, i, "0123456789abcdef"[(v >> shift) & 0xFu]);
+    }
+    return i;
+}
+
+/* "<file>:<line>", the file without its directory ("?" when there is none). */
+static size_t text_location(struct fault_record *r, size_t i, const char *file, int line)
+{
+    const char *base = file;
+
+    for (const char *p = file; p != NULL && *p != '\0'; p++) {
+        if (*p == '/') {
+            base = p + 1;
+        }
+    }
+    i = text_str(r, i, base != NULL ? base : "?");
+    i = text_put(r, i, ':');
+    return text_dec(r, i, line);
 }
 
 /*
@@ -285,8 +339,52 @@ void __attribute__((noreturn)) _exit(int status)
     struct fault_record *r = fault_begin(FAULT_REASON_EXIT);
 
     set_caller(r, (uint32_t) __builtin_return_address(0));
-    set_status_text(r, status);
+    (void) text_dec(r, text_str(r, 0, "status "), status);
     fault_seal(r, _tx_thread_current_ptr);
     esp_rom_printf("\n*** _exit(%d)\n", status);
+    fault_dump_and_restart(r);
+}
+
+void __attribute__((noreturn)) abort(void)
+{
+    struct fault_record *r = fault_begin(FAULT_REASON_ABORT);
+
+    set_caller(r, (uint32_t) __builtin_return_address(0));
+    fault_seal(r, _tx_thread_current_ptr);
+    esp_rom_printf("\n*** abort()\n");
+    fault_dump_and_restart(r);
+}
+
+/*
+ * The file name is a string in flash: it goes into the record after the
+ * first seals, and the record is sealed again.
+ */
+void __attribute__((noreturn)) __assert_func(const char *file, int line, const char *func,
+                                             const char *expr)
+{
+    struct fault_record *r = fault_begin(FAULT_REASON_ASSERT);
+
+    (void) func;
+    set_caller(r, (uint32_t) __builtin_return_address(0));
+    fault_seal(r, _tx_thread_current_ptr);
+    (void) text_location(r, 0, file, line);
+    fault_record_seal(r);
+    esp_rom_printf("\n*** Assertion failed: %s, %s\n", expr != NULL ? expr : "?", r->text);
+    fault_dump_and_restart(r);
+}
+
+void __attribute__((noreturn)) _esp_error_check_failed(esp_err_t rc, const char *file, int line,
+                                                       const char *function, const char *expression)
+{
+    struct fault_record *r = fault_begin(FAULT_REASON_ESP_ERROR_CHECK);
+
+    (void) function;
+    set_caller(r, (uint32_t) __builtin_return_address(0));
+    (void) text_hex(r, 0, (uint32_t) rc);
+    fault_seal(r, _tx_thread_current_ptr);
+    (void) text_location(r, text_put(r, strlen(r->text), ' '), file, line);
+    fault_record_seal(r);
+    esp_rom_printf("\n*** ESP_ERROR_CHECK failed: %s, %s\n",
+                   expression != NULL ? expression : "?", r->text);
     fault_dump_and_restart(r);
 }

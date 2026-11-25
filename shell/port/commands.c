@@ -295,7 +295,8 @@ SHELL_CMD_REGISTER(ps, NULL, "List the tasks", cmd_ps);
  * (shell/common/compat/shell_engine/shell_engine.c), "dmesg"
  * (shell/common/shell/dmesg_shell.c) and the generic commands of
  * shell/common/shell/kernel_shell.c ("date" reads shell/port/zephyr_sys_clock.c,
- * "fault" the record of shell/port/fault_record.h).
+ * "fault" the record of shell/port/fault_record.h), and "wifi"
+ * (shell/common/compat/zephyr_wifi_shell.c, on shell/port/zephyr_net_wifi.c).
  */
 SHELL_ENGINE_CMD_DECLARE(bootsel);
 SHELL_ENGINE_CMD_DECLARE(date);
@@ -307,6 +308,7 @@ SHELL_ENGINE_CMD_DECLARE(id);
 SHELL_ENGINE_CMD_DECLARE(reboot);
 SHELL_ENGINE_CMD_DECLARE(sleep);
 SHELL_ENGINE_CMD_DECLARE(uptime);
+SHELL_ENGINE_CMD_DECLARE(wifi);
 
 /* Sorted by name, as Zephyr's "help" lists them. */
 const struct shell_engine_cmd shell_engine_cmds[] = {
@@ -323,6 +325,7 @@ const struct shell_engine_cmd shell_engine_cmds[] = {
     SHELL_ENGINE_CMD(sleep),
     SHELL_ENGINE_CMD(uptime),
     SHELL_ENGINE_CMD(version),
+    SHELL_ENGINE_CMD(wifi),
 };
 
 const size_t shell_engine_cmd_count = sizeof(shell_engine_cmds) / sizeof(shell_engine_cmds[0]);

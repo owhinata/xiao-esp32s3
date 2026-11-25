@@ -34,4 +34,12 @@
  */
 #define APP_STACK_SHELL         8192
 
+/*
+ * The network event thread "net_mgmt" (shell/common/compat/
+ * zephyr_net_mgmt.c, the shared default 2048 bytes, Zephyr's
+ * CONFIG_NET_MGMT_EVENT_STACK_SIZE): its callbacks print the "wifi"
+ * command's results with newlib's printf, as the shell's thread does.
+ */
+#define APP_STACK_NET_MGMT      6144
+
 #endif /* PRIORITIES_OS_H */
