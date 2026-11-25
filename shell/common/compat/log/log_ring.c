@@ -153,7 +153,7 @@ static char *put_str(char *p, const char *end, const char *s)
 int log_ring_prefix(char *buf, size_t size, uint64_t us, int level,
                     const char *module, const char *func)
 {
-  /* "[" + up to 20 digits + ":MM:SS.mmm,uuu] " + "<lvl> " */
+  /* "[" + up to 20 digits + ":MM:SS.mmmuuu] " + "<lvl> " */
 
   char head[48];
   char *p = head;
@@ -202,7 +202,6 @@ int log_ring_prefix(char *buf, size_t size, uint64_t us, int level,
   p = put_small(p, seconds, 2);
   *p++ = '.';
   p = put_small(p, ms, 3);
-  *p++ = ',';
   p = put_small(p, usec, 3);
   *p++ = ']';
   *p++ = ' ';

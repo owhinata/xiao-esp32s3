@@ -201,7 +201,7 @@ files were copied to `port/threadx/` and adapted to Espressif's layer.  The
 `shell/common/` holds the 60 files of rp2040-connect's `common/` directory
 (commit `72f3485`) that this firmware uses, at the same relative paths: the
 shell engine, the generic commands, and the Zephyr-compatibility kernel layer
-they are written against.  All but two are byte-identical copies;
+they are written against.  Most are byte-identical copies;
 `shell/ORIGIN.md` lists them, the changes, and their licences (MIT,
 Apache-2.0 for the parts derived from Zephyr, BSD-3-Clause for getopt and
 fnmatch).  `shell/port/` is this board's side of that code: the console

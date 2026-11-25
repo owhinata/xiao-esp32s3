@@ -16,12 +16,13 @@ diff -r shell/common /path/to/rp2040-connect/common | grep -v '^Only in /path/to
 
 ## Copied files
 
-All 60 files are byte-identical to the original, except two:
+All 60 files are byte-identical to the original, except the ones below:
 
 | File | Change |
 |---|---|
 | `compat/include/priorities.h` | `APP_STACK_SHELL` is wrapped in `#ifndef`, as the file already does for `APP_STACK_SENSOR_SHELL` and three others, so that `shell/port/priorities_os.h` can set the shell thread's stack for this CPU. |
 | `shell/kernel_shell.c` | Texts that named RP2040 specifics now name this board's: the help of `id` (the factory MAC address instead of the flash's ID), the clock in `uptime` (SYSTIMER instead of TIMER), and the help and message of `bootsel` (the ROM download mode instead of BOOTSEL and the RPI-RP2 drive), with the two comments that explain them. No code change. |
+| `compat/log/log_ring.c` | The log time stamp is `[HH:MM:SS.mmmuuu]`, without the comma Zephyr puts between the milliseconds and the microseconds: one statement removed. The comments that quote the format are changed to match in `compat/log/log_ram.c`, `compat/internal/log_ring.h` and `compat/include/app_log.h`. |
 
 By licence, as each file's `SPDX-License-Identifier` line says (paths
 relative to `shell/common/`; headers without a directory are in

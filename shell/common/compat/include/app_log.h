@@ -8,7 +8,7 @@
  * one line in the RAM log (log_ram.c and log_ring.c here, on the OS's
  * part declared in log_ram_os.h; shown by "dmesg") in Zephyr's format:
  *
- *   [HH:MM:SS.mmm,uuu] <inf> module: message\n
+ *   [HH:MM:SS.mmmuuu] <inf> module: message\n
  *
  * with <err>, <wrn>, <inf> and <dbg>, and "module.function: " for <dbg>
  * (Zephyr's CONFIG_LOG_FUNC_NAME_PREFIX_DBG).  The time is the board's

@@ -13,7 +13,7 @@
  *   spinlock, the same thing on one core), so the LOG_* macros may be used
  *   in interrupt handlers and before the scheduler starts.
  * - LOG_* lines are formatted by app_log_vprintf() at once, in the caller's
- *   context and on its stack: "[HH:MM:SS.mmm,uuu] <lvl> module: message\n"
+ *   context and on its stack: "[HH:MM:SS.mmmuuu] <lvl> module: message\n"
  *   with the time of the call (log_ram_os_uptime_us()).  Zephyr's deferred
  *   mode takes the time at the call too but formats later in its logging
  *   thread.

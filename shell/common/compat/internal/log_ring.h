@@ -70,8 +70,9 @@ size_t log_ring_piece(const struct retained_log *log, uint64_t dropped,
                       size_t max);
 
 /* The line prefix of Zephyr's log_output.c with LOG_OUTPUT_FLAG_TIMESTAMP |
- * FORMAT_TIMESTAMP | LEVEL and 64-bit timestamps:
- * "[HH:MM:SS.mmm,uuu] <lvl> module: ", or "module.func: " when func is not
+ * FORMAT_TIMESTAMP | LEVEL and 64-bit timestamps, but without Zephyr's comma
+ * between the milliseconds and the microseconds:
+ * "[HH:MM:SS.mmmuuu] <lvl> module: ", or "module.func: " when func is not
  * NULL.  us is microseconds; hours are printed with at least two digits.
  * Returns the length (snprintf rules).
  */
