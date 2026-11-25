@@ -1,6 +1,6 @@
 /*
  * Glue between Espressif's Xtensa RTOS porting layer
- * (esp-hal-components/components/xtensa) and ThreadX.
+ * (esp-hal-3rdparty/components/xtensa) and ThreadX.
  *
  * The porting layer -- vectors, interrupt dispatch, context save/restore,
  * coprocessor exception -- is RTOS-agnostic and reaches the RTOS only through

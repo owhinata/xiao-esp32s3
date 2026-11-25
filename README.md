@@ -2,8 +2,9 @@
 
 Bare-metal [Eclipse ThreadX](https://github.com/eclipse-threadx/threadx) on the
 XIAO ESP32S3, built on
-[esp-hal-components](https://github.com/espressif/esp-hal-components) (the HAL
-part of ESP-IDF, without ESP-IDF, FreeRTOS or the second-stage bootloader).
+[esp-hal-3rdparty](https://github.com/espressif/esp-hal-3rdparty) (an
+unmodified mirror of ESP-IDF's components, used here without ESP-IDF's build
+system, FreeRTOS or the second-stage bootloader).
 
 Status: **runs on a XIAO ESP32S3** (ESP32-S3R8, chip revision v0.2), executing
 from flash at 240 MHz, with an interactive shell on the USB console.  See
@@ -13,9 +14,9 @@ from flash at 240 MHz, with an interactive shell on the USB console.  See
 |---|---|
 | MCU | ESP32-S3 (Xtensa LX7, core 0 only) |
 | Kernel | ThreadX 6.5.2 (`v6.5.2.202603_rel`), `common/` only |
-| Xtensa layer | esp-hal-components `components/xtensa` (vectors, interrupt dispatch, context switch primitives) |
-| HAL | esp-hal-components `sync-3-master` (ESP-IDF master as of 2024-12) |
-| Toolchain | `xtensa-esp-elf` 14.2.0_20241119, fetched on first configure |
+| Xtensa layer | esp-hal-3rdparty `components/xtensa` (vectors, interrupt dispatch, context switch primitives) |
+| HAL | esp-hal-3rdparty `sync/master.c` at `130cda98` (ESP-IDF master of 2026-11-15, v6.3 development) |
+| Toolchain | `xtensa-esp-elf` 16.1.0_20260609 (the one ESP-IDF names at that commit), fetched on first configure |
 | Console | USB Serial/JTAG on the USB-C connector; polled transmit, interrupt-driven receive |
 | Shell | The shell of [rp2040-connect](https://github.com/owhinata/rp2040-connect), copied into `shell/common/` |
 | Tick | 1000 Hz from CCOMPARE0 (CPU interrupt 6, level 1) |
@@ -32,8 +33,8 @@ cmake -S . -B build -G Ninja
 cmake --build build
 ```
 
-The first configure downloads the compiler (~110 MB) into `tools/` and the
-two upstream source trees (ThreadX and esp-hal-components, ~200 MB) into
+The first configure downloads the compiler (~90 MB) into `tools/` and the
+two upstream source trees (ThreadX and esp-hal-3rdparty, ~370 MB) into
 `lib/`, each at the commit pinned in `CMakeLists.txt`.  Neither directory is
 tracked by this repository.
 Outputs are `build/xiao_esp32s3_threadx.elf`, `.bin` (ESP image) and `.map`.
@@ -99,10 +100,12 @@ There is no second-stage bootloader and no ESP-IDF start-up code.
    the ROM checks at that point.
 2. `_start` masks interrupts, points VECBASE at the vectors, clears `.bss` and
    turns off the watchdogs the ROM armed.
-3. Clocks, as ESP-IDF's bootloader does: PLL on, CPU at 80 MHz (`rtc_clk_init`).
+3. Clocks: ESP-IDF's own `bootloader_clock_configure()` turns the PLL on and
+   runs the CPU from it at 80 MHz.
 4. `flash_map_image()` (`port/flash_map.c`) finds the two flash segments that
    sit behind the RAM segments in the same image, sets up the cache and MMU
-   through the HAL, and maps them: code at 0x42000000, constants at 0x3C000000.
+   through the HAL and the flash pins and timing through `bootloader_support`,
+   and maps them: code at 0x42000000, constants at 0x3C000000.
 5. CPU to 240 MHz, console, `main()`.
 
 Everything up to step 4 has to run from RAM; the linker script
@@ -144,10 +147,10 @@ src/            application
 
 ## What comes from where
 
-The rule is to take code from esp-hal-components wherever it can be compiled
+The rule is to take code from esp-hal-3rdparty wherever it can be compiled
 as it is, and to write only what connects it to ThreadX and to this board.
 
-**esp-hal-components, unmodified**
+**esp-hal-3rdparty, unmodified**
 
 | Source | Role |
 |---|---|
@@ -156,13 +159,15 @@ as it is, and to write only what connects it to ThreadX and to this board.
 | `xtensa/xtensa_intr.c`, `xtensa_intr_asm.S` | Handler tables, `xt_set_interrupt_handler()`, `xt_ints_on/off()` |
 | `xtensa/esp32s3/libxt_hal.a` | Xtensa HAL (window spill, extra-state save) |
 | `esp_system/port/arch/xtensa/panic_handler_asm.S` | `_xt_panic` |
-| `hal/wdt_hal_iram.c` | Watchdog control |
-| `hal/cache_hal.c`, `hal/mmu_hal.c` | Cache and MMU for the flash mapping |
-| `hal/systimer_hal.c`, `esp_hw_support/port/esp32s3/systimer.c` | Microsecond uptime clock |
-| `esp_hw_support/port/esp32s3/rtc_clk.c`, `rtc_clk_init.c`, `esp_hw_support/regi2c_ctrl.c` | PLL and CPU clock |
+| `esp_hal_wdt/wdt_hal_iram.c` | Watchdog control |
+| `esp_hal_cache/cache_hal.c`, `mmu_hal.c` | Cache and MMU for the flash mapping |
+| `bootloader_support/src/bootloader_clock_init.c` | Clock set-up before the flash is mapped |
+| `bootloader_support/bootloader_flash/src/bootloader_flash_config_esp32s3.c` | Flash pin drive, dummy-phase levels, chip-select timing |
+| `esp_hal_systimer/systimer_hal.c`, `esp_hw_support/port/esp32s3/systimer.c` | Microsecond uptime clock |
+| `esp_hw_support/port/esp32s3/rtc_clk.c`, `rtc_clk_init.c`, `esp_hw_support/regi2c_ctrl.c`, `esp_hal_regi2c/esp32s3/rom.regi2c.ld` | PLL and CPU clock |
 | `esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c` | Work-arounds for ROM cache bugs |
 | `esp_rom/patches/esp_rom_sys.c` + ROM | `esp_rom_printf`, console channel, ticks-per-us |
-| `hal/esp32s3/include/hal/*_ll.h` | GPIO, USB Serial/JTAG, eFuse |
+| LL headers of `esp_hal_gpio`, `esp_hal_usb`, `hal` | GPIO, USB Serial/JTAG, eFuse |
 | `soc/`, `esp_rom/` linker scripts | Peripheral and ROM symbol addresses |
 
 Espressif's Xtensa layer is the RTOS-neutral half of what ESP-IDF's FreeRTOS
@@ -208,8 +213,8 @@ board can answer (`version`, `free`, `ps`).
 | File | Role |
 |---|---|
 | `startup.c` | Reset entry, clocks |
-| `flash_map.c` | Maps the flash part of the image (follows ESP-IDF's `bootloader_support`, which is not in esp-hal-components) |
-| `esp_compat/` | What esp-hal-components sources expect from the rest of ESP-IDF: a `freertos/FreeRTOS.h` that provides critical sections only, and documented stubs |
+| `flash_map.c` | Finds the flash segments in the image and maps them.  ESP-IDF's code for this is part of its image loader and cannot be called on its own, so this follows it; the flash pin and timing set-up it needs is called from `bootloader_support` |
+| `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: a `freertos/FreeRTOS.h` that provides critical sections only, small stand-in headers for `esp_sleep` and `esp_mspi`, and documented stubs |
 | `board.c` | LED, clock readback, uptime, console (with its receive interrupt), device ID, restart |
 | `syscalls.c` | newlib fd 0-2 on the console; once the shell runs, stdout and stderr go through the shell's console layer |
 | `panic.c` | `panicHandler` / `xt_unhandled_exception`: register dump |
@@ -222,9 +227,8 @@ using a coprocessor in an interrupt handler ends in a panic.
 
 ## Bring-up checklist
 
-Everything below has been observed on the board with the current image except
-the LED, which was last looked at before the shell was added.  In the order a
-failure would show up:
+Everything below has been observed on the board with the current image.  In
+the order a failure would show up:
 
 1. The banner appears after `flash`.  No output at all: the fault is before
    or in the console, i.e. `_start`, the flash mapping, or USB Serial/JTAG.

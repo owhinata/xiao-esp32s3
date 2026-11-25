@@ -14,18 +14,19 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Upstream sources.  Fetched into lib/ (not tracked) at exactly these commits.
-#   ThreadX            tag v6.5.2.202603_rel
-#   esp-hal-components branch sync-3-master as of 2024-12-03 (ESP-IDF master of
-#                      that day; the toolchain version in cmake/ goes with it)
+#   ThreadX          tag v6.5.2.202603_rel
+#   esp-hal-3rdparty branch sync/master.c, an unmodified mirror of ESP-IDF
+#                    components at ESP-IDF master ad20ded6 (2026-11-15, v6.3
+#                    development); the toolchain version in cmake/ goes with it
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/fetch_upstream.cmake")
 fetch_upstream(threadx
     https://github.com/eclipse-threadx/threadx
     93387b0a60382a29579bbad5045c68328e3751df)
-fetch_upstream(esp-hal-components
-    https://github.com/espressif/esp-hal-components
-    5567b35b9b0cd10bf26a4112f84a71ddd46f1488)
+fetch_upstream(esp-hal-3rdparty
+    https://github.com/espressif/esp-hal-3rdparty
+    130cda986be9d69bf53c28ec1f815479dcdbf5db)
 
-set(ESP_HAL  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-hal-components/components")
+set(ESP_HAL  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-hal-3rdparty/components")
 set(TX_DIR   "${CMAKE_CURRENT_LIST_DIR}/lib/threadx")
 set(TX_PORT  "${TX_DIR}/ports/xtensa/xcc")
 set(PORT_DIR "${CMAKE_CURRENT_LIST_DIR}/port")
@@ -43,8 +44,23 @@ add_compile_options(
     -Wall)
 
 # ---------------------------------------------------------------------------
-# esp-hal-components: headers, ROM/peripheral symbol tables, Xtensa HAL library
+# esp-hal-3rdparty: headers, ROM/peripheral symbol tables, Xtensa HAL library
 # ---------------------------------------------------------------------------
+# ESP-IDF splits the HAL into one component per peripheral (esp_hal_*); each
+# has a common include/ and a per-chip esp32s3/include/.  Only the ones whose
+# headers this firmware reaches are listed.
+set(ESP_HAL_PERIPHERALS
+    esp_hal_cache esp_hal_clock esp_hal_gpio esp_hal_gpspi esp_hal_regi2c
+    esp_hal_systimer esp_hal_timg esp_hal_usb esp_hal_wdt)
+set(ESP_HAL_PERIPHERAL_INCLUDES)
+foreach(_c IN LISTS ESP_HAL_PERIPHERALS)
+    foreach(_d "${ESP_HAL}/${_c}/include" "${ESP_HAL}/${_c}/esp32s3/include")
+        if(EXISTS "${_d}")
+            list(APPEND ESP_HAL_PERIPHERAL_INCLUDES "${_d}")
+        endif()
+    endforeach()
+endforeach()
+
 add_library(esp_hal INTERFACE)
 target_include_directories(esp_hal INTERFACE
     "${PORT_DIR}/include"                       # sdkconfig.h
@@ -56,6 +72,7 @@ target_include_directories(esp_hal INTERFACE
     "${ESP_HAL}/hal/include"
     "${ESP_HAL}/hal/esp32s3/include"
     "${ESP_HAL}/hal/platform_port/include"
+    ${ESP_HAL_PERIPHERAL_INCLUDES}
     "${ESP_HAL}/esp_common/include"
     "${ESP_HAL}/esp_rom/include"
     "${ESP_HAL}/esp_rom/esp32s3"
@@ -63,17 +80,21 @@ target_include_directories(esp_hal INTERFACE
     "${ESP_HAL}/esp_rom/esp32s3/include/esp32s3"
     "${ESP_HAL}/esp_hw_support/include"
     "${ESP_HAL}/esp_hw_support/include/soc"
+    "${ESP_HAL}/esp_hw_support/include/soc/esp32s3"
     "${ESP_HAL}/esp_hw_support/include/esp_private"
     "${ESP_HAL}/esp_hw_support/port/include"
-    "${ESP_HAL}/esp_hw_support/port/esp32s3"
     "${ESP_HAL}/esp_hw_support/port/esp32s3/include"
     "${ESP_HAL}/esp_system/include"
-    "${ESP_HAL}/log/include")
+    "${ESP_HAL}/log/include"
+    # esp_sleep is not in esp-hal-3rdparty; the part rtc_clk.c needs
+    "${PORT_DIR}/esp_compat/esp_sleep/include")
 target_link_libraries(esp_hal INTERFACE "${ESP_HAL}/xtensa/esp32s3/libxt_hal.a")
 target_link_options(esp_hal INTERFACE
     "-T${ESP_HAL}/soc/esp32s3/ld/esp32s3.peripherals.ld"
     "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.ld"
     "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.api.ld"
+    # The analog I2C (regi2c) accessors are in ROM (ESP_ROM_HAS_REGI2C_IMPL).
+    "-T${ESP_HAL}/esp_hal_regi2c/esp32s3/rom.regi2c.ld"
     # memcpy/memset/str* and the libgcc helpers in ROM: always reachable, even
     # before the flash is mapped, and they cost no flash or RAM.
     # The libc list also names three things that belong to the ROM's own C
@@ -83,7 +104,7 @@ target_link_options(esp_hal INTERFACE
     "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.libgcc.ld")
 
 # ---------------------------------------------------------------------------
-# Xtensa RTOS porting layer from esp-hal-components
+# Xtensa RTOS porting layer from esp-hal-3rdparty
 # ---------------------------------------------------------------------------
 # Vectors, interrupt dispatch, context save/restore and the coprocessor
 # exception, shared by every RTOS on Espressif Xtensa chips.  It reaches the
@@ -142,10 +163,10 @@ add_executable(app
     "${PORT_DIR}/syscalls.c"
     "${PORT_DIR}/flash_map.c"
     "${PORT_DIR}/esp_compat/esp_stubs.c"
-    # esp-hal-components sources this image needs, compiled as they are
-    "${ESP_HAL}/hal/wdt_hal_iram.c"
-    "${ESP_HAL}/hal/cache_hal.c"
-    "${ESP_HAL}/hal/mmu_hal.c"
+    # esp-hal-3rdparty sources this image needs, compiled as they are
+    "${ESP_HAL}/esp_hal_wdt/wdt_hal_iram.c"
+    "${ESP_HAL}/esp_hal_cache/cache_hal.c"
+    "${ESP_HAL}/esp_hal_cache/mmu_hal.c"
     "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_clk.c"
     "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_clk_init.c"
     # rtc_init.c: only for the regulator bias variables rtc_clk.c reads;
@@ -157,14 +178,37 @@ add_executable(app
     # Work-arounds for bugs in the ROM's cache suspend/write-back routines.
     "${ESP_HAL}/esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c"
     # SYSTIMER: the uptime clock (port/board.c).
-    "${ESP_HAL}/hal/systimer_hal.c"
-    "${ESP_HAL}/esp_hw_support/port/esp32s3/systimer.c")
+    "${ESP_HAL}/esp_hal_systimer/systimer_hal.c"
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/systimer.c"
+    # The second-stage bootloader's clock and flash-interface set-up, called
+    # by _start and flash_map_image().  Of the flash file only the three
+    # functions flash_map_image() calls are linked; the rest (flash ID, QIO,
+    # write protection, logging) is dropped by --gc-sections.
+    "${ESP_HAL}/bootloader_support/src/bootloader_clock_init.c"
+    "${ESP_HAL}/bootloader_support/bootloader_flash/src/bootloader_flash_config_esp32s3.c")
 # These use FreeRTOS only for critical sections; give them the stand-in header.
 # It is kept off the global include path on purpose: the Xtensa layer switches
 # to its FreeRTOS code paths as soon as it can see a "freertos/FreeRTOS.h".
 set_source_files_properties(
     "${ESP_HAL}/esp_hw_support/regi2c_ctrl.c"
     PROPERTIES INCLUDE_DIRECTORIES "${PORT_DIR}/esp_compat/include")
+# esp_mspi is not in esp-hal-3rdparty: the two of its headers that rtc_init.c
+# and bootloader_flash_config_esp32s3.c include, reduced to what they name.
+set_source_files_properties(
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_init.c"
+    "${ESP_HAL}/bootloader_support/bootloader_flash/src/bootloader_flash_config_esp32s3.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${PORT_DIR}/esp_compat/esp_mspi/include")
+# bootloader_support headers, for its own sources and the two callers.
+set(BOOTLOADER_SUPPORT_INCLUDES
+    "${ESP_HAL}/bootloader_support/include"
+    "${ESP_HAL}/bootloader_support/bootloader_flash/include"
+    "${ESP_HAL}/bootloader_support/private_include")
+set_property(SOURCE
+    "${PORT_DIR}/startup.c"
+    "${PORT_DIR}/flash_map.c"
+    "${ESP_HAL}/bootloader_support/src/bootloader_clock_init.c"
+    "${ESP_HAL}/bootloader_support/bootloader_flash/src/bootloader_flash_config_esp32s3.c"
+    APPEND PROPERTY INCLUDE_DIRECTORIES "${BOOTLOADER_SUPPORT_INCLUDES}")
 
 set_target_properties(app PROPERTIES
     OUTPUT_NAME xiao_esp32s3_threadx

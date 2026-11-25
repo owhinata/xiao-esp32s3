@@ -4,14 +4,19 @@
  *
  * This is the part of the job that ESP-IDF's second-stage bootloader does for
  * an application (bootloader_init_spi_flash() and set_cache_and_start_app()
- * in components/bootloader_support, Apache-2.0); the register sequences below
- * follow that code.  The cache and MMU themselves are driven through the HAL.
+ * in components/bootloader_support), followed by what the application's
+ * start-up adds for executing from flash (ext_mem_init() in
+ * esp_system/port/cpu_start.c).  The flash pin and timing set-up is
+ * bootloader_support's own code; the cache and MMU are driven through the
+ * HAL.  Finding the segments and mapping them is written here, because the
+ * bootloader does it inside static functions of bootloader_utility.c that
+ * also verify and load the whole image.
  */
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "esp_rom_efuse.h"
-#include "esp_rom_gpio.h"
+#include "bootloader_common.h"
+#include "bootloader_flash_config.h"
 #include "esp_rom_spiflash.h"
 #include "esp_rom_sys.h"
 #include "esp32s3/rom/cache.h"
@@ -20,9 +25,6 @@
 #include "hal/mmu_hal.h"
 #include "hal/mmu_types.h"
 #include "soc/soc.h"
-#include "soc/spi_mem_reg.h"
-#include "soc/io_mux_reg.h"
-#include "soc/spi_pins.h"
 
 #include "board.h"
 
@@ -32,6 +34,9 @@ extern char _flash_rodata_start, _flash_rodata_end;
 /* ROM functions without a declaration in the esp_rom headers. */
 extern void rom_config_instruction_cache_mode(uint32_t size, uint8_t ways, uint8_t line_size);
 extern void rom_config_data_cache_mode(uint32_t size, uint8_t ways, uint8_t line_size);
+
+/* bootloader_flash_config_esp32s3.c, without a declaration in its headers. */
+extern void bootloader_flash_set_dummy_out(void);
 
 /*
  * Cache geometry: ESP-IDF's defaults for the ESP32-S3.  The caches live in
@@ -123,39 +128,6 @@ static void find_flash_segments(uint32_t text_vaddr, uint32_t rodata_vaddr,
     }
 }
 
-/* Pad drive strength, dummy-phase line levels and chip-select timing. */
-static void flash_pins_and_timing(void)
-{
-    const uint32_t spiconfig = esp_rom_efuse_get_flash_gpio_info();
-    uint32_t pins[6] = {
-        MSPI_IOMUX_PIN_NUM_CLK, MSPI_IOMUX_PIN_NUM_MISO, MSPI_IOMUX_PIN_NUM_MOSI,
-        MSPI_IOMUX_PIN_NUM_CS0, MSPI_IOMUX_PIN_NUM_HD, MSPI_IOMUX_PIN_NUM_WP,
-    };
-    uint32_t i;
-
-    if (spiconfig != 0) {       /* pins remapped by eFuse */
-        pins[0] = spiconfig & 0x3Fu;
-        pins[1] = (spiconfig >> 6) & 0x3Fu;
-        pins[2] = (spiconfig >> 12) & 0x3Fu;
-        pins[3] = (spiconfig >> 18) & 0x3Fu;
-        pins[4] = (spiconfig >> 24) & 0x3Fu;
-        pins[5] = esp_rom_efuse_get_flash_wp_gpio();
-    }
-    for (i = 0; i < 6; i++) {
-        if (pins[i] <= MAX_PAD_GPIO_NUM) {
-            esp_rom_gpio_pad_set_drv(pins[i], 1);
-        }
-    }
-
-    REG_SET_BIT(SPI_MEM_CTRL_REG(0), SPI_MEM_FDUMMY_OUT | SPI_MEM_D_POL | SPI_MEM_Q_POL);
-    REG_SET_BIT(SPI_MEM_CTRL_REG(1), SPI_MEM_FDUMMY_OUT | SPI_MEM_D_POL | SPI_MEM_Q_POL);
-
-    /* SPI0 and SPI1 share these chip-select settings. */
-    SET_PERI_REG_BITS(SPI_MEM_CTRL2_REG(0), SPI_MEM_CS_HOLD_TIME_V, 0, SPI_MEM_CS_HOLD_TIME_S);
-    SET_PERI_REG_BITS(SPI_MEM_CTRL2_REG(0), SPI_MEM_CS_SETUP_TIME_V, 0, SPI_MEM_CS_SETUP_TIME_S);
-    SET_PERI_REG_MASK(SPI_MEM_USER_REG(0), SPI_MEM_CS_HOLD_M | SPI_MEM_CS_SETUP_M);
-}
-
 static void map_segment(uint32_t vaddr, uint32_t flash_offset, uint32_t size)
 {
     const uint32_t page_mask = ~((uint32_t) CONFIG_MMU_PAGE_SIZE - 1u);
@@ -179,9 +151,30 @@ void flash_map_image(void)
 
     find_flash_segments(text_vaddr, rodata_vaddr, &text_offset, &rodata_offset);
 
-    cache_hal_init();
-    mmu_hal_init();
-    flash_pins_and_timing();
+    /*
+     * bootloader_init_ext_mem(): cache and MMU on, every MMU entry invalid.
+     * On this chip mmu_hal_init() first runs the ROM's own cache and MMU
+     * boot set-up (ROM_Boot_Cache_Init, ESP_ROM_RAM_APP_NEEDS_MMU_INIT).
+     * One core: the second one is never started.
+     */
+    {
+        const cache_hal_config_t cache_config = { .core_nums = 1 };
+        const mmu_hal_config_t mmu_config = {
+            .core_nums = 1,
+            .mmu_page_size = CONFIG_MMU_PAGE_SIZE,
+        };
+
+        cache_hal_init(&cache_config);
+        mmu_hal_init(&mmu_config);
+    }
+
+    /*
+     * bootloader_init_flash_configure(): pad drive strength, dummy-phase line
+     * levels and chip-select timing of the flash interface.
+     */
+    bootloader_configure_spi_pins(1);
+    bootloader_flash_set_dummy_out();
+    bootloader_flash_cs_timing_config();
 
     cache_hal_disable(CACHE_LL_LEVEL_EXT_MEM, CACHE_TYPE_ALL);
     mmu_hal_unmap_all();

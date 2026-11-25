@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "bootloader_clock.h"
 #include "esp_cpu.h"
 #include "esp_rom_sys.h"
 #include "hal/wdt_hal.h"
@@ -59,26 +60,6 @@ static void watchdogs_disable(void)
     REG_WRITE(RTC_CNTL_SWD_WPROTECT_REG, 0);
 }
 
-/*
- * What ESP-IDF's bootloader does (bootloader_clock_configure): start the PLL
- * and run the CPU from it at 80 MHz.  The flash clock is derived from the same
- * source, so this comes before the flash is mapped.
- */
-static void clock_init(void)
-{
-    rtc_clk_config_t cfg = RTC_CLK_CONFIG_DEFAULT();
-
-    cfg.slow_clk_src = rtc_clk_slow_src_get();
-    if (cfg.slow_clk_src == SOC_RTC_SLOW_CLK_SRC_INVALID) {
-        cfg.slow_clk_src = SOC_RTC_SLOW_CLK_SRC_RC_SLOW;
-    }
-    cfg.fast_clk_src = rtc_clk_fast_src_get();
-    if (cfg.fast_clk_src == SOC_RTC_FAST_CLK_SRC_INVALID) {
-        cfg.fast_clk_src = SOC_RTC_FAST_CLK_SRC_XTAL_D2;
-    }
-    rtc_clk_init(cfg);
-}
-
 /* What ESP-IDF's application start-up does (esp_clk_init): the final CPU speed. */
 static void clock_set_cpu_mhz(uint32_t mhz)
 {
@@ -116,7 +97,12 @@ void __attribute__((noreturn, section(".entry.text"))) _start(void)
 
     watchdogs_disable();
 
-    clock_init();
+    /*
+     * ESP-IDF's bootloader clock set-up: PLL on, CPU at
+     * CONFIG_BOOTLOADER_CPU_CLK_FREQ_MHZ (80).  The flash clock is derived
+     * from the same source, so this comes before the flash is mapped.
+     */
+    bootloader_clock_configure();
     flash_map_image();
     /* From here on code and constants in flash are reachable. */
 

@@ -25,13 +25,16 @@
 
 /* ---- version ------------------------------------------------------------- */
 
-/* esp-hal-components carries no version of its own, only that of the ESP-IDF it was cut from. */
+/*
+ * esp-hal-3rdparty carries no version of its own, only that of the ESP-IDF it
+ * mirrors.  On ESP-IDF master that is the release being developed.
+ */
 static int cmd_version(const struct shell *sh, size_t argc, char **argv)
 {
     (void) argc;
     (void) argv;
 
-    shell_print(sh, "ThreadX kernel %d.%d.%d.%d, esp-hal-components (ESP-IDF %d.%d.%d), GCC %s",
+    shell_print(sh, "ThreadX kernel %d.%d.%d.%d, esp-hal-3rdparty (ESP-IDF %d.%d.%d), GCC %s",
                 THREADX_MAJOR_VERSION, THREADX_MINOR_VERSION, THREADX_PATCH_VERSION,
                 THREADX_BUILD_VERSION, ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR,
                 ESP_IDF_VERSION_PATCH, __VERSION__);

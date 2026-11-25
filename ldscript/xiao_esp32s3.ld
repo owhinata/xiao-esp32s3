@@ -63,7 +63,7 @@ _icache_size = ABSOLUTE(ICACHE_SIZE);
 SECTIONS
 {
     /*
-     * Exception and interrupt vectors (esp-hal-components xtensa_vectors.S).
+     * Exception and interrupt vectors (esp-hal-3rdparty xtensa_vectors.S).
      * VECBASE is set to _vector_table by _start; the offsets are fixed by the
      * ESP32-S3 core configuration (XCHAL_*_VECOFS in xtensa/config/core-isa.h).
      *
@@ -117,6 +117,8 @@ SECTIONS
         *rtc_clk_init.c.obj(.literal .literal.* .text .text.*)
         *rtc_init.c.obj(.literal .literal.* .text .text.*)
         *regi2c_ctrl.c.obj(.literal .literal.* .text .text.*)
+        *bootloader_clock_init.c.obj(.literal .literal.* .text .text.*)
+        *bootloader_flash_config_esp32s3.c.obj(.literal .literal.* .text .text.*)
         *wdt_hal_iram.c.obj(.literal .literal.* .text .text.*)
         *cache_hal.c.obj(.literal .literal.* .text .text.*)
         *mmu_hal.c.obj(.literal .literal.* .text .text.*)
@@ -145,6 +147,8 @@ SECTIONS
         *rtc_clk_init.c.obj(.rodata .rodata.*)
         *rtc_init.c.obj(.rodata .rodata.*)
         *regi2c_ctrl.c.obj(.rodata .rodata.*)
+        *bootloader_clock_init.c.obj(.rodata .rodata.*)
+        *bootloader_flash_config_esp32s3.c.obj(.rodata .rodata.*)
         *wdt_hal_iram.c.obj(.rodata .rodata.*)
         *cache_hal.c.obj(.rodata .rodata.*)
         *mmu_hal.c.obj(.rodata .rodata.*)

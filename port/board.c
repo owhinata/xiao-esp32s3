@@ -11,6 +11,7 @@
 #include "soc/rtc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/soc.h"
+#include "soc/gpio_sig_map.h"
 #include "soc/gpio_struct.h"
 #include "soc/io_mux_reg.h"
 #include "hal/efuse_ll.h"
@@ -25,7 +26,8 @@
 void board_led_init(void)
 {
     gpio_ll_func_sel(&GPIO, BOARD_LED_GPIO, PIN_FUNC_GPIO);
-    gpio_ll_matrix_out_default(&GPIO, BOARD_LED_GPIO);
+    /* Output driven by the GPIO block itself, not routed from a peripheral. */
+    gpio_ll_set_output_signal_matrix_source(&GPIO, BOARD_LED_GPIO, SIG_GPIO_OUT_IDX, false);
     gpio_ll_od_disable(&GPIO, BOARD_LED_GPIO);
     board_led_set(0);
     gpio_ll_output_enable(&GPIO, BOARD_LED_GPIO);

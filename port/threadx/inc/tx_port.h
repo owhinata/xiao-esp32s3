@@ -44,7 +44,7 @@
 /*
  * This file started as ports/xtensa/xcc/inc/tx_port.h of ThreadX 6.5.2 and is
  * adapted to sit on Espressif's Xtensa RTOS porting layer
- * (esp-hal-components/components/xtensa) with the Espressif GCC toolchain.
+ * (esp-hal-3rdparty/components/xtensa) with the Espressif GCC toolchain.
  * Differences from the original are limited to:
  *   - interrupt lockout through the layer's XTOS_SET_INTLEVEL macros,
  *   - _xt_coproc_release() taking the layer's (save area, core) arguments.

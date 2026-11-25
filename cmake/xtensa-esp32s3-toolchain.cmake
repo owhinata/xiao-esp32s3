@@ -4,19 +4,21 @@
 # Toolchain files are processed before the compiler check, so the download must
 # happen here.
 #
-# The version is the crosstool-NG release that ESP-IDF used at the time of the
-# pinned esp-hal-components snapshot (sync-3-master, 2024-12).  Move both
-# together: newer HAL snapshots may need a newer compiler and vice versa.
+# The version is the crosstool-NG release that ESP-IDF's tools/tools.json
+# names at the ESP-IDF commit the pinned esp-hal-3rdparty snapshot mirrors
+# (master ad20ded6, 2026-11-15).  Move both together: newer HAL snapshots may
+# need a newer compiler and vice versa.  Each version is unpacked into a
+# directory of its own, so changing TC_VERSION fetches that version.
 
 set(CMAKE_SYSTEM_NAME      Generic)
 set(CMAKE_SYSTEM_PROCESSOR xtensa)
 
 # --- Auto-download the toolchain --------------------------------------------
-set(TC_VERSION  "14.2.0_20241119")
+set(TC_VERSION  "16.1.0_20260609")
 set(TC_ARCHIVE  "xtensa-esp-elf-${TC_VERSION}-x86_64-linux-gnu.tar.xz")
 set(TC_URL      "https://github.com/espressif/crosstool-NG/releases/download/esp-${TC_VERSION}/${TC_ARCHIVE}")
 set(TOOLS_DIR   "${CMAKE_CURRENT_LIST_DIR}/../tools")
-set(GCC_DIR     "${TOOLS_DIR}/xtensa-esp-elf")
+set(GCC_DIR     "${TOOLS_DIR}/xtensa-esp-elf-${TC_VERSION}")
 set(GCC_BIN     "${GCC_DIR}/bin")
 set(TC_PREFIX   "${GCC_BIN}/xtensa-esp32s3-elf-")
 
@@ -27,7 +29,7 @@ if(NOT EXISTS "${TC_PREFIX}gcc")
             "Automatic toolchain download only knows x86_64 Linux.  Unpack "
             "xtensa-esp-elf ${TC_VERSION} for your host into ${GCC_DIR}.")
     endif()
-    message(STATUS "Downloading xtensa-esp-elf ${TC_VERSION} (~110 MB) ...")
+    message(STATUS "Downloading xtensa-esp-elf ${TC_VERSION} (~90 MB) ...")
     file(MAKE_DIRECTORY "${TOOLS_DIR}")
     set(_tarball "${TOOLS_DIR}/${TC_ARCHIVE}")
     if(NOT EXISTS "${_tarball}")
@@ -39,14 +41,22 @@ if(NOT EXISTS "${TC_PREFIX}gcc")
         endif()
     endif()
     message(STATUS "Extracting toolchain ...")
+    # The archive holds a single directory, xtensa-esp-elf/.
+    set(_staging "${TOOLS_DIR}/.extract-${TC_VERSION}")
+    file(REMOVE_RECURSE "${_staging}")
+    file(MAKE_DIRECTORY "${_staging}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E tar xJf "${_tarball}"
-        WORKING_DIRECTORY "${TOOLS_DIR}"
+        WORKING_DIRECTORY "${_staging}"
         RESULT_VARIABLE _untar)
     file(REMOVE "${_tarball}")
-    if(NOT _untar EQUAL 0)
+    if(NOT _untar EQUAL 0 OR NOT EXISTS "${_staging}/xtensa-esp-elf")
+        file(REMOVE_RECURSE "${_staging}")
         message(FATAL_ERROR "Toolchain extraction failed")
     endif()
+    file(REMOVE_RECURSE "${GCC_DIR}")
+    file(RENAME "${_staging}/xtensa-esp-elf" "${GCC_DIR}")
+    file(REMOVE_RECURSE "${_staging}")
 endif()
 
 # --- Compilers / tools ------------------------------------------------------
