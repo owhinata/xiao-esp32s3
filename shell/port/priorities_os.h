@@ -50,4 +50,14 @@
  */
 #define APP_STACK_WIFI_EVENTS   4096
 
+/*
+ * The Telnet shell's service thread "telnet_service" (shell/common/compat/
+ * shell_engine/shell_telnet.c, the shared default 2048 bytes): its poll
+ * goes through the socket layer's zvfs_poll() (an event array of 384
+ * bytes), the binding's two descriptor arrays and lwip_poll(), and its log
+ * lines are formatted with newlib's vsnprintf().  Its session
+ * "shell_telnet" runs the commands with the shell's stack, APP_STACK_SHELL.
+ */
+#define APP_STACK_TELNET_SERVICE 4096
+
 #endif /* PRIORITIES_OS_H */

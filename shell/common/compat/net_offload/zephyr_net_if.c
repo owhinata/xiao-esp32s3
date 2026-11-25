@@ -1,14 +1,14 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * The network interface of <zephyr/net/net_if.h> (shell/port/zephyr/net/
- * net_if.h): the state of the one interface (registered at the start,
- * zephyr_net_initialize() in zephyr_net_wifi.c), under a spinlock, a few
- * words each time.  The functions are rp2040-connect's (common/compat/
- * net_offload/zephyr_net_if.c), with 0 for INADDR_ANY.
+/* <zephyr/net/net_if.h> of the Zephyr compatibility layer for an OS without a
+ * network stack of its own: the state of the one network interface (the
+ * NINA-W102's), under a spinlock (a few words each time).  See the header.
+ * The NuttX build keeps the same state in its network device
+ * (common/compat/port/nuttx/zephyr_net_if.c).  Part of common/compat/net_offload,
+ * which the FreeRTOS build uses.
  */
+
 #include <errno.h>
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -21,7 +21,9 @@ static struct net_if *default_iface;
 static bool admin_up;
 static bool dormant = true;
 
-/* What net_if_ipv4_addr_add() returns; 0.0.0.0 when there is none. */
+/* What net_if_ipv4_addr_add() returns and net_if_ipv4_get_global_addr()
+ * points to (Zephyr: the interface's address slot).  0.0.0.0 when none.
+ */
 static struct net_if_addr unicast;
 static struct net_in_addr netmask;
 static struct net_in_addr gateway;
@@ -55,7 +57,7 @@ struct net_if_addr *net_if_ipv4_addr_add(struct net_if *iface, const struct net_
 
 	(void)iface;
 	(void)vlifetime;
-	if (addr->s_addr == 0u) {
+	if (addr->s_addr == INADDR_ANY) {
 		return NULL;
 	}
 
@@ -74,9 +76,9 @@ bool net_if_ipv4_addr_rm(struct net_if *iface, const struct net_in_addr *addr)
 
 	(void)iface;
 	key = k_spin_lock(&lock);
-	if (addr->s_addr != 0u && unicast.address.s_addr == addr->s_addr) {
-		unicast.address.s_addr = 0u;
-		netmask.s_addr = 0u;
+	if (addr->s_addr != INADDR_ANY && unicast.address.s_addr == addr->s_addr) {
+		unicast.address.s_addr = INADDR_ANY;
+		netmask.s_addr = INADDR_ANY;
 		removed = true;
 	}
 	k_spin_unlock(&lock, key);
@@ -93,7 +95,7 @@ struct net_in_addr *net_if_ipv4_get_global_addr(struct net_if *iface, enum net_a
 	}
 
 	key = k_spin_lock(&lock);
-	found = unicast.address.s_addr != 0u &&
+	found = unicast.address.s_addr != INADDR_ANY &&
 		(state == NET_ADDR_ANY_STATE || state == unicast.addr_state);
 	k_spin_unlock(&lock, key);
 	return found ? &unicast.address : NULL;
@@ -107,7 +109,7 @@ bool net_if_ipv4_set_netmask_by_addr(struct net_if *iface, const struct net_in_a
 
 	(void)iface;
 	key = k_spin_lock(&lock);
-	if (unicast.address.s_addr != 0u && unicast.address.s_addr == addr->s_addr) {
+	if (unicast.address.s_addr != INADDR_ANY && unicast.address.s_addr == addr->s_addr) {
 		netmask = *mask;
 		set = true;
 	}
@@ -119,11 +121,11 @@ struct net_in_addr net_if_ipv4_get_netmask_by_addr(struct net_if *iface,
 						   const struct net_in_addr *addr)
 {
 	k_spinlock_key_t key;
-	struct net_in_addr mask = {.s_addr = 0u};
+	struct net_in_addr mask = {.s_addr = INADDR_ANY};
 
 	(void)iface;
 	key = k_spin_lock(&lock);
-	if (unicast.address.s_addr != 0u && unicast.address.s_addr == addr->s_addr) {
+	if (unicast.address.s_addr != INADDR_ANY && unicast.address.s_addr == addr->s_addr) {
 		mask = netmask;
 	}
 	k_spin_unlock(&lock, key);
@@ -169,7 +171,8 @@ bool net_if_is_dormant(struct net_if *iface)
 
 bool net_if_is_admin_up(struct net_if *iface)
 {
-	return iface != NULL && iface == default_iface && admin_up;
+	(void)iface;
+	return admin_up;
 }
 
 int net_if_set_link_addr(struct net_if *iface, uint8_t *addr, uint8_t len, enum net_link_type type)

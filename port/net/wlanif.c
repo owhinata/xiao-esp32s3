@@ -79,6 +79,9 @@ ESP_EVENT_DEFINE_BASE(IP_EVENT);
 static struct netif sta_netif;
 static netif_ext_callback_t ext_callback;
 
+/* Set once wlanif_start() has succeeded. */
+static volatile bool started;
+
 /* The tcpip thread's own state. */
 static bool dhcp_running;
 static bool associated;         /* the station has an access point (tcpip thread) */
@@ -367,5 +370,14 @@ int wlanif_start(void)
     tcpip_init(start_in_tcpip, &done);
     sys_arch_sem_wait(&done, 0);
     sys_sem_free(&done);
-    return netif_is_up(&sta_netif) ? 0 : -1;
+    if (!netif_is_up(&sta_netif)) {
+        return -1;
+    }
+    started = true;
+    return 0;
+}
+
+bool wlanif_started(void)
+{
+    return started;
 }

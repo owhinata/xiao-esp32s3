@@ -11,7 +11,8 @@
  * esp_timer, its interrupt and the FreeRTOS layer.  The FreeRTOS task
  * "main", like ESP-IDF's main task, finishes the start-up from a thread and
  * then ends: ESP-IDF's last start-up hooks, then the Wi-Fi driver and
- * lwIP (port/net/wifi.c, port/net/wlanif.c).
+ * lwIP (port/net/wifi.c, port/net/wlanif.c), then the shell on Telnet
+ * (port 23), on lwIP's sockets.
  */
 #include <stdio.h>
 
@@ -28,6 +29,7 @@
 #include "log_ram.h"
 #include "net/wifi.h"
 #include "shell_serial.h"
+#include "shell_telnet.h"
 #include "zephyr_net_wifi.h"
 
 LOG_MODULE_REGISTER(main);
@@ -76,7 +78,14 @@ static void main_task(void *arg)
     (void) arg;
 
     board_sys_pre_app_main();
-    (void) net_wifi_start();
+    /*
+     * The Telnet shell's listening socket and threads, once lwIP runs, as
+     * rp2040-connect starts it after its network interface; a failure is
+     * logged and leaves no Telnet.
+     */
+    if (net_wifi_start() == 0) {
+        (void) shell_telnet_init(PROMPT);
+    }
     vTaskDelete(NULL);
 }
 

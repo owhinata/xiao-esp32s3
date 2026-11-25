@@ -1,11 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * ESP-IDF's Wi-Fi driver (port/net/wifi.h) as Zephyr's offloaded Wi-Fi
- * interface, for the Wi-Fi management layer and the "wifi" command
- * (shell/common/compat/zephyr_wifi_mgmt.c, zephyr_net_mgmt.c,
- * zephyr_wifi_shell.c): the counterpart of rp2040-connect's binding of its
- * Wi-Fi module (common/drivers/nina/port/zephyr/nina_net.c), and its
- * start-up (common/compat/net_offload/zephyr_net_init.c).
+ * interface, for the Wi-Fi management layer, the "wifi" and "ifconfig"
+ * commands (shell/common/compat/zephyr_wifi_mgmt.c, zephyr_net_mgmt.c,
+ * zephyr_wifi_shell.c, shell/common/shell/ifconfig_shell.c, on the
+ * interface's state in shell/common/compat/net_offload/zephyr_net_if.c):
+ * the counterpart of rp2040-connect's binding of its Wi-Fi module
+ * (common/drivers/nina/port/zephyr/nina_net.c), and its start-up
+ * (common/compat/net_offload/zephyr_net_init.c).  The interface's init
+ * registers lwIP's name resolution as the sockets' resolver
+ * (zephyr_net_socket.c), as nina_net.c registers the NINA's.
  *
  * The operations (struct wifi_mgmt_ops):
  *   scan          the driver's scan of all channels; the request's
@@ -46,6 +50,7 @@
 
 #include "priorities.h"
 #include "net/wifi.h"
+#include "zephyr_net_socket.h"
 #include "zephyr_net_wifi.h"
 
 LOG_MODULE_REGISTER(net_wifi_if);
@@ -452,6 +457,7 @@ static void iface_init(struct net_if *iface)
 {
 	net_if_dormant_on(iface);
 	net_if_set_mtu(iface, 1500);
+	zephyr_net_socket_dns_register();
 }
 
 static int driver_init(const struct device *dev)

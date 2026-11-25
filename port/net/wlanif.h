@@ -14,6 +14,8 @@
 #ifndef PORT_NET_WLANIF_H
 #define PORT_NET_WLANIF_H
 
+#include <stdbool.h>
+
 /*
  * Milliseconds the address is kept after the station loses its access
  * point (wlanif_link_down()): esp_netif's CONFIG_ESP_NETIF_IP_LOST_TIMER_
@@ -30,6 +32,9 @@
  * 0, or -1 when lwIP could not start (logged).
  */
 int wlanif_start(void);
+
+/* wlanif_start() has succeeded: lwIP's API may be called.  From any thread. */
+bool wlanif_started(void);
 
 /*
  * The station is associated (WIFI_EVENT_STA_CONNECTED): received frames go

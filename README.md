@@ -31,7 +31,7 @@ UART0.
 | Heap | ESP-IDF's heap (`heap_caps` on TLSF; `malloc()` is esp_libc's): about 400 KiB of internal RAM and the RTC FAST memory, usable from interrupt handlers |
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
 | Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect` (WPA2-PSK), `wifi status`, `wifi disconnect` |
-| TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP; the board answers ping.  No sockets in the shell yet |
+| TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23) |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, the firmware as the factory application at 0x10000 |
 
 ## Build
@@ -111,6 +111,8 @@ Available commands:
   free     : Show the use of malloc()
   help     : Prints the help message.
   id       : Show the board's unique ID (the factory MAC address)
+  ifconfig : Show the network interface: ifconfig [wlan0]
+             (MAC address, state, IPv4 address, default router, netmask)
   ps       : List the tasks
   reboot   : Restart the board
   sleep    : Sleep for <ms> milliseconds (Zephyr's kernel sleep)
@@ -118,6 +120,14 @@ Available commands:
   version  : Show the versions of the kernel, HAL and compiler
   wifi     : Wi-Fi commands
 ```
+
+**Over Wi-Fi.**  `wifi connect -s <ssid> -p <passphrase> -k 1` joins a
+WPA2-PSK access point (the passphrase is not stored yet), `ifconfig` shows
+the address DHCP gave, and `telnet <address>` from a PC on that network opens
+the same shell with the same prompt.  One Telnet client at a time: a second
+one is closed at once.  Telnet has no authentication.  The UART
+and USB console keeps working beside it, and each console gets the output of
+its own commands.
 
 The orange LED toggles every 0.5 s.  The banner is printed at boot; a terminal
 opened later gets a prompt on Enter.  Output goes to both transports and input
@@ -193,8 +203,8 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    them: in `tx_application_define()` (esp_timer's task) and in the first
    task, "main", which then starts the Wi-Fi driver in station mode
    (ESP-IDF's event loop, `esp_wifi_init()`, `esp_wifi_start()`, which
-   calibrates the PHY), then lwIP with the station's network interface,
-   and ends.  ESP-IDF's own
+   calibrates the PHY), then lwIP with the station's network interface
+   and the Telnet shell, and ends.  ESP-IDF's own
    start-up lines (`app_init`, `heap_init`) appear on the console before
    the banner.
 

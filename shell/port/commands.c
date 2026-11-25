@@ -295,8 +295,10 @@ SHELL_CMD_REGISTER(ps, NULL, "List the tasks", cmd_ps);
  * (shell/common/compat/shell_engine/shell_engine.c), "dmesg"
  * (shell/common/shell/dmesg_shell.c) and the generic commands of
  * shell/common/shell/kernel_shell.c ("date" reads shell/port/zephyr_sys_clock.c,
- * "fault" the record of shell/port/fault_record.h), and "wifi"
- * (shell/common/compat/zephyr_wifi_shell.c, on shell/port/zephyr_net_wifi.c).
+ * "fault" the record of shell/port/fault_record.h), "wifi"
+ * (shell/common/compat/zephyr_wifi_shell.c, on shell/port/zephyr_net_wifi.c)
+ * and "ifconfig" (shell/common/shell/ifconfig_shell.c, on the interface
+ * that shell/port/zephyr_net_wifi.c keeps).
  */
 SHELL_ENGINE_CMD_DECLARE(bootsel);
 SHELL_ENGINE_CMD_DECLARE(date);
@@ -305,6 +307,7 @@ SHELL_ENGINE_CMD_DECLARE(dmesg);
 SHELL_ENGINE_CMD_DECLARE(fault);
 SHELL_ENGINE_CMD_DECLARE(help);
 SHELL_ENGINE_CMD_DECLARE(id);
+SHELL_ENGINE_CMD_DECLARE(ifconfig);
 SHELL_ENGINE_CMD_DECLARE(reboot);
 SHELL_ENGINE_CMD_DECLARE(sleep);
 SHELL_ENGINE_CMD_DECLARE(uptime);
@@ -320,6 +323,7 @@ const struct shell_engine_cmd shell_engine_cmds[] = {
     SHELL_ENGINE_CMD(free),
     SHELL_ENGINE_CMD(help),
     SHELL_ENGINE_CMD(id),
+    SHELL_ENGINE_CMD(ifconfig),
     SHELL_ENGINE_CMD(ps),
     SHELL_ENGINE_CMD(reboot),
     SHELL_ENGINE_CMD(sleep),

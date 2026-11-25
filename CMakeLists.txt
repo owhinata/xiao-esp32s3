@@ -263,9 +263,11 @@ add_executable(app
     "${PORT_DIR}/panic.c"
     "${PORT_DIR}/watchdog.c"
     "${PORT_DIR}/syscalls.c"
+    "${PORT_DIR}/stdio_wrap.c"
     "${PORT_DIR}/esp_log_ram.c"
     "${PORT_DIR}/net/wifi.c"
     "${PORT_DIR}/net/wlanif.c"
+    "${PORT_DIR}/net/lwip_bridge.c"
     "${PORT_DIR}/esp_compat/esp_sleep.c"
     "${PORT_DIR}/esp_compat/lwip_vfs.c"
     "${PORT_DIR}/esp_compat/mspi_timing.c"
@@ -556,7 +558,7 @@ set(ESP_WIFI_GROUP
 # (no_vfs_syscalls.c, whose _read_r()/_write_r() are port/syscalls.c's),
 # and the DHCP address store in NVS (dhcp_state.c); port/esp_compat/
 # lwip_vfs.c takes the VFS registration.  A static library, as in ESP-IDF:
-# what nothing reaches (the sockets until the shell uses them) is not linked.
+# what nothing reaches is not linked.
 set(LWIP_DIR  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-lwip/src")
 set(LWIP_PORT "${ESP_IDF}/lwip")
 add_library(lwip_headers INTERFACE)
@@ -872,6 +874,7 @@ add_dependencies(app wpa_supplicant mbedtls)
 get_target_property(LWIP_INCLUDES lwip_headers INTERFACE_INCLUDE_DIRECTORIES)
 set_source_files_properties(
     "${PORT_DIR}/net/wlanif.c"
+    "${PORT_DIR}/net/lwip_bridge.c"
     "${PORT_DIR}/esp_compat/lwip_vfs.c"
     PROPERTIES INCLUDE_DIRECTORIES "${LWIP_INCLUDES}")
 # -u esp_app_desc: nothing refers to it by name (esp_app_format does the same).
@@ -879,10 +882,12 @@ set_source_files_properties(
 # newlib's and libphy's because they are linked as objects (esp_idf), before
 # any archive is searched: ESP-IDF's "-u" options for them are not needed.
 # --orphan-handling=warn: every input section has a place in the linker
-# script (an orphan would end up wherever ld puts it).
+# script (an orphan would end up wherever ld puts it).  The --wrap options:
+# stdout's and stderr's writes without newlib's lock (port/stdio_wrap.c).
 target_link_options(app PRIVATE
     -nostartfiles
     "-T${LDSCRIPT}"
+    -Wl,--wrap=fwrite,--wrap=fputs,--wrap=puts,--wrap=fputc,--wrap=putc,--wrap=putchar
     -Wl,-u,esp_app_desc
     -Wl,-u,mbedtls_psa_crypto_init_include_impl
     -Wl,-u,esp_mbedtls_mem_calloc
@@ -926,25 +931,48 @@ add_library(shell OBJECT
     # Commands
     "${SHELL_COMMON}/shell/kernel_shell.c"
     "${SHELL_COMMON}/shell/dmesg_shell.c"
-    # "wifi" and the network management layer under it
+    # The network interface, "wifi", "ifconfig" and the network management
+    # layer under them
+    "${SHELL_COMMON}/compat/net_offload/zephyr_net_if.c"
     "${SHELL_COMMON}/compat/zephyr_net_mgmt.c"
     "${SHELL_COMMON}/compat/zephyr_wifi_mgmt.c"
     "${SHELL_COMMON}/compat/zephyr_wifi_shell.c"
     "${SHELL_COMMON}/compat/zephyr_wifi_utils.c"
+    "${SHELL_COMMON}/shell/ifconfig_shell.c"
+    # Zephyr's socket layer down to its list of socket implementations, and
+    # the network functions newlib lacks (inet_pton(), inet_ntop())
+    "${SHELL_COMMON}/compat/net_offload/lib/os/zvfs/zvfs_fdtable.c"
+    "${SHELL_COMMON}/compat/net_offload/lib/os/zvfs/zvfs_poll.c"
+    "${SHELL_COMMON}/compat/net_offload/subsys/net/lib/sockets/sockets.c"
+    "${SHELL_COMMON}/compat/net_offload/subsys/net/lib/sockets/getaddrinfo.c"
+    "${SHELL_COMMON}/compat/net_offload/subsys/net/lib/sockets/socket_offload.c"
+    "${SHELL_COMMON}/compat/libc_net/inet.c"
+    # The shell on Telnet
+    "${SHELL_COMMON}/compat/shell_engine/shell_telnet.c"
     # This board's part
     "${SHELL_PORT}/commands.c"
     "${SHELL_PORT}/fault_record.c"
     "${SHELL_PORT}/shell_port.c"
-    "${SHELL_PORT}/zephyr_net_if.c"
+    "${SHELL_PORT}/zephyr_net_socket.c"
     "${SHELL_PORT}/zephyr_net_wifi.c"
     "${SHELL_PORT}/zephyr_sys_clock.c")
 # The order is rp2040-connect's (common/compat/port/pico_sdk/compat.cmake):
 # the board's and the OS's parts first, then the parts for an OS without its
-# own model, then the layer's and the shell's headers.
-target_include_directories(shell PUBLIC
+# own model, the network part's Zephyr headers (before the layer's) and the
+# POSIX network headers newlib lacks, then the layer's and the shell's
+# headers.  The two network directories are the shell's own: their
+# <sys/socket.h>, <poll.h>, <netdb.h>, ... would hide the C library's and
+# lwIP's from the sources that link the shell (lwIP's side of the sockets,
+# port/net/lwip_bridge.c, sees only port/net/lwip_bridge.h of them).
+target_include_directories(shell
+    PUBLIC
     "${SHELL_PORT}"
     "${SHELL_COMMON}/compat/port/threadx"
     "${SHELL_COMMON}/compat/port/generic"
+    PRIVATE
+    "${SHELL_COMMON}/compat/net_offload/include"
+    "${SHELL_COMMON}/compat/libc_net/include"
+    PUBLIC
     "${SHELL_COMMON}/compat/include"
     "${SHELL_COMMON}/compat/port"
     "${SHELL_COMMON}/compat/internal"
@@ -959,6 +987,28 @@ target_compile_definitions(shell PUBLIC
     Z_SHELL_CMD_ROOT_GLOBAL
     CONFIG_GETOPT_LONG=1)
 target_link_libraries(shell PUBLIC threadx)
+# The prelude of the shared sources (the Zephyr build's Kconfig values they
+# use, compat/port/generic/common_prelude.h) on the sources that
+# rp2040-connect's builds on the Pico SDK give it to (compat.cmake,
+# wifi.cmake), and on the board's sockets for the priority they register
+# with, as rp2040-connect's NINA binding (nina.cmake).  Not on the shell
+# engine, the network part (net_offload, libc_net) and "ifconfig", which are
+# written without it.
+set_source_files_properties(
+    "${SHELL_COMMON}/compat/log/log_ram.c"
+    "${SHELL_COMMON}/compat/log/log_ring.c"
+    "${SHELL_COMMON}/shell/dmesg_shell.c"
+    "${SHELL_COMMON}/shell/zshell.c"
+    "${SHELL_COMMON}/shell/subcmd.c"
+    "${SHELL_COMMON}/compat/subsys/portability/posix/c_lib_ext/fnmatch.c"
+    "${SHELL_COMMON}/compat/lib/utils/getopt/getopt.c"
+    "${SHELL_COMMON}/compat/lib/utils/getopt/getopt_long.c"
+    "${SHELL_COMMON}/compat/zephyr_net_mgmt.c"
+    "${SHELL_COMMON}/compat/zephyr_wifi_mgmt.c"
+    "${SHELL_COMMON}/compat/zephyr_wifi_shell.c"
+    "${SHELL_COMMON}/compat/zephyr_wifi_utils.c"
+    "${SHELL_PORT}/zephyr_net_socket.c"
+    PROPERTIES COMPILE_OPTIONS "-include;${SHELL_COMMON}/compat/port/generic/common_prelude.h")
 
 # ---------------------------------------------------------------------------
 # Second-stage bootloader (bootloader/CMakeLists.txt)

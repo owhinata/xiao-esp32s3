@@ -309,6 +309,15 @@ SECTIONS
         *(.rodata_wlog_info .rodata_wlog_info.* .rodata_wlog_debug .rodata_wlog_debug.*)
         *(.rodata_wlog_verbose .rodata_wlog_verbose.*)
         /*
+         * The socket implementations of the shell's socket layer
+         * (NET_SOCKET_OFFLOAD_REGISTER(), its <zephyr/net/socket.h>), in the
+         * order of their names, that is of their priority.
+         */
+        . = ALIGN(4);
+        _net_socket_register_list_start = ABSOLUTE(.);
+        KEEP(*(SORT_BY_NAME(._net_socket_register.static.*)))
+        _net_socket_register_list_end = ABSOLUTE(.);
+        /*
          * The regions the heap must leave alone
          * (SOC_RESERVE_MEMORY_REGION(); heap_caps_init() sorts them).
          */

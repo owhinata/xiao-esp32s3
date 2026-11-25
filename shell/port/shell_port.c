@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * The functions the shared shell sources call by name that only the board
- * can provide: the device ID of <zephyr/drivers/hwinfo.h> and the layer's
+ * can provide: k_uptime_get() of <zephyr/kernel.h> (rp2040-connect defines
+ * it in its compat/zephyr_init.c, with the work queues, which this board
+ * does not use), the device ID of <zephyr/drivers/hwinfo.h> and the layer's
  * tick.
  */
 #include <stdint.h>
@@ -12,9 +14,16 @@
 #include "tx_timer.h"
 
 #include <zephyr/drivers/hwinfo.h>
+#include <zephyr/kernel.h>
 
 #include "board.h"
 #include "zephyr_compat_os.h"
+
+/* Milliseconds since boot, on the layer's cycle counter (the SYSTIMER uptime in microseconds). */
+int64_t k_uptime_get(void)
+{
+    return Z_UPTIME_MS(k_cycle_get_64());
+}
 
 /* "id": the factory MAC address, 6 bytes. */
 ssize_t hwinfo_get_device_id(uint8_t *buffer, size_t length)
