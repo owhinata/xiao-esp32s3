@@ -7,8 +7,9 @@ includes, at the same relative paths.  Nothing else of that repository is
 here (no driver, socket or offloaded network stack, credentials store,
 Telnet, sensor, Pico SDK or test file), and not its
 `compat/include/fault_record.h`, whose record is laid out for a Cortex-M,
-nor its `compat/net_offload/include/zephyr/net/net_if.h`, made for an
-offloaded network stack: this board has its own of both in `shell/port/`.
+nor its `compat/net_offload/include/zephyr/net/net_if.h`, which takes its
+address type from the socket headers not copied: this board has its own of
+both in `shell/port/`.
 
 `shell/port/` is written for this board and is not a copy.
 
@@ -68,8 +69,7 @@ rest of each is dropped at link time or never expanded:
 - `shell/zshell.c` holds Zephyr's device-name helpers, which no command here
   calls.
 - `compat/zephyr_wifi_mgmt.c` and `zephyr/net/wifi_mgmt.h` have the stored
-  credentials' parts (`CONFIG_WIFI_CREDENTIALS`, not defined here) and the
-  connect and disconnect result events, which nothing raises yet;
+  credentials' parts (`CONFIG_WIFI_CREDENTIALS`, not defined here);
   `compat/zephyr_wifi_utils.c` has `net_bytes_from_str()`, which nothing
   calls.
 
@@ -78,13 +78,13 @@ rest of each is dropped at link time or never expanded:
 | File | The boundary it implements |
 |---|---|
 | `zephyr_os_port.h` | What `compat/port/threadx/zephyr_kernel_os_impl.h` takes from the ThreadX port and the board: interrupt context, interrupt lockout, busy wait, microsecond clock, assertion |
-| `priorities_os.h` | Priority mapping, time slices, the stacks of the shell's and the network event thread (`compat/include/priorities.h`) |
+| `priorities_os.h` | Priority mapping, time slices, the stacks of the shell's thread, the network event thread and `wifi_evt` (`compat/include/priorities.h`) |
 | `shell_serial_os_impl.h` | Console transport and stdio redirection (`compat/port/shell_serial_os.h`) |
 | `log_ram_os_impl.h` | RAM log: retained section, lock, clock (`compat/port/log_ram_os.h`) |
 | `kernel_shell_os_impl.h` | Tick count, restart, download mode, the record for `fault` (`shell/port/kernel_shell_os.h`) |
 | `fault_record.h`, `fault_record.c` | The record of a fatal error that `port/panic.c` keeps across the restart (with this board's reasons: abort, failed assertion, failed `ESP_ERROR_CHECK()`), for an Xtensa exception frame: the counterpart of rp2040-connect's `compat/include/fault_record.h` and `compat/log/fault_record.c`, with the same name so that `shell/kernel_shell.c` includes it (`shell/port` is first on the include path); its text for `fault`, the banner and the RAM log, and taking it at the start |
 | `shell_port.c` | `hwinfo_get_device_id()`, the layer's tick (`zephyr_compat_tick()`) |
-| `zephyr/net/net_if.h`, `zephyr_net_if.c` | The network interface of `<zephyr/net/net_if.h>` as far as `compat/zephyr_wifi_mgmt.c` and `compat/zephyr_wifi_shell.c` use it: the one interface, its driver's operations, whether it is up (rp2040-connect's is `compat/net_offload/include/zephyr/net/net_if.h`, which also has the addresses of an offloaded network stack) |
-| `zephyr_net_wifi.c`, `zephyr_net_wifi.h` | ESP-IDF's Wi-Fi driver (`port/net/wifi.h`) as the offloaded Wi-Fi interface (`struct wifi_mgmt_ops`: scan, status; connect not yet), the counterpart of rp2040-connect's `drivers/nina/port/zephyr/nina_net.c`; the start-up of the network event thread, the interface and the `wifi` command (`zephyr_net_initialize()`, as rp2040-connect's `compat/net_offload/zephyr_net_init.c`) |
+| `zephyr/net/net_if.h`, `zephyr_net_if.c` | The network interface of `<zephyr/net/net_if.h>`: the one interface, its driver's operations, whether it is up and dormant, its IPv4 address, netmask and gateway, link address and MTU, with the functions of rp2040-connect's `compat/net_offload/include/zephyr/net/net_if.h` and `compat/net_offload/zephyr_net_if.c` (there the address type comes from the socket headers, not copied; here the header defines `struct net_in_addr` with the same layout) |
+| `zephyr_net_wifi.c`, `zephyr_net_wifi.h` | ESP-IDF's Wi-Fi driver with lwIP (`port/net/wifi.h`) as the offloaded Wi-Fi interface (`struct wifi_mgmt_ops`: scan, connect, disconnect, status), the counterpart of rp2040-connect's `drivers/nina/port/zephyr/nina_net.c`: the interface's address and state on the driver's notifications, and the thread `wifi_evt` that raises the layer's events one at a time, at the priority of the NINA's Wi-Fi thread (`APP_PRIO_NINA_WIFI`); the start-up of the network event thread, the interface and the `wifi` command (`zephyr_net_initialize()`, as rp2040-connect's `compat/net_offload/zephyr_net_init.c`) |
 | `zephyr_sys_clock.c` | `sys_clock_gettime()`/`sys_clock_settime()` (`compat/port/generic/zephyr/sys/clock.h`) on the SYSTIMER uptime, as rp2040-connect's `compat/port/pico_sdk/zephyr_sys_clock.c` on the RP2040 TIMER; newlib's `_gettimeofday_r()` and `settimeofday()` on the same clock |
 | `commands.c` | `version`, `free`, `ps` (with the run times of ThreadX's execution profile kit) and the command table `shell_engine_cmds[]` |

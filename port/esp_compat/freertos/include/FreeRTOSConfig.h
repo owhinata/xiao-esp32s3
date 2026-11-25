@@ -45,18 +45,21 @@
  * group 44 bytes.  The tasks: esp_timer (4096-byte stack), "main"
  * (src/main.c, 4096, ends after the start-up), the Wi-Fi driver's
  * (6656, WIFI_TASK_STACK_SIZE), the default event loop's "sys_evt"
- * (2816); 22.4 KiB with their task blocks while "main" runs, 17.5 KiB
- * after.  The objects: the event loop's queue (32 items of 16 bytes) and
- * mutex, the driver's queues, semaphores, mutexes and event groups, and one
- * semaphore for each thread that calls the driver (the OS adapter's
- * wifi_thread_semphr_get): a few KiB, not documented.  32 KiB leaves
- * some KiB for those; port/net/wifi.c logs how much the Wi-Fi start took
- * from the pool, which is the measure to size it by.  The queues and
- * semaphores the OS adapter makes with xQueueCreateStatic() (its
- * _queue_create) and all of ESP-IDF's malloc() and heap_caps_malloc() use
- * ESP-IDF's heap.
+ * (2816), lwIP's "tcpip" (3584); 26.8 KiB with their task blocks while
+ * "main" runs, 21.9 KiB after.  The objects: the event loop's queue (32
+ * items of 16 bytes) and mutex, the driver's queues, semaphores, mutexes
+ * and event groups, lwIP's mutex (sys_arch_protect()), and one semaphore
+ * for each thread that calls the driver (the OS adapter's
+ * wifi_thread_semphr_get): a few KiB, not documented (the Wi-Fi start
+ * alone took 23.4 KiB, lwIP adds 4.6 KiB).  36 KiB leaves about 8 KiB for
+ * those and the threads that call the driver later; port/net/wifi.c logs
+ * how much the start took from the pool, which is the measure to size it
+ * by.  The queues and semaphores the OS adapter makes with
+ * xQueueCreateStatic() (its _queue_create), lwIP's mailboxes and
+ * semaphores (static ones in ESP-IDF's heap) and all of ESP-IDF's
+ * malloc() and heap_caps_malloc() use ESP-IDF's heap.
  */
-#define configTOTAL_HEAP_SIZE           (32u * 1024u)
+#define configTOTAL_HEAP_SIZE           (36u * 1024u)
 
 /*
  * vTaskDelete() and returning from a task: the layer's own thread

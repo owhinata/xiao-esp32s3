@@ -10,7 +10,9 @@
 
 /*
  * The network event thread ("net_mgmt"), the Wi-Fi station interface
- * with its operations, the "wifi" command's event callbacks.  Once, from
+ * with its operations (given to port/net/wifi.c, net_wifi_set_ops()) and
+ * the thread that raises its events ("wifi_evt"), the "wifi" command's
+ * event callbacks.  Once, from
  * tx_application_define() or a thread, before the shell takes commands;
  * the operations answer -ENETDOWN until the driver runs
  * (net_wifi_start()).  0, or a negative errno value.

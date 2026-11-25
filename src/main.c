@@ -1,7 +1,7 @@
 /*
  * ThreadX on the XIAO ESP32S3: a shell on the console (USB Serial/JTAG and
  * UART0 together), ESP-IDF's esp_timer, whose periodic timer blinks the
- * user LED, and ESP-IDF's Wi-Fi driver in station mode.
+ * user LED, and ESP-IDF's Wi-Fi driver in station mode with lwIP.
  *
  * The shell is rp2040-connect's (shell/common, with this board's part in
  * shell/port).  Its thread "console" is started by the Zephyr compatibility
@@ -10,8 +10,8 @@
  * by the SYSTIMER alarm interrupt, so the LED rate is a direct check of
  * esp_timer, its interrupt and the FreeRTOS layer.  The FreeRTOS task
  * "main", like ESP-IDF's main task, finishes the start-up from a thread and
- * then ends: ESP-IDF's last start-up hooks, then the Wi-Fi driver
- * (port/net/wifi.c).
+ * then ends: ESP-IDF's last start-up hooks, then the Wi-Fi driver and
+ * lwIP (port/net/wifi.c, port/net/wlanif.c).
  */
 #include <stdio.h>
 

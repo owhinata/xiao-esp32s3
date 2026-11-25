@@ -305,6 +305,73 @@
  */
 #define CONFIG_ESP_COEX_ENABLED                 1
 
+/* ---- lwIP (esp-lwip with ESP-IDF's port, lwipopts.h) ------------------- */
+
+/*
+ * ESP-IDF's defaults (components/lwip/Kconfig), with these differences:
+ *   - IPv4 only (CONFIG_LWIP_IPV6 off; ESP-IDF: on);
+ *   - no DHCP server (CONFIG_LWIP_DHCPS off; ESP-IDF: on), no SoftAP here;
+ * and, as in ESP-IDF's defaults, no PPP, SLIP, NAPT, AutoIP, SNTP or core
+ * locking.  The tcpip thread runs at FreeRTOS priority 18 (ThreadX 13)
+ * with 3072 + 512 bytes of stack (esp_task.h).  The DHCP client checks an
+ * offered address with ARP before it takes it.  Only the symbols the
+ * compiled sources test are here: lwipopts.h, ESP-IDF's port, esp_task.h.
+ * CONFIG_ESP_NETIF_TCPIP_LWIP says that lwIP is the TCP/IP stack
+ * (wifi_init.c logs lwIP's configuration with it); esp_netif itself is not
+ * built (port/net/wlanif.c is the network interface).
+ */
+#define CONFIG_ESP_NETIF_TCPIP_LWIP             1
+#define CONFIG_LWIP_IPV4                        1
+#define CONFIG_LWIP_TCPIP_TASK_PRIO             18
+#define CONFIG_LWIP_TCPIP_TASK_STACK_SIZE       3072
+#define CONFIG_LWIP_TCPIP_TASK_AFFINITY         0x7FFFFFFF
+#define CONFIG_LWIP_TCPIP_RECVMBOX_SIZE         32
+#define CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES    1
+#define CONFIG_LWIP_DNS_MAX_HOST_IP             1
+#define CONFIG_LWIP_DNS_MAX_SERVERS             3
+#define CONFIG_LWIP_TIMERS_ONDEMAND             1
+#define CONFIG_LWIP_MAX_SOCKETS                 10
+#define CONFIG_LWIP_SO_REUSE                    1
+#define CONFIG_LWIP_SO_REUSE_RXTOALL            1
+#define CONFIG_LWIP_IP_DEFAULT_TTL              64
+#define CONFIG_LWIP_IP4_FRAG                    1
+#define CONFIG_LWIP_IP_REASS_MAX_PBUFS          10
+#define CONFIG_LWIP_ESP_GRATUITOUS_ARP          1
+#define CONFIG_LWIP_GARP_TMR_INTERVAL           60
+#define CONFIG_LWIP_DHCP_DOES_ARP_CHECK         1
+#define CONFIG_LWIP_DHCP_DISABLE_VENDOR_CLASS_ID 1
+#define CONFIG_LWIP_DHCP_OPTIONS_LEN            69
+#define CONFIG_LWIP_DHCP_COARSE_TIMER_SECS      1
+#define CONFIG_LWIP_NUM_NETIF_CLIENT_DATA       0
+#define CONFIG_LWIP_NETIF_LOOPBACK              1
+#define CONFIG_LWIP_LOOPBACK_MAX_PBUFS          8
+#define CONFIG_LWIP_MAX_ACTIVE_TCP              16
+#define CONFIG_LWIP_MAX_LISTENING_TCP           16
+#define CONFIG_LWIP_TCP_MAXRTX                  12
+#define CONFIG_LWIP_TCP_SYNMAXRTX               12
+#define CONFIG_LWIP_TCP_MSS                     1440
+#define CONFIG_LWIP_TCP_TMR_INTERVAL            250
+#define CONFIG_LWIP_TCP_MSL                     60000
+#define CONFIG_LWIP_TCP_FIN_WAIT_TIMEOUT        20000
+#define CONFIG_LWIP_TCP_SND_BUF_DEFAULT         5760
+#define CONFIG_LWIP_TCP_WND_DEFAULT             5760
+#define CONFIG_LWIP_TCP_RECVMBOX_SIZE           6
+#define CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE         6
+#define CONFIG_LWIP_TCP_QUEUE_OOSEQ             1
+#define CONFIG_LWIP_TCP_OOSEQ_TIMEOUT           6
+#define CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS         4
+#define CONFIG_LWIP_TCP_OVERSIZE_MSS            1
+#define CONFIG_LWIP_TCP_RTO_TIME                1500
+#define CONFIG_LWIP_MAX_UDP_PCBS                16
+#define CONFIG_LWIP_UDP_RECVMBOX_SIZE           6
+#define CONFIG_LWIP_CHECKSUM_CHECK_ICMP         1
+#define CONFIG_LWIP_ICMP                        1
+#define CONFIG_LWIP_MAX_RAW_PCBS                16
+#define CONFIG_LWIP_ESP_LWIP_ASSERT             1
+#define CONFIG_LWIP_HOOK_TCP_ISN_DEFAULT        1
+#define CONFIG_LWIP_HOOK_DHCP_EXTRA_OPTION_NONE 1
+#define CONFIG_LWIP_HOOK_NETCONN_EXT_RESOLVE_NONE 1
+
 /* ---- mbedTLS (the supplicant's crypto) ---------------------------------- */
 
 /*
@@ -324,7 +391,10 @@
  * ESP-IDF's default uses the peripherals, through drivers that need
  * GDMA and the crypto locks), no TLS, no file system, no self tests, and
  * no threading (CONFIG_MBEDTLS_THREADING_C: ESP-IDF's is on pthread
- * mutexes, which are not here).  X.509 certificate parsing is configured
+ * mutexes, which are not here): the supplicant, in the Wi-Fi driver's
+ * task, is the only user of mbedTLS (lwIP uses none of it without PPP),
+ * and a second thread that calls mbedTLS (TLS, for one) needs it on
+ * first.  X.509 certificate parsing is configured
  * only for the declarations the supplicant's RSA wrappers
  * (crypto_mbedtls-rsa.c) compile against: mbedTLS's X.509 and TLS
  * library is not built, and nothing reaches those wrappers without

@@ -42,4 +42,12 @@
  */
 #define APP_STACK_NET_MGMT      6144
 
+/*
+ * The thread that raises the Wi-Fi events of the network layer, "wifi_evt"
+ * (zephyr_net_wifi.c), at the priority of rp2040-connect's NINA Wi-Fi
+ * thread (APP_PRIO_NINA_WIFI): it takes a scan's records from the driver
+ * (its OS adapter's calls) and logs with newlib's printf.
+ */
+#define APP_STACK_WIFI_EVENTS   4096
+
 #endif /* PRIORITIES_OS_H */

@@ -41,7 +41,9 @@ fetch_upstream(esp-idf
     components/esp_sleep/include
     components/nvs_flash/include
     components/esp_partition/include
-    components/esp_netif/include)
+    components/esp_netif/include
+    components/lwip/include
+    components/lwip/port)
 # Git submodules of ESP-IDF that the mirror records only as commits (empty
 # directories), fetched at those commits: the TLSF allocator of the heap
 # component, and the PHY and Wi-Fi binary libraries (this chip's directory).
@@ -56,6 +58,13 @@ fetch_upstream(esp32-wifi-lib
     https://github.com/espressif/esp32-wifi-lib
     07e8d017cd5ed6a9d9fd7463fe254f0820a526da
     SPARSE esp32s3)
+# lwIP, Espressif's fork, at the commit ESP-IDF records for its
+# components/lwip/lwip: the stack's sources and headers (src/) only.  ESP-IDF's
+# port of it (components/lwip/port, include) comes with lib/esp-idf above.
+fetch_upstream(esp-lwip
+    https://github.com/espressif/esp-lwip
+    1fca0d20768f2339815dbf90dc07532fd630fe17
+    SPARSE src)
 # mbedTLS, Espressif's fork, at the commit of the mirror's components/mbedtls/
 # mbedtls: the PSA crypto core (TF-PSA-Crypto) and its built-in software
 # drivers, which the Wi-Fi supplicant's crypto calls, and the headers of the
@@ -256,7 +265,9 @@ add_executable(app
     "${PORT_DIR}/syscalls.c"
     "${PORT_DIR}/esp_log_ram.c"
     "${PORT_DIR}/net/wifi.c"
+    "${PORT_DIR}/net/wlanif.c"
     "${PORT_DIR}/esp_compat/esp_sleep.c"
+    "${PORT_DIR}/esp_compat/lwip_vfs.c"
     "${PORT_DIR}/esp_compat/mspi_timing.c"
     "${PORT_DIR}/esp_compat/nvs.c"
     "${PORT_DIR}/esp_compat/pthread_local.c")
@@ -328,7 +339,8 @@ set(ESP_WIFI_LIB  "${CMAKE_CURRENT_LIST_DIR}/lib/esp32-wifi-lib/esp32s3")
 # The headers of the Wi-Fi driver and what they include: esp_event, the
 # coexistence adapter, the supplicant's public part, esp_pm (wifi_init.c),
 # and of components that are not built here, headers only: esp_netif
-# (wifi_init.c; no network interface code is built), nvs_flash and
+# (wifi_init.c, and the IP events' types for port/net; esp_netif's code is
+# not built, port/net/wlanif.c is the network interface), nvs_flash and
 # esp_partition with esp_blockdev (phy_init.c and the OS adapter include
 # nvs.h; port/esp_compat/nvs.c), the GPIO driver's types (phy_common.c).
 add_library(esp_wifi_headers INTERFACE)
@@ -527,6 +539,95 @@ set(ESP_WIFI_GROUP
     "${ESP_PHY_LIB}/libphy.a"
     "${ESP_PHY_LIB}/libbtbb.a"
     -Wl,--end-group)
+
+# ---------------------------------------------------------------------------
+# lwIP: esp-lwip (lib/esp-lwip) with ESP-IDF's port (lib/esp-idf components/lwip)
+# ---------------------------------------------------------------------------
+# Configured as ESP-IDF configures it: its lwipopts.h, which reads the
+# CONFIG_LWIP_* of sdkconfig.h, the FreeRTOS sys_arch on the FreeRTOS layer,
+# ESP-IDF's hooks (the TCP initial sequence numbers, the DHCP options, the
+# IPv4 source route), the ARP check of an offered DHCP address, the socket
+# option extensions and if_index.  The include directories are ESP-IDF's
+# for the component, esp_libc's platform_include among them (sys/poll.h,
+# sys/ioctl.h), for lwIP and for the sources that include its headers
+# (lwip_headers).  The source list is ESP-IDF's for IPv4: without IPv6, PPP,
+# SLIP, the bridge, NAPT, AutoIP, SNTP, NetBIOS and the DHCP server.  Not
+# built: ESP-IDF's VFS glue (vfs_lwip.c) and its stand-in without VFS
+# (no_vfs_syscalls.c, whose _read_r()/_write_r() are port/syscalls.c's),
+# and the DHCP address store in NVS (dhcp_state.c); port/esp_compat/
+# lwip_vfs.c takes the VFS registration.  A static library, as in ESP-IDF:
+# what nothing reaches (the sockets until the shell uses them) is not linked.
+set(LWIP_DIR  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-lwip/src")
+set(LWIP_PORT "${ESP_IDF}/lwip")
+add_library(lwip_headers INTERFACE)
+target_include_directories(lwip_headers INTERFACE
+    "${LWIP_PORT}/include"
+    "${LWIP_PORT}/include/apps"
+    "${LWIP_DIR}/include"
+    "${LWIP_PORT}/port/include"
+    "${LWIP_PORT}/port/freertos/include"
+    "${LWIP_PORT}/port/esp32xx/include"
+    "${LWIP_PORT}/port/esp32xx/include/arch"
+    "${LWIP_PORT}/port/esp32xx/include/sys"
+    "${ESP_HAL}/esp_libc/platform_include")
+add_library(lwip STATIC
+    "${LWIP_DIR}/api/api_lib.c"
+    "${LWIP_DIR}/api/api_msg.c"
+    "${LWIP_DIR}/api/err.c"
+    "${LWIP_DIR}/api/if_api.c"
+    "${LWIP_DIR}/api/netbuf.c"
+    "${LWIP_DIR}/api/netdb.c"
+    "${LWIP_DIR}/api/netifapi.c"
+    "${LWIP_DIR}/api/sockets.c"
+    "${LWIP_DIR}/api/tcpip.c"
+    "${LWIP_DIR}/core/def.c"
+    "${LWIP_DIR}/core/dns.c"
+    "${LWIP_DIR}/core/inet_chksum.c"
+    "${LWIP_DIR}/core/init.c"
+    "${LWIP_DIR}/core/ip.c"
+    "${LWIP_DIR}/core/mem.c"
+    "${LWIP_DIR}/core/memp.c"
+    "${LWIP_DIR}/core/netif.c"
+    "${LWIP_DIR}/core/pbuf.c"
+    "${LWIP_DIR}/core/raw.c"
+    "${LWIP_DIR}/core/stats.c"
+    "${LWIP_DIR}/core/sys.c"
+    "${LWIP_DIR}/core/tcp.c"
+    "${LWIP_DIR}/core/tcp_in.c"
+    "${LWIP_DIR}/core/tcp_out.c"
+    "${LWIP_DIR}/core/timeouts.c"
+    "${LWIP_DIR}/core/udp.c"
+    "${LWIP_DIR}/core/ipv4/dhcp.c"
+    "${LWIP_DIR}/core/ipv4/etharp.c"
+    "${LWIP_DIR}/core/ipv4/icmp.c"
+    "${LWIP_DIR}/core/ipv4/igmp.c"
+    "${LWIP_DIR}/core/ipv4/ip4.c"
+    "${LWIP_DIR}/core/ipv4/ip4_addr.c"
+    "${LWIP_DIR}/core/ipv4/ip4_frag.c"
+    "${LWIP_DIR}/netif/ethernet.c"
+    "${LWIP_PORT}/port/hooks/tcp_isn_default.c"
+    "${LWIP_PORT}/port/hooks/lwip_default_hooks.c"
+    "${LWIP_PORT}/port/sockets_ext.c"
+    "${LWIP_PORT}/port/freertos/sys_arch.c"
+    "${LWIP_PORT}/port/if_index.c"
+    "${LWIP_PORT}/port/acd_dhcp_check.c")
+target_link_libraries(lwip PUBLIC lwip_headers PRIVATE freertos esp_hal)
+# As in ESP-IDF's CMakeLists.txt for the component (-Wno-address, the
+# definition, the per-file options), and assertions on (LWIP_ASSERT()
+# ends in the fault path, as the other Espressif sources' assert()).
+target_compile_options(lwip PRIVATE -Wno-address -UNDEBUG)
+target_compile_definitions(lwip PRIVATE ESP_LWIP_COMPONENT_BUILD)
+set_source_files_properties("${LWIP_DIR}/core/tcp.c"
+    PROPERTIES COMPILE_OPTIONS "-Wno-type-limits")
+set_source_files_properties("${LWIP_DIR}/core/netif.c"
+    PROPERTIES COMPILE_OPTIONS "-Wno-unused-but-set-variable")
+# The FreeRTOS layer's semaphores are not queues (see the OS adapters
+# below): sys_arch.c keeps the handle xSemaphoreCreateBinaryStatic()
+# returns in a QueueHandle_t and casts a semaphore to one for
+# xSemaphoreTake() and vSemaphoreDelete(); the value is always the
+# semaphore's, only the C types differ.
+set_source_files_properties("${LWIP_PORT}/port/freertos/sys_arch.c"
+    PROPERTIES COMPILE_OPTIONS "-Wno-incompatible-pointer-types")
 
 # ---------------------------------------------------------------------------
 # Espressif sources this image needs, compiled as they are
@@ -763,9 +864,16 @@ target_include_directories(app PRIVATE
     "${ESP_HAL}/esp_system/port/include")      # esp_clk_internal.h
 # xtensa_rtos is an object library: the vectors are reached only through the
 # linker script and VECBASE, so nothing would pull them out of an archive.
-target_link_libraries(app PRIVATE esp_wifi_headers shell esp_idf ${ESP_WIFI_GROUP} freertos threadx xtensa_rtos
-                      esp_hal)
+target_link_libraries(app PRIVATE esp_wifi_headers shell esp_idf ${ESP_WIFI_GROUP} lwip freertos threadx
+                      xtensa_rtos esp_hal)
 add_dependencies(app wpa_supplicant mbedtls)
+# The sources that include lwIP's headers see them (and esp_libc's
+# platform_include with them); the rest of the application does not.
+get_target_property(LWIP_INCLUDES lwip_headers INTERFACE_INCLUDE_DIRECTORIES)
+set_source_files_properties(
+    "${PORT_DIR}/net/wlanif.c"
+    "${PORT_DIR}/esp_compat/lwip_vfs.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${LWIP_INCLUDES}")
 # -u esp_app_desc: nothing refers to it by name (esp_app_format does the same).
 # heap.c's malloc() and phy_override.c's functions take precedence over
 # newlib's and libphy's because they are linked as objects (esp_idf), before

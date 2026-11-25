@@ -30,7 +30,8 @@ UART0.
 | CPU clock | 240 MHz from the PLL (`esp_clk_init()`, `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ`) |
 | Heap | ESP-IDF's heap (`heap_caps` on TLSF; `malloc()` is esp_libc's): about 400 KiB of internal RAM and the RTC FAST memory, usable from interrupt handlers |
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
-| Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) started in station mode at boot; `wifi scan` lists the access points.  No connection and no TCP/IP yet |
+| Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect` (WPA2-PSK), `wifi status`, `wifi disconnect` |
+| TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP; the board answers ping.  No sockets in the shell yet |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, the firmware as the factory application at 0x10000 |
 
 ## Build
@@ -46,8 +47,8 @@ upstream sources into `lib/`, each at the commit pinned in `CMakeLists.txt`:
 ThreadX and esp-hal-3rdparty (~370 MB), a few directories of ESP-IDF
 itself that the mirror does not carry (~4 MB), the TLSF allocator of
 ESP-IDF's heap, the esp32s3 part of Espressif's binary PHY and Wi-Fi
-libraries (~6 MB), and the parts of Espressif's mbedTLS that are built
-(~7 MB).
+libraries (~6 MB), the parts of Espressif's mbedTLS that are built
+(~7 MB), and lwIP (Espressif's fork, ~5 MB).
 Neither directory is tracked by this repository.
 
 Outputs in `build/`: `bootloader.bin`, `partition-table.bin` and
@@ -192,7 +193,8 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    them: in `tx_application_define()` (esp_timer's task) and in the first
    task, "main", which then starts the Wi-Fi driver in station mode
    (ESP-IDF's event loop, `esp_wifi_init()`, `esp_wifi_start()`, which
-   calibrates the PHY) and ends.  ESP-IDF's own
+   calibrates the PHY), then lwIP with the station's network interface,
+   and ends.  ESP-IDF's own
    start-up lines (`app_init`, `heap_init`) appear on the console before
    the banner.
 
