@@ -29,10 +29,11 @@ below, which keep the licence of the work they come from.  Every such file
 says so in its SPDX-License-Identifier line and carries its own copyright
 notice.
 
-- port/threadx: the files derived from the Xtensa port of Eclipse ThreadX
-  (see port/threadx/ORIGIN.md) are under the MIT License,
-  Copyright (c) Microsoft Corporation, Cadence Design Systems and Eclipse
-  ThreadX contributors.
+- port/threadx: the files derived from the Xtensa port and from the
+  FreeRTOS compatibility layer of Eclipse ThreadX (see
+  port/threadx/ORIGIN.md) are under the MIT License, Copyright (c)
+  Microsoft Corporation, Cadence Design Systems and Eclipse ThreadX
+  contributors.
 
 - shell/common: copied from https://github.com/owhinata/rp2040-connect
   (see shell/ORIGIN.md for the list per licence).  Its own files are under

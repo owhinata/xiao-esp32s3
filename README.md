@@ -5,7 +5,8 @@ XIAO ESP32S3, built on
 [esp-hal-3rdparty](https://github.com/espressif/esp-hal-3rdparty) (an
 unmodified mirror of ESP-IDF's components, used here without ESP-IDF's build
 system or FreeRTOS; the FreeRTOS API that ESP-IDF code is written against
-comes from ThreadX's FreeRTOS compatibility layer).  The board boots through ESP-IDF's own second-stage
+comes from ThreadX's FreeRTOS compatibility layer, a modified copy in
+`port/threadx/freertos/`).  The board boots through ESP-IDF's own second-stage
 bootloader, built from the same sources.
 
 Status: **runs on a XIAO ESP32S3** (ESP32-S3R8, chip revision v0.2), executing
@@ -275,7 +276,8 @@ shell/port/     this board's part of the shell
 lib/            upstream sources, fetched by CMake; read-only, not tracked
 port/           board and start-up code, and port/esp_compat: what the
                 Espressif sources expect from parts of ESP-IDF that are not built
-port/threadx/   ThreadX architecture port
+port/threadx/   ThreadX architecture port, and its FreeRTOS compatibility layer
+                (freertos/)
 src/            application
 ```
 
@@ -285,7 +287,7 @@ is, and to write only what connects it to ThreadX and to this board.
 that is built, with the pinned commits; each file under `port/` says in its
 header what it is for.  Files copied from elsewhere, and what was changed in
 them, are recorded in [`port/threadx/ORIGIN.md`](port/threadx/ORIGIN.md)
-(the ThreadX port) and [`shell/ORIGIN.md`](shell/ORIGIN.md) (the shell);
+(the ThreadX port and the FreeRTOS layer) and [`shell/ORIGIN.md`](shell/ORIGIN.md) (the shell);
 licences are in [`LICENSE`](LICENSE).
 
 The C library is usable from threads and from `tx_application_define()`, not

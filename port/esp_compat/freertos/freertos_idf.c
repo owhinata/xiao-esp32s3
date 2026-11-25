@@ -1,7 +1,9 @@
 /*
  * The parts of ESP-IDF's FreeRTOS API that ThreadX's FreeRTOS compatibility
- * layer (tx_freertos.c) does not have, on top of it.  Declared in
- * include/freertos/FreeRTOS.h, which says what each one assumes.
+ * layer (port/threadx/freertos/tx_freertos.c) does not have, on top of it,
+ * and the state of the critical sections of include/FreeRTOSConfig.h.
+ * Declared in include/freertos/FreeRTOS.h, which says what each one
+ * assumes.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -13,10 +15,9 @@
 #include "tx_byte_pool.h"
 
 #include "freertos/FreeRTOS.h"
-#include "../pthread_local.h"
 
 /*
- * State of the critical sections (freertos/FreeRTOS.h): the PS the outermost
+ * State of the critical sections (FreeRTOSConfig.h): the PS the outermost
  * entry found, and the nesting depth.  Only the thread or handler inside a
  * section changes them, with the interrupts masked.
  */
@@ -68,25 +69,6 @@ TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t pxTaskCode,
     (void) xCoreID;
     return (xTaskCreateStatic)(pxTaskCode, pcName, stack_words(ulStackDepth), pvParameters,
                                uxPriority, puxStackBuffer, pxTaskBuffer);
-}
-
-/* The layer's functions; freertos/FreeRTOS.h redirects their names here. */
-#undef xTaskGetCurrentTaskHandle
-#undef vTaskDelete
-
-TaskHandle_t esp_compat_task_get_current(void)
-{
-    TX_THREAD *thread = tx_thread_identify();
-
-    return thread != TX_NULL ? (TaskHandle_t) thread->txfr_thread_ptr : NULL;
-}
-
-void esp_compat_task_delete(TaskHandle_t xTask)
-{
-    if (xTask == NULL || xTask == esp_compat_task_get_current()) {
-        esp_compat_pthread_exit_destructors();
-    }
-    vTaskDelete(xTask);
 }
 
 BaseType_t xQueueGenericSend(QueueHandle_t xQueue,

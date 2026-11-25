@@ -243,24 +243,20 @@ target_link_libraries(threadx PUBLIC xtensa_rtos)
 # ---------------------------------------------------------------------------
 # FreeRTOS API on ThreadX
 # ---------------------------------------------------------------------------
-# ThreadX's FreeRTOS compatibility layer, unmodified, configured by
+# ThreadX's FreeRTOS compatibility layer, a modified copy in
+# port/threadx/freertos (port/threadx/ORIGIN.md), configured by
 # port/esp_compat/freertos/include/FreeRTOSConfig.h, and what ESP-IDF's
 # FreeRTOS adds to the API (port/esp_compat/freertos): "freertos/FreeRTOS.h"
 # and the other "freertos/" headers ESP-IDF sources include.  Only the
 # targets that link this library see those headers; the Xtensa layer above
 # must not (see freertos/FreeRTOS.h), and it does not link it.
-set(TX_FREERTOS "${TX_DIR}/utility/rtos_compatibility_layers/FreeRTOS")
 add_library(freertos STATIC
-    "${TX_FREERTOS}/tx_freertos.c"
+    "${PORT_DIR}/threadx/freertos/tx_freertos.c"
     "${PORT_DIR}/esp_compat/freertos/freertos_idf.c")
 target_include_directories(freertos PUBLIC
     "${PORT_DIR}/esp_compat/freertos/include"
-    "${TX_FREERTOS}")
+    "${PORT_DIR}/threadx/freertos")
 target_link_libraries(freertos PUBLIC threadx esp_hal)
-# pcTaskGetName() hands a "const char **" where tx_thread_info_get() takes a
-# "CHAR **"; only the constness differs.
-set_source_files_properties("${TX_FREERTOS}/tx_freertos.c"
-    PROPERTIES COMPILE_OPTIONS "-Wno-incompatible-pointer-types")
 
 # ---------------------------------------------------------------------------
 # Application

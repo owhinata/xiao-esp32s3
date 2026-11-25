@@ -13,13 +13,17 @@
  * TX_PTHREAD_KEYS_MAX keys exist at a time.  Only threads have values:
  * outside a thread getspecific returns NULL and setspecific fails.
  *
- * Destructors run when a FreeRTOS task deletes itself (vTaskDelete(NULL),
- * port/esp_compat/freertos/freertos_idf.c), in the task, before it ends,
- * as POSIX runs them at a thread's exit: for every key whose value is not
- * NULL, the value is cleared and the destructor called with it, repeated
- * while destructors set new values (PTHREAD_DESTRUCTOR_ITERATIONS times at
- * most).  A thread that is deleted by another, or that ends otherwise,
- * does not run them; that is the case of no thread here that uses a key.
+ * Destructors run when a FreeRTOS task is deleted, however it ends
+ * (vTaskDelete() of itself or by another task, or returning from its
+ * function), in the FreeRTOS layer's thread "txfr_idle_task" before it
+ * deletes the task's thread (TX_FREERTOS_TASK_DELETE_HOOK in port/esp_compat/
+ * freertos/include/FreeRTOSConfig.h), as ESP-IDF's FreeRTOS runs the
+ * deletion callbacks of a task's local storage, on which its pthread
+ * component keeps these values: for every key whose value is not NULL,
+ * the value is cleared and the destructor called with it.  A destructor
+ * runs in that thread, at its priority (the lowest) and on its stack, and
+ * what it sets with pthread_setspecific() is that thread's own.  A ThreadX
+ * thread that is not a FreeRTOS task does not run them when it ends.
  */
 #include <errno.h>
 #include <pthread.h>
@@ -30,10 +34,6 @@
 #include "tx_thread.h"
 
 #include "pthread_local.h"
-
-#ifndef PTHREAD_DESTRUCTOR_ITERATIONS
-#define PTHREAD_DESTRUCTOR_ITERATIONS   4
-#endif
 
 /* Keys are 1 .. TX_PTHREAD_KEYS_MAX: a key of 0 is never valid. */
 static struct {
@@ -114,28 +114,17 @@ int pthread_setspecific(pthread_key_t key, const void *value)
     return 0;
 }
 
-void esp_compat_pthread_exit_destructors(void)
+void esp_compat_pthread_destructors(TX_THREAD *thread)
 {
-    TX_THREAD *self = tx_thread_identify();
-    int round;
-    bool again = true;
+    for (unsigned int i = 0; i < TX_PTHREAD_KEYS_MAX; i++) {
+        void *value = thread->tx_thread_pthread_local[i];
 
-    if (self == TX_NULL) {
-        return;
-    }
-    for (round = 0; again && round < PTHREAD_DESTRUCTOR_ITERATIONS; round++) {
-        again = false;
-        for (unsigned int i = 0; i < TX_PTHREAD_KEYS_MAX; i++) {
-            void *value = self->tx_thread_pthread_local[i];
-
-            if (value == NULL) {
-                continue;
-            }
-            self->tx_thread_pthread_local[i] = NULL;
-            if (keys[i].used && keys[i].destructor != NULL) {
-                keys[i].destructor(value);
-                again = true;
-            }
+        if (value == NULL) {
+            continue;
+        }
+        thread->tx_thread_pthread_local[i] = NULL;
+        if (keys[i].used && keys[i].destructor != NULL) {
+            keys[i].destructor(value);
         }
     }
 }
