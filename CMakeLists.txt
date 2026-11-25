@@ -37,7 +37,7 @@ add_compile_options(
 # ---------------------------------------------------------------------------
 add_library(esp_hal INTERFACE)
 target_include_directories(esp_hal INTERFACE
-    "${PORT_DIR}/include"                       # sdkconfig.h, Xtensa Tools stand-ins
+    "${PORT_DIR}/include"                       # sdkconfig.h
     "${ESP_HAL}/xtensa/esp32s3/include"
     "${ESP_HAL}/xtensa/include"
     "${ESP_HAL}/soc/include"
@@ -63,7 +63,11 @@ target_link_libraries(esp_hal INTERFACE "${ESP_HAL}/xtensa/esp32s3/libxt_hal.a")
 target_link_options(esp_hal INTERFACE
     "-T${ESP_HAL}/soc/esp32s3/ld/esp32s3.peripherals.ld"
     "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.ld"
-    "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.api.ld")
+    "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.api.ld"
+    # memcpy/memset/str* and the libgcc helpers in ROM: always reachable, even
+    # before the flash is mapped, and they cost no flash or RAM.
+    "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.libc.ld"
+    "-T${ESP_HAL}/esp_rom/esp32s3/ld/esp32s3.rom.libgcc.ld")
 
 # ---------------------------------------------------------------------------
 # Xtensa RTOS porting layer from esp-hal-components
@@ -115,7 +119,7 @@ target_link_libraries(threadx PUBLIC xtensa_rtos)
 # ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
-set(LDSCRIPT "${CMAKE_CURRENT_LIST_DIR}/ldscript/xiao_esp32s3_ram.ld")
+set(LDSCRIPT "${CMAKE_CURRENT_LIST_DIR}/ldscript/xiao_esp32s3.ld")
 
 add_executable(app
     src/main.c
@@ -123,12 +127,29 @@ add_executable(app
     "${PORT_DIR}/board.c"
     "${PORT_DIR}/panic.c"
     "${PORT_DIR}/syscalls.c"
+    "${PORT_DIR}/flash_map.c"
+    "${PORT_DIR}/esp_compat/esp_stubs.c"
     # esp-hal-components sources this image needs, compiled as they are
     "${ESP_HAL}/hal/wdt_hal_iram.c"
-    # Only rtc_clk_cpu_freq_get_config() is used; the functions that program
-    # the clock tree need more of esp_hw_support and are dropped by --gc-sections.
+    "${ESP_HAL}/hal/cache_hal.c"
+    "${ESP_HAL}/hal/mmu_hal.c"
     "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_clk.c"
-    "${ESP_HAL}/esp_rom/patches/esp_rom_sys.c")
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_clk_init.c"
+    # rtc_init.c: only for the regulator bias variables rtc_clk.c reads;
+    # rtc_init() itself is not called yet (see README) and is dropped by
+    # --gc-sections together with what it would need.
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/rtc_init.c"
+    "${ESP_HAL}/esp_hw_support/regi2c_ctrl.c"
+    "${ESP_HAL}/esp_rom/patches/esp_rom_sys.c"
+    # Work-arounds for bugs in the ROM's cache suspend/write-back routines.
+    "${ESP_HAL}/esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c")
+# These use FreeRTOS only for critical sections; give them the stand-in header.
+# It is kept off the global include path on purpose: the Xtensa layer switches
+# to its FreeRTOS code paths as soon as it can see a "freertos/FreeRTOS.h".
+set_source_files_properties(
+    "${ESP_HAL}/esp_hw_support/regi2c_ctrl.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${PORT_DIR}/esp_compat/include")
+
 set_target_properties(app PROPERTIES
     OUTPUT_NAME xiao_esp32s3_threadx
     SUFFIX      .elf
@@ -146,6 +167,7 @@ target_link_options(app PRIVATE
 # ---------------------------------------------------------------------------
 # Image and download targets (esptool from ./.venv, see README)
 # ---------------------------------------------------------------------------
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(ESPTOOL "${CMAKE_CURRENT_LIST_DIR}/.venv/bin/esptool" CACHE FILEPATH "esptool executable")
 set(ESPPORT "" CACHE STRING "Serial port for the flash/run targets (empty = esptool auto-detect)")
 set(APP_BIN "${CMAKE_CURRENT_BINARY_DIR}/xiao_esp32s3_threadx.bin")
@@ -154,20 +176,15 @@ if(ESPPORT)
     set(_port_arg --port "${ESPPORT}")
 endif()
 
-# The XIAO ESP32S3 carries 8 MB of flash.  Mode and frequency only tell the
-# ROM how to read the image; nothing runs from flash.
+# The XIAO ESP32S3 carries 8 MB of flash.  --ram-only-header: the ROM loads
+# the RAM segments only; _start maps the flash segments (port/flash_map.c).
 add_custom_command(TARGET app POST_BUILD
-    COMMAND "${CMAKE_SIZE}" "$<TARGET_FILE:app>"
-    COMMAND "${ESPTOOL}" --chip esp32s3 elf2image
+    COMMAND "${CMAKE_SIZE}" -A "$<TARGET_FILE:app>"
+    COMMAND "${ESPTOOL}" --chip esp32s3 elf2image --ram-only-header
             --flash-mode dio --flash-freq 80m --flash-size 8MB
             -o "${APP_BIN}" "$<TARGET_FILE:app>"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/script/add_boot_digest.py" "${APP_BIN}"
     COMMAND_EXPAND_LISTS VERBATIM)
-
-# Load into RAM and run.  Does not touch flash; the board must be in ROM
-# download mode (hold B, tap R).
-add_custom_target(run
-    COMMAND "${ESPTOOL}" --chip esp32s3 ${_port_arg} --no-stub load-ram "${APP_BIN}"
-    DEPENDS app USES_TERMINAL COMMAND_EXPAND_LISTS VERBATIM)
 
 # Write to flash offset 0, where the ESP32-S3 ROM looks for its boot image.
 # This replaces whatever bootloader is on the board.

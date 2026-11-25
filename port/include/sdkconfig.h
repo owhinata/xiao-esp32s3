@@ -18,6 +18,9 @@
 #define CONFIG_FREERTOS_UNICORE                 1
 #define CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE      1
 
+/* Flash is mapped in 64 KiB pages (fixed on the ESP32-S3). */
+#define CONFIG_MMU_PAGE_SIZE                    0x10000
+
 #define CONFIG_HAL_DEFAULT_ASSERTION_LEVEL      0
 #define CONFIG_LOG_MAXIMUM_LEVEL                0
 #define CONFIG_LOG_DEFAULT_LEVEL                0

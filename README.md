@@ -5,10 +5,10 @@ XIAO ESP32S3, built on
 [esp-hal-components](https://github.com/espressif/esp-hal-components) (the HAL
 part of ESP-IDF, without ESP-IDF, FreeRTOS or the second-stage bootloader).
 
-Status: **boots from flash and from RAM on a XIAO ESP32S3** (ESP32-S3R8, chip
-revision v0.2).  Both threads run; one tick is exactly 200000 CPU cycles and
-the CPU clock measures 20 MHz +26 ppm against a host clock over two minutes;
-no watchdog reset.  See [Bring-up checklist](#bring-up-checklist).
+Status: **runs on a XIAO ESP32S3** (ESP32-S3R8, chip revision v0.2), executing
+from flash at 240 MHz.  Both demo threads run; one tick is exactly 2400000 CPU
+cycles and the CPU clock measures 240 MHz within 60 ppm of a host clock; no
+watchdog reset.  See [Bring-up checklist](#bring-up-checklist).
 
 | | |
 |---|---|
@@ -20,7 +20,8 @@ no watchdog reset.  See [Bring-up checklist](#bring-up-checklist).
 | Console | USB Serial/JTAG on the USB-C connector, polled |
 | Tick | 100 Hz from CCOMPARE0 (CPU interrupt 6, level 1) |
 | LED | GPIO21, active low |
-| Image | RAM-only, loaded by the ROM bootloader |
+| CPU clock | 240 MHz from the PLL (`BOARD_CPU_FREQ_MHZ`) |
+| Image | Booted directly by the ROM; code and constants execute from flash |
 
 ## Build
 
@@ -36,19 +37,17 @@ Outputs are `build/xiao_esp32s3_threadx.elf`, `.bin` (ESP image) and `.map`.
 
 ## Run
 
-Put the board in ROM download mode first: hold **B** (BOOT), tap **R** (RESET),
-release **B**.  It enumerates as `303a:1001` (USB JTAG/serial debug unit).
-
 ```sh
-cmake --build build --target run      # load into RAM and start; flash untouched
 cmake --build build --target flash    # write the image to flash offset 0
 ```
 
-`run` is the one to use while iterating: it costs no flash wear and leaves the
-board's existing firmware alone.  `flash` makes the image boot on power-up, and
-**replaces the bootloader that is currently at offset 0** (the factory firmware
-stops booting until it is written back; the ROM download mode itself cannot be
-erased, so the board is always recoverable with esptool).
+`flash` **replaces the bootloader that is at offset 0** (whatever firmware was
+on the board stops booting until it is written back; the ROM download mode
+itself cannot be erased, so the board is always recoverable with esptool).
+
+esptool resets the board into download mode by itself through USB Serial/JTAG,
+so the buttons are only needed if the running firmware has taken the USB pins
+away: hold **B** (BOOT), tap **R** (RESET), release **B**.
 
 Pass `-DESPPORT=/dev/ttyACMn` at configure time if more than one serial device
 is attached.
@@ -56,38 +55,54 @@ is attached.
 Expected on the console (any terminal on the board's `/dev/ttyACM*`):
 
 ```
-XIAO ESP32S3: ThreadX 6.5.2, CPU clock 20000000 Hz, 100 ticks/s
+XIAO ESP32S3: ThreadX 6.5.2, CPU clock 240000000 Hz, 100 ticks/s
 hello 0  tick=0  ccount=...
 hello 1  tick=100  ccount=...
 ```
 
 and the orange LED toggling every 0.5 s.  `ccount` is the CPU cycle counter;
-it advances by 100 ticks x 200000 cycles per line.  The clock figure is
-whatever the ROM selected, read back from the clock registers: 20 MHz (the
-40 MHz crystal divided by two) after a boot from flash.
+it advances by 100 ticks x 2400000 cycles per line.  The clock figure is read
+back from the clock registers.
 
-esptool resets the board by itself through USB Serial/JTAG, so the buttons are
-only needed if the running firmware has taken the USB pins away.  The banner
-and `hello 0` are printed before a terminal can attach after `run` or `flash`;
-to see them, keep the terminal open and reset the board.
+The banner and `hello 0` are printed before a terminal can attach after
+`flash`; to see them, keep the terminal open and reset the board.
 
 ## How it boots
 
-There is no second-stage bootloader.  The image is in ESP image format with
-every segment in internal SRAM, so the mask ROM loads it and jumps to `_start`
-(`port/startup.c`), which masks interrupts, points VECBASE at the vectors,
-clears `.bss`, turns off the watchdogs the ROM armed, and calls `main()`.  Memory layout and the reasons for it are in
-`ldscript/xiao_esp32s3_ram.ld`.
+There is no second-stage bootloader and no ESP-IDF start-up code.
 
-Consequences of this first step, in order of how soon they will matter:
+1. The image is built with `esptool elf2image --ram-only-header`.  The mask ROM
+   sees only its RAM segments, loads them into internal SRAM and jumps to
+   `_start` (`port/startup.c`).  `script/add_boot_digest.py` adds the SHA-256
+   the ROM checks at that point.
+2. `_start` masks interrupts, points VECBASE at the vectors, clears `.bss` and
+   turns off the watchdogs the ROM armed.
+3. Clocks, as ESP-IDF's bootloader does: PLL on, CPU at 80 MHz (`rtc_clk_init`).
+4. `flash_map_image()` (`port/flash_map.c`) finds the two flash segments that
+   sit behind the RAM segments in the same image, sets up the cache and MMU
+   through the HAL, and maps them: code at 0x42000000, constants at 0x3C000000.
+5. CPU to 240 MHz, console, `main()`.
 
-- Code and data share 512 KiB of SRAM (128 KiB code / ~300 KiB data as split
-  now).  Executing from flash needs the cache and MMU set up in `_start`
-  (`hal/mmu_hal.c`, `hal/cache_hal.c`) and an image built with
-  `esptool elf2image --ram-only-header`.
-- The clock tree is not programmed, so the CPU runs at the ROM's 20 MHz.
-  Raising it to 80/160/240 MHz means using the rest of
-  `esp_hw_support/port/esp32s3/rtc_clk.c` (PLL setup, which needs `regi2c`).
+Everything up to step 4 has to run from RAM; the linker script
+(`ldscript/xiao_esp32s3.ld`) lists what is kept there and why, and describes
+the memory layout.  Two facts that are easy to get wrong and cost a debugging
+session here:
+
+- The instruction cache uses the first 16 KiB of SRAM0 as its own memory.
+  Anything linked there works until the first instruction is fetched from
+  flash, and is then overwritten.
+- ESP-IDF's bootloader only reads flash as data.  Executing from it also needs
+  the cache geometry set and the ROM told where code ends and data begins in
+  the shared MMU table (`rom_config_instruction_cache_mode`,
+  `Cache_Set_IDROM_MMU_Size`), which ESP-IDF does in its application start-up.
+
+What is still missing compared with an ESP-IDF start-up:
+
+- `rtc_init()` is not called.  It trims the internal voltage regulators from
+  eFuse calibration values; without it they run at the defaults compiled into
+  `rtc_init.c`.  Needed before the radio is used, and the conservative choice
+  if 240 MHz ever proves unstable on a board.
+- PSRAM (8 MB on this board) is not initialized.
 - Only core 0 runs.  ThreadX (non-SMP) is single-core; the layer is built with
   `portNUM_PROCESSORS=1`.
 
@@ -96,6 +111,7 @@ Consequences of this first step, in order of how soon they will matter:
 ```
 cmake/          toolchain file (downloads the compiler)
 ldscript/       linker script
+script/         build helpers
 lib/            upstream submodules, read-only
 port/           board and start-up code
 port/threadx/   ThreadX architecture port
@@ -117,7 +133,9 @@ as it is, and to write only what connects it to ThreadX and to this board.
 | `xtensa/esp32s3/libxt_hal.a` | Xtensa HAL (window spill, extra-state save) |
 | `esp_system/port/arch/xtensa/panic_handler_asm.S` | `_xt_panic` |
 | `hal/wdt_hal_iram.c` | Watchdog control |
-| `esp_hw_support/port/esp32s3/rtc_clk.c` | CPU clock readback (`rtc_clk_cpu_freq_get_config`) |
+| `hal/cache_hal.c`, `hal/mmu_hal.c` | Cache and MMU for the flash mapping |
+| `esp_hw_support/port/esp32s3/rtc_clk.c`, `rtc_clk_init.c`, `esp_hw_support/regi2c_ctrl.c` | PLL and CPU clock |
+| `esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c` | Work-arounds for ROM cache bugs |
 | `esp_rom/patches/esp_rom_sys.c` + ROM | `esp_rom_printf`, console channel, ticks-per-us |
 | `hal/esp32s3/include/hal/*_ll.h` | GPIO, USB Serial/JTAG |
 | `soc/`, `esp_rom/` linker scripts | Peripheral and ROM symbol addresses |
@@ -152,7 +170,9 @@ files were copied to `port/threadx/` and adapted to Espressif's layer.  The
 
 | File | Role |
 |---|---|
-| `startup.c` | Reset entry |
+| `startup.c` | Reset entry, clocks |
+| `flash_map.c` | Maps the flash part of the image (follows ESP-IDF's `bootloader_support`, which is not in esp-hal-components) |
+| `esp_compat/` | What esp-hal-components sources expect from the rest of ESP-IDF: a `freertos/FreeRTOS.h` that provides critical sections only, and documented stubs |
 | `board.c` | LED, clock readback, console |
 | `syscalls.c` | newlib fd 0-2 on the console |
 | `panic.c` | `panicHandler` / `xt_unhandled_exception`: register dump |
@@ -164,20 +184,21 @@ using a coprocessor in an interrupt handler ends in a panic.
 
 ## Bring-up checklist
 
-All five items have been observed on the board.  In the order a failure would
+Items 1 to 3 have been observed on the board with the current image.  The LED
+(item 4) and a power cycle (item 5) were observed with the earlier RAM-only
+image and have not been looked at again since.  In the order a failure would
 show up:
 
-1. `run` loads and the banner appears.  No output at all: the fault is before
+1. The banner appears after `flash`.  No output at all: the fault is before
    or in the console, i.e. `_start`, the load addresses, or USB Serial/JTAG.
-2. The banner shows a plausible clock (20 MHz after ROM boot).
+2. The banner shows the configured clock (240 MHz).
 3. `hello` lines arrive once per second and `tick` advances by 100 per line.
    Banner but no `hello`: the first context switch or the tick interrupt.
    Wrong rate: the clock readback in `board_cpu_freq_hz()`.
 4. The LED blinks at 1 Hz.
-5. The same after `flash` and a power cycle (this is the path where the ROM
-   watchdogs are armed; a reset loop every few seconds points at
-   `watchdogs_disable()`).
+5. The same after a power cycle (the ROM arms its watchdogs on every boot from
+   flash; a reset loop every few seconds points at `watchdogs_disable()`).
 
 Every unhandled exception, including kernel and double exceptions, prints a
-register dump through the ROM printf and halts.  That output needs the console,
-so a fault before `console_init()` in `_start` is silent.
+register dump through the ROM printf and halts.  The handler is kept in RAM so
+that it also works when the flash mapping is what failed.
