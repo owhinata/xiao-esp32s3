@@ -114,11 +114,16 @@ static uint64_t ps_cycles_to_us(uint64_t cycles)
 
 _Static_assert(PS_TASKS_MAX <= PS_INTERVAL_TASKS_MAX, "ps keeps every task");
 
+/* A thread's name is copied, at most this many bytes with the NUL. */
+#define PS_NAME_MAX 24
+
 struct ps_row {
     const TX_THREAD *thread;            /* the row's key only: not read after the lock */
-    const char *name;
+    char name[PS_NAME_MAX];
     UINT priority;
     char state;
+    const ULONG *stack_start;           /* the stack's lowest word */
+    const ULONG *stack_used;            /* the lowest word known to be in use */
     size_t stack_free;
     uint64_t run_cycles;
     unsigned int permille;
@@ -147,7 +152,10 @@ static char ps_state(const TX_THREAD *t)
     }
 }
 
-/* The words from the low end that still hold the fill pattern: the least free stack so far. */
+/*
+ * The bytes from start, up to end at most, that still hold the fill
+ * pattern: the least free stack so far.
+ */
 static size_t ps_fill_left(const ULONG *start, const ULONG *end)
 {
     const ULONG *p = start;
@@ -158,10 +166,40 @@ static size_t ps_fill_left(const ULONG *start, const ULONG *end)
     return (size_t) ((uintptr_t) p - (uintptr_t) start);
 }
 
-static size_t ps_stack_free(const TX_THREAD *t)
+/*
+ * The lowest word of the stack known to be in use (interrupts masked by
+ * the caller): ThreadX's high-water mark (TX_ENABLE_STACK_CHECKING), the
+ * stack pointer the thread had when it was last interrupted or switched
+ * out, and for the caller its stack pointer now.
+ */
+static const ULONG *ps_stack_used(const TX_THREAD *t)
 {
-    return ps_fill_left(t->tx_thread_stack_start,
-                        (const ULONG *) ((const uint8_t *) t->tx_thread_stack_end + 1));
+    const ULONG *used = t->tx_thread_stack_highest_ptr;
+
+    if ((const ULONG *) t->tx_thread_stack_ptr < used) {
+        used = t->tx_thread_stack_ptr;
+    }
+    if (t == _tx_thread_current_ptr) {
+        const ULONG *sp;
+
+        __asm__ volatile ("mov %0, sp" : "=a" (sp));
+        if (sp < used) {
+            used = sp;
+        }
+    }
+    return used;
+}
+
+static void ps_name_copy(char *dst, const char *src)
+{
+    size_t i = 0;
+
+    if (src != TX_NULL) {
+        for (; i < PS_NAME_MAX - 1u && src[i] != '\0'; i++) {
+            dst[i] = src[i];
+        }
+    }
+    dst[i] = '\0';
 }
 
 /*
@@ -188,14 +226,19 @@ static size_t ps_stack_free(const TX_THREAD *t)
  * the same interval: 100% less "(idle)", rounded down, with the handlers
  * that interrupt the wait counted as load.
  *
- * Everything is read with interrupts masked, the stacks too: the kit
- * changes the run times at switches and in interrupts, and a FreeRTOS
- * task's control block and stack go back to the layer's byte pool when
- * "txfr_idle_task" deletes it.  The longest part is the search for the
- * fill pattern over the unused part of every stack, a few CPU cycles per
- * word: the threads' stacks add up to about 15 000 words (60 KiB), well
- * under 1 ms.  The names are the threads' own strings, which here are all
- * constants.
+ * The control blocks are read with interrupts masked, and only copied
+ * there, names included (a FreeRTOS task's name is in its task block):
+ * the kit changes the run times at switches and in interrupts, and a
+ * FreeRTOS task's task block and stack go back to the layer's byte pool
+ * when "txfr_idle_task" deletes it.  The stacks are searched for the fill
+ * pattern after the lock, from the low end up to the lowest word known to
+ * be in use (ps_stack_used()); ThreadX's high-water mark alone can stay
+ * above what a thread used (its search of the stack takes a run of 8 fill
+ * words for unused, so a gap in the used part can stop it), and it moves
+ * only when the thread suspends or resumes.  The search reads the stack of
+ * a task that may be deleted meanwhile: memory that stays mapped, and the
+ * row is printed with what was read.  The interrupt stack is a static
+ * region, searched the same way.
  */
 static K_MUTEX_DEFINE(ps_lock);
 
@@ -238,16 +281,21 @@ static int cmd_ps(const struct shell *sh, size_t argc, char **argv)
         }
         row = &rows[count++];
         row->thread = t;
-        row->name = t->tx_thread_name;
+        ps_name_copy(row->name, t->tx_thread_name);
         row->priority = t->tx_thread_priority;
         row->state = ps_state(t);
-        row->stack_free = ps_stack_free(t);
+        row->stack_start = t->tx_thread_stack_start;
+        row->stack_used = ps_stack_used(t);
         row->run_cycles = ps_thread_cycles(t);
     }
     idle_cycles = _tx_execution_idle_time_total;
     irq_cycles = _tx_execution_isr_time_total;
     total = board_uptime_us();
     TX_RESTORE
+
+    for (unsigned int i = 0; i < count; i++) {
+        rows[i].stack_free = ps_fill_left(rows[i].stack_start, rows[i].stack_used);
+    }
 
     if (full) {
         k_mutex_unlock(&ps_lock);
