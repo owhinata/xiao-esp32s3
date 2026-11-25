@@ -70,7 +70,7 @@ add_compile_options(
 # headers this firmware reaches are listed.
 set(ESP_HAL_PERIPHERALS
     esp_hal_cache esp_hal_clock esp_hal_gpio esp_hal_gpspi esp_hal_regi2c
-    esp_hal_systimer esp_hal_timg esp_hal_usb esp_hal_wdt)
+    esp_hal_systimer esp_hal_timg esp_hal_uart esp_hal_usb esp_hal_wdt)
 set(ESP_HAL_PERIPHERAL_INCLUDES)
 foreach(_c IN LISTS ESP_HAL_PERIPHERALS)
     foreach(_d "${ESP_HAL}/${_c}/include" "${ESP_HAL}/${_c}/esp32s3/include")
@@ -201,7 +201,11 @@ add_executable(app
     "${ESP_HAL}/esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c"
     # SYSTIMER: the uptime clock (port/board.c).
     "${ESP_HAL}/esp_hal_systimer/systimer_hal.c"
-    "${ESP_HAL}/esp_hw_support/port/esp32s3/systimer.c")
+    "${ESP_HAL}/esp_hw_support/port/esp32s3/systimer.c"
+    # UART0: the console on D6/D7 (port/board.c), and the table of IO MUX
+    # registers that gpio_ll_pullup_en() looks the RX pin up in.
+    "${ESP_HAL}/esp_hal_uart/uart_hal.c"
+    "${ESP_HAL}/soc/esp32s3/gpio_periph.c")
 # These use FreeRTOS only for critical sections; give them the stand-in header.
 # It is kept off the global include path on purpose: the Xtensa layer switches
 # to its FreeRTOS code paths as soon as it can see a "freertos/FreeRTOS.h".
@@ -324,13 +328,15 @@ add_subdirectory(bootloader)
 set(ESPTOOL "${CMAKE_CURRENT_LIST_DIR}/.venv/bin/esptool" CACHE FILEPATH "esptool executable")
 set(ESP_PYTHON "${CMAKE_CURRENT_LIST_DIR}/.venv/bin/python" CACHE FILEPATH
     "Python with esptool installed, for ESP-IDF's partition table scripts")
-set(ESPPORT "" CACHE STRING "Serial port for the flash targets (empty = esptool auto-detect)")
-set(_port_arg "")
-if(ESPPORT)
-    set(_port_arg --port "${ESPPORT}")
-endif()
+set(ESPPORT "" CACHE STRING
+    "Serial port for the flash targets (empty = the XIAO's USB Serial/JTAG, found by its USB ID)")
+# Through a USB-serial adapter on UART0 the transfer runs at this rate, ESP-IDF's
+# default flash baud rate (idf.py, CONFIG_ESPTOOLPY_BAUD); the ROM and the shell
+# are reached at the console's rate first.
+set(ESPBAUD 460800 CACHE STRING "Baud rate of a flash transfer over a USB-serial adapter")
 
-# The two offsets are read from sdkconfig.h, which the bootloader is built with.
+# The two offsets and the console's baud rate are read from sdkconfig.h, which
+# the bootloader is built with.
 function(sdkconfig_value name out)
     file(STRINGS "${PORT_DIR}/include/sdkconfig.h" _line REGEX "^#define ${name}[ \t]")
     string(REGEX REPLACE "^#define ${name}[ \t]+([^ \t]+).*" "\\1" _value "${_line}")
@@ -341,6 +347,17 @@ function(sdkconfig_value name out)
 endfunction()
 sdkconfig_value(CONFIG_BOOTLOADER_OFFSET_IN_FLASH BOOTLOADER_OFFSET)
 sdkconfig_value(CONFIG_PARTITION_TABLE_OFFSET PARTITION_TABLE_OFFSET)
+sdkconfig_value(CONFIG_ESP_CONSOLE_UART_BAUDRATE CONSOLE_BAUD)
+
+# The shell's prompt (src/main.c), which script/flash.py waits for on a UART.
+# A change to either file re-runs the configure step that reads these values.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${PORT_DIR}/include/sdkconfig.h" "${CMAKE_CURRENT_LIST_DIR}/src/main.c")
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/src/main.c" _line REGEX "^#define PROMPT[ \t]")
+string(REGEX REPLACE "^#define PROMPT[ \t]+\"([^\"]*)\".*" "\\1" SHELL_PROMPT "${_line}")
+if(NOT SHELL_PROMPT OR SHELL_PROMPT STREQUAL _line)
+    message(FATAL_ERROR "PROMPT is not in src/main.c")
+endif()
 
 set(PARTITION_TOOLS "${ESP_HAL}/partition_table")
 set(PARTITION_CSV "${CMAKE_CURRENT_LIST_DIR}/partitions.csv")
@@ -403,10 +420,20 @@ add_custom_command(OUTPUT "${APP_BIN}"
 
 add_custom_target(images ALL DEPENDS "${BOOTLOADER_BIN}" "${PARTITION_BIN}" "${APP_BIN}")
 
+# script/flash.py finds the port, gets the chip into the ROM's download mode
+# (through USB Serial/JTAG as esptool does, or through the shell's "bootsel"
+# on a UART) and runs esptool with the write-flash arguments after "--".
+set(FLASH_TOOL "${ESP_PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/script/flash.py"
+    --esptool "${ESPTOOL}" --prompt "${SHELL_PROMPT}"
+    --console-baud ${CONSOLE_BAUD} --flash-baud ${ESPBAUD})
+if(ESPPORT)
+    list(APPEND FLASH_TOOL --port "${ESPPORT}")
+endif()
+
 # flash: all three images.  This replaces whatever is at the start of the
 # flash, the board's previous bootloader included.
 add_custom_target(flash
-    COMMAND "${ESPTOOL}" --chip esp32s3 ${_port_arg} write-flash ${ESPTOOL_FLASH_ARGS}
+    COMMAND ${FLASH_TOOL} -- ${ESPTOOL_FLASH_ARGS}
             ${BOOTLOADER_OFFSET} "${BOOTLOADER_BIN}"
             ${PARTITION_TABLE_OFFSET} "${PARTITION_BIN}"
             ${APP_OFFSET} "${APP_BIN}"
@@ -415,6 +442,6 @@ add_custom_target(flash
 # app-flash: the application only, once the bootloader and the partition
 # table are on the board (ESP-IDF's "idf.py app-flash").
 add_custom_target(app-flash
-    COMMAND "${ESPTOOL}" --chip esp32s3 ${_port_arg} write-flash ${ESPTOOL_FLASH_ARGS}
+    COMMAND ${FLASH_TOOL} -- ${ESPTOOL_FLASH_ARGS}
             ${APP_OFFSET} "${APP_BIN}"
     DEPENDS images USES_TERMINAL COMMAND_EXPAND_LISTS VERBATIM)

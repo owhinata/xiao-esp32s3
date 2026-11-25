@@ -44,21 +44,28 @@ void     board_restart(void) __attribute__((noreturn));
 void     board_restart_to_download(void) __attribute__((noreturn));
 
 /*
- * Console on the built-in USB Serial/JTAG controller (the USB-C connector).
- * Writing and reading are polled and usable with interrupts disabled and
- * from fault handlers.
+ * Console on two transports at once: the built-in USB Serial/JTAG controller
+ * (the USB-C connector) and UART0 on D6 (TX, GPIO43) / D7 (RX, GPIO44) at
+ * CONFIG_ESP_CONSOLE_UART_BAUDRATE, 8N1.  Writes go to both, reads take what
+ * arrived on either.  Writing and reading are polled and usable with
+ * interrupts disabled and from fault handlers.  Bytes are passed unchanged
+ * (no line-end conversion).
  */
-void     console_init(void);    /* also routes esp_rom_printf() here */
+void     console_init(void);    /* sets up UART0; also routes esp_rom_printf() here */
 void     console_write(const char *buf, uint32_t len);
 void     console_puts(const char *s);
 int      console_read_nonblock(char *buf, uint32_t len);
 
-/* Whether the host is taking what is written (a terminal has the port open). */
+/*
+ * Whether someone is at the console: the USB host is taking what is written
+ * (a terminal has the port open), or a byte has arrived on the UART since
+ * the start (a UART cannot tell more).
+ */
 int      console_host_present(void);
 
 /*
- * Calls callback from the receive interrupt whenever a packet has arrived.
- * Once, from a thread or before the kernel runs.
+ * Calls callback from the receive interrupts whenever a USB packet or a
+ * UART byte has arrived.  Once, from a thread or before the kernel runs.
  */
 void     console_rx_notify(void (*callback)(void));
 

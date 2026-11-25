@@ -1,6 +1,6 @@
 /*
- * ThreadX on the XIAO ESP32S3: a shell on the USB Serial/JTAG console and a
- * thread that blinks the user LED.
+ * ThreadX on the XIAO ESP32S3: a shell on the console (USB Serial/JTAG and
+ * UART0 together) and a thread that blinks the user LED.
  *
  * The shell is rp2040-connect's (shell/common, with this board's part in
  * shell/port).  Its thread "console" is started by the Zephyr compatibility
@@ -61,10 +61,10 @@ void tx_application_define(void *first_unused_memory)
 
     /*
      * From here on stdout and stderr of every thread go through the shell's
-     * console "usb".  A failure to start the thread leaves a board that
+     * console "serial".  A failure to start the thread leaves a board that
      * blinks but does not answer; say so while the console still works.
      */
-    shell_serial_init("usb");
+    shell_serial_init("serial");
     if (shell_serial_start(PROMPT, NULL) != 0) {
         printf("The shell did not start\n");
     }

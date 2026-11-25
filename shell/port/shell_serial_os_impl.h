@@ -2,8 +2,8 @@
 /*
  * The console transport of the shell engine on this board
  * (shell/common/compat/port/shell_serial_os.h reads this file and says what
- * each item must do): the USB Serial/JTAG console of port/board.c and
- * newlib's stdout and stderr of port/syscalls.c.
+ * each item must do): the console of port/board.c (USB Serial/JTAG and
+ * UART0 together) and newlib's stdout and stderr of port/syscalls.c.
  */
 #ifndef SHELL_PORT_SHELL_SERIAL_OS_IMPL_H
 #define SHELL_PORT_SHELL_SERIAL_OS_IMPL_H
@@ -40,6 +40,10 @@ static inline void shell_serial_os_rx_init(void)
     console_rx_notify(shell_serial_rx_ready);
 }
 
+/*
+ * USB host present, or a byte received on the UART since the start
+ * (console_host_present() says why that is all a UART can tell).
+ */
 static inline bool shell_serial_os_connected(void)
 {
     return console_host_present() != 0;
@@ -50,7 +54,10 @@ static inline int shell_serial_os_read(char *buf, size_t len)
     return console_read_nonblock(buf, (uint32_t) len);
 }
 
-/* console_write() gives up after 50 ms when the host stops reading. */
+/*
+ * console_write() gives up on USB after 50 ms when the host stops reading;
+ * the UART takes it at the baud rate, listener or not.
+ */
 static inline void shell_serial_os_write(const char *buf, size_t len)
 {
     console_write(buf, (uint32_t) len);

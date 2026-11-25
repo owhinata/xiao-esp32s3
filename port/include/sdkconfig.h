@@ -48,10 +48,20 @@
 #define CONFIG_MMU_PAGE_SIZE                    0x10000
 
 /*
- * The console is the USB Serial/JTAG controller on the USB-C connector, for
- * the bootloader's log as for the application.  Not ESP-IDF's default (UART0).
+ * Console: UART0 on its default pins (GPIO43 TX = D6, GPIO44 RX = D7) at
+ * 115200 baud, ESP-IDF's default.  In the bootloader this makes
+ * bootloader_console_init() install the ROM's UART printf, which on this
+ * chip also writes every character to the USB Serial/JTAG controller (the
+ * ROM's channel 2, what ESP-IDF's Kconfig calls the secondary console,
+ * ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG, its default; no compiled source
+ * tests that symbol).  So the bootloader's log goes to both.  The
+ * application drives both itself (port/board.c) and takes the baud rate from
+ * here.
  */
-#define CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG      1
+#define CONFIG_ESP_CONSOLE_UART                 1
+#define CONFIG_ESP_CONSOLE_UART_NUM             0
+#define CONFIG_ESP_CONSOLE_ROM_SERIAL_PORT_NUM  0
+#define CONFIG_ESP_CONSOLE_UART_BAUDRATE        115200
 
 /*
  * This firmware is linked against newlib (port/threadx/src/tx_clib_newlib.c);

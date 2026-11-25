@@ -18,7 +18,7 @@ from flash at 240 MHz, with an interactive shell on the USB console.  See
 | Xtensa layer | esp-hal-3rdparty `components/xtensa` (vectors, interrupt dispatch, context switch primitives) |
 | HAL | esp-hal-3rdparty `sync/master.c` at `130cda98` (ESP-IDF master of 2026-11-15, v6.3 development) |
 | Toolchain | `xtensa-esp-elf` 16.1.0_20260609 (the one ESP-IDF names at that commit), fetched on first configure |
-| Console | USB Serial/JTAG on the USB-C connector; polled transmit, interrupt-driven receive |
+| Console | USB Serial/JTAG on the USB-C connector and UART0 on D6/D7 (115200 8N1), together; polled transmit, interrupt-driven receive |
 | Shell | The shell of [rp2040-connect](https://github.com/owhinata/rp2040-connect), copied into `shell/common/` |
 | Tick | 1000 Hz from CCOMPARE0 (CPU interrupt 6, level 1) |
 | Uptime clock | SYSTIMER counter 0 (16 MHz, from the crystal) |
@@ -57,14 +57,35 @@ itself cannot be erased, so the board is always recoverable with esptool).
 `app-flash` is enough once the bootloader and the partition table are on the
 board.
 
-esptool resets the board into download mode by itself through USB Serial/JTAG,
-so the buttons are only needed if the running firmware has taken the USB pins
-away: hold **B** (BOOT), tap **R** (RESET), release **B**.
+Both targets go through `script/flash.py`, which finds the board's USB
+Serial/JTAG port by its USB ID (303a:1001) and lets esptool reset the chip into
+download mode and back.
 
-Pass `-DESPPORT=/dev/ttyACMn` at configure time if more than one serial device
-is attached.
+**Without USB.**  The console is also on UART0, and the board can be flashed
+through it with a plain USB-serial adapter (3.3 V logic, three wires, no
+reset circuit):
 
-On the console (any terminal on the board's `/dev/ttyACM*`):
+| XIAO | Adapter |
+|---|---|
+| D6 (GPIO43, TX) | RX |
+| D7 (GPIO44, RX) | TX |
+| GND | GND |
+
+```sh
+cmake -S . -B build -DESPPORT=/dev/ttyUSB0    # stays set; -DESPPORT= goes back to USB
+cmake --build build --target app-flash
+```
+
+The tool then sends `bootsel` to the shell, waits for the ROM's download mode,
+switches off the flash-boot watchdog of timer group 0 (which would reset the
+chip once the next step is done), clears the bit that forced the download
+mode, writes at `ESPBAUD` (460800 by default) and restarts the firmware with a
+watchdog reset.  No button is needed.  Only when
+no shell answers (no firmware, or a hung one) does it ask for the buttons:
+hold **B** (BOOT), tap **R** (RESET), release **B**.
+
+On the console (any terminal on the board's `/dev/ttyACM*`, or on the adapter
+at 115200):
 
 ```
 XIAO ESP32S3: ThreadX 6.5.2, CPU clock 240000000 Hz, 1000 ticks/s
@@ -86,7 +107,9 @@ Available commands:
 ```
 
 The orange LED toggles every 0.5 s.  The banner is printed at boot; a terminal
-opened later gets a prompt on Enter.
+opened later gets a prompt on Enter.  Output goes to both transports and input
+is taken from either.  Every write also goes out on the UART at its line rate,
+so long outputs take that long on USB too.
 
 `bootsel` keeps its name from rp2040-connect; on this board it restarts into
 the ROM download mode, where esptool can connect.  A reset from esptool or the
@@ -128,7 +151,8 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    sets up the clocks (PLL, CPU at 80 MHz), the flash and the cache, reads the
    partition table (`partitions.csv`: nvs, phy_init, a 7 MB factory
    application), verifies the application image, loads its RAM segments, maps
-   its flash segments and jumps to `_start`.  Its log goes to the USB console.
+   its flash segments and jumps to `_start`.  Its log goes to UART0 and to the
+   USB console.
 3. `_start` (`port/startup.c`) does what ESP-IDF's application start-up does
    at this point, in the same order: vectors and CPU state, `.bss`, the cache
    geometry and the boundary between code and data in the shared MMU table,
@@ -165,6 +189,7 @@ What ESP-IDF's application start-up does and this firmware does not:
 bootloader/     build of ESP-IDF's second-stage bootloader
 cmake/          toolchain file (downloads the compiler), upstream fetch
 partitions.csv  partition table
+script/         flash tool (and its tests, which need no board)
 ldscript/       linker script
 shell/common/   shell engine and commands, copied from rp2040-connect
 shell/port/     this board's part of the shell
@@ -196,7 +221,8 @@ as it is, and to write only what connects it to ThreadX and to this board.
 | `esp_hw_support/port/esp32s3/rtc_clk.c`, `esp_hw_support/regi2c_ctrl.c`, `esp_hal_regi2c/esp32s3/rom.regi2c.ld` | CPU clock |
 | `esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c` | Work-arounds for ROM cache bugs |
 | `esp_rom/patches/esp_rom_sys.c` + ROM | `esp_rom_printf`, console channel, ticks-per-us |
-| LL headers of `esp_hal_gpio`, `esp_hal_usb`, `hal` | GPIO, USB Serial/JTAG, eFuse |
+| `esp_hal_uart/uart_hal.c`, `soc/esp32s3/gpio_periph.c` | UART0 and its pins |
+| LL headers of `esp_hal_gpio`, `esp_hal_usb`, `esp_hal_uart`, `hal` | GPIO, USB Serial/JTAG, UART, eFuse |
 | `soc/`, `esp_rom/` linker scripts | Peripheral and ROM symbol addresses |
 
 **ESP-IDF, unmodified**
@@ -255,7 +281,7 @@ the commands only the board can answer (`version`, `free`, `ps`).
 |---|---|
 | `startup.c` | Application start-up after the bootloader |
 | `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: a `freertos/FreeRTOS.h` that provides critical sections only, and small stand-in headers for `esp_sleep` and `esp_mspi` |
-| `board.c` | LED, clock readback, uptime, console (with its receive interrupt), device ID, restart |
+| `board.c` | LED, clock readback, uptime, console on USB Serial/JTAG and UART0 (with their receive interrupts), device ID, restart |
 | `syscalls.c` | newlib fd 0-2 on the console; once the shell runs, stdout and stderr go through the shell's console layer |
 | `panic.c` | `panicHandler` / `xt_unhandled_exception`: register dump |
 | `include/sdkconfig.h` | The `CONFIG_` symbols the compiled sources need, shared by the bootloader and the application |
@@ -267,8 +293,9 @@ using a coprocessor in an interrupt handler ends in a panic.
 
 ## Bring-up checklist
 
-Everything below has been observed on the board with the current image.  In
-the order a failure would show up:
+Everything below has been observed on the board with the current image over
+USB.  The UART0 console and flashing through it have not been tried on a board
+yet.  In the order a failure would show up:
 
 1. After `flash`, the ROM log is followed by the bootloader's
    (`boot: ESP-IDF ... 2nd stage bootloader`, the partition table, the image
