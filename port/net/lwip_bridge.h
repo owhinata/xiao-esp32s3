@@ -103,8 +103,8 @@ int lwip_bridge_connect(int sock, const struct lwip_bridge_addr *addr);
 int lwip_bridge_listen(int sock, int backlog);
 
 /*
- * The next connection of a listening socket, its peer's and its own
- * address.
+ * The next connection of a listening socket, with TCP keepalive on (see
+ * lwip_bridge.c), its peer's and its own address.
  */
 int lwip_bridge_accept(int sock, struct lwip_bridge_addr *peer, struct lwip_bridge_addr *local);
 

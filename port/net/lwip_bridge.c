@@ -3,6 +3,14 @@
  * with the values of lwIP and ESP-IDF's <sys/poll.h>, translated from and to
  * the bridge's own.  The other side, with the POSIX values of the shell's
  * headers, is shell/port/zephyr_net_socket.c.
+ *
+ * Connections accepted here get TCP keepalive (idle 30 s, then a probe
+ * every 10 s, 6 probes): a client that vanished without closing (a PC
+ * switched off, a cable pulled) is dropped after at most 90 s, as otherwise
+ * the shell's single Telnet session would stay taken by it and refuse every
+ * new client.  The probes also go unanswered while the access point is
+ * away and the address is held (port/net/wlanif.c): the 60 s of probing
+ * are what an idle connection is sure to get through.
  */
 #include <errno.h>
 #include <stddef.h>
@@ -15,10 +23,14 @@
 #include "lwip_bridge.h"
 #include "wlanif.h"
 
-#if !LWIP_NETCONN_SEM_PER_THREAD || !LWIP_SOCKET_POLL || !SO_REUSE \
+#define KEEPALIVE_IDLE_S        30
+#define KEEPALIVE_INTERVAL_S    10
+#define KEEPALIVE_COUNT         6
+
+#if !LWIP_NETCONN_SEM_PER_THREAD || !LWIP_SOCKET_POLL || !LWIP_TCP_KEEPALIVE || !SO_REUSE \
     || !LWIP_SO_SNDTIMEO || !LWIP_SO_RCVTIMEO || LWIP_SO_SNDRCVTIMEO_NONSTANDARD \
     || LWIP_TIMEVAL_PRIVATE || LWIP_IPV6
-#error "lwip_bridge.c needs lwIP's poll, SO_REUSEADDR, timeouts in a struct timeval, a semaphore per thread, IPv4 only"
+#error "lwip_bridge.c needs lwIP's poll, keepalive, SO_REUSEADDR, timeouts in a struct timeval, a semaphore per thread, IPv4 only"
 #endif
 
 _Static_assert(LWIP_BRIDGE_SOCKETS == MEMP_NUM_NETCONN, "the bridge numbers lwIP's sockets");
@@ -115,6 +127,24 @@ int lwip_bridge_listen(int sock, int backlog)
     return lwip_listen(fd_of(sock), backlog);
 }
 
+/*
+ * lwIP keeps the keepalive times per connection and does not take them
+ * from the listening one (tcp_alloc() gives a new connection 2 h of idle
+ * time), so they are set on each accepted one.
+ */
+static void keepalive_on(int fd)
+{
+    static const int on = 1;
+    static const int idle = KEEPALIVE_IDLE_S;
+    static const int interval = KEEPALIVE_INTERVAL_S;
+    static const int count = KEEPALIVE_COUNT;
+
+    (void) lwip_setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+    (void) lwip_setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+    (void) lwip_setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+    (void) lwip_setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+}
+
 int lwip_bridge_accept(int sock, struct lwip_bridge_addr *peer, struct lwip_bridge_addr *local)
 {
     struct sockaddr_in sin;
@@ -134,6 +164,7 @@ int lwip_bridge_accept(int sock, struct lwip_bridge_addr *peer, struct lwip_brid
         errno = err;
         return -1;
     }
+    keepalive_on(fd);
     return new_sock;
 }
 

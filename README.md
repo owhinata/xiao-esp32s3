@@ -125,7 +125,10 @@ Available commands:
 WPA2-PSK access point (the passphrase is not stored yet), `ifconfig` shows
 the address DHCP gave, and `telnet <address>` from a PC on that network opens
 the same shell with the same prompt.  One Telnet client at a time: a second
-one is closed at once.  Telnet has no authentication.  The UART
+one is closed at once, and a client that vanishes without closing is dropped
+after at most 90 s by TCP keepalive.  When the access point goes away the
+address is kept for up to 120 s and the station keeps trying to return, so
+a session gets through a loss of up to a minute.  Telnet has no authentication.  The UART
 and USB console keeps working beside it, and each console gets the output of
 its own commands.
 
