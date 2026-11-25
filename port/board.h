@@ -39,7 +39,10 @@ void     board_delay_us(uint32_t us);
 #define BOARD_DEVICE_ID_SIZE    6
 void     board_device_id(uint8_t id[BOARD_DEVICE_ID_SIZE]);
 
-/* Restart, into this firmware or into the ROM's download mode (esptool). */
+/*
+ * Restart, into this firmware or into the ROM's download mode (esptool),
+ * once what is queued for the UART is on the line (at most about 0.4 s).
+ */
 void     board_restart(void) __attribute__((noreturn));
 void     board_restart_to_download(void) __attribute__((noreturn));
 
@@ -47,11 +50,15 @@ void     board_restart_to_download(void) __attribute__((noreturn));
  * Console on two transports at once: the built-in USB Serial/JTAG controller
  * (the USB-C connector) and UART0 on D6 (TX, GPIO43) / D7 (RX, GPIO44) at
  * CONFIG_ESP_CONSOLE_UART_BAUDRATE, 8N1.  Writes go to both, reads take what
- * arrived on either.  Writing and reading are polled and usable with
- * interrupts disabled and from fault handlers.  Bytes are passed unchanged
- * (no line-end conversion).
+ * arrived on either.  Usable in any context, including with interrupts
+ * disabled and from fault handlers.  USB is written polled.  The UART is
+ * written through a ring that its transmit interrupt empties when the caller
+ * is a thread with interrupts enabled (such a write returns once the bytes
+ * are in the ring, waiting only while it is full); elsewhere the ring is
+ * emptied and the bytes written polled, in order.  Reading is polled.  Bytes
+ * are passed unchanged (no line-end conversion).
  */
-void     console_init(void);    /* sets up UART0; also routes esp_rom_printf() here */
+void     console_init(void);    /* sets up UART0 and its interrupt; also routes esp_rom_printf() here */
 void     console_write(const char *buf, uint32_t len);
 void     console_puts(const char *s);
 int      console_read_nonblock(char *buf, uint32_t len);

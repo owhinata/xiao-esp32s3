@@ -18,7 +18,7 @@ from flash at 240 MHz, with an interactive shell on the USB console.  See
 | Xtensa layer | esp-hal-3rdparty `components/xtensa` (vectors, interrupt dispatch, context switch primitives) |
 | HAL | esp-hal-3rdparty `sync/master.c` at `130cda98` (ESP-IDF master of 2026-11-15, v6.3 development) |
 | Toolchain | `xtensa-esp-elf` 16.1.0_20260609 (the one ESP-IDF names at that commit), fetched on first configure |
-| Console | USB Serial/JTAG on the USB-C connector and UART0 on D6/D7 (115200 8N1), together; polled transmit, interrupt-driven receive |
+| Console | USB Serial/JTAG on the USB-C connector and UART0 on D6/D7 (115200 8N1), together; receive by interrupt on both, UART transmit by interrupt through a 4 KiB ring, USB transmit polled |
 | Shell | The shell of [rp2040-connect](https://github.com/owhinata/rp2040-connect), copied into `shell/common/` |
 | Tick | 1000 Hz from CCOMPARE0 (CPU interrupt 6, level 1) |
 | Uptime clock | SYSTIMER counter 0 (16 MHz, from the crystal) |
@@ -108,8 +108,10 @@ Available commands:
 
 The orange LED toggles every 0.5 s.  The banner is printed at boot; a terminal
 opened later gets a prompt on Enter.  Output goes to both transports and input
-is taken from either.  Every write also goes out on the UART at its line rate,
-so long outputs take that long on USB too.
+is taken from either.  UART output is queued and leaves at 115200 in the
+background; only an output longer than the 4 KiB queue makes its writer wait.
+Outside threads (start-up, interrupt handlers, the fault report) the UART is
+written directly, after what is still queued.
 
 `bootsel` keeps its name from rp2040-connect; on this board it restarts into
 the ROM download mode, where esptool can connect.  A reset from esptool or the
@@ -281,7 +283,7 @@ the commands only the board can answer (`version`, `free`, `ps`).
 |---|---|
 | `startup.c` | Application start-up after the bootloader |
 | `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: a `freertos/FreeRTOS.h` that provides critical sections only, and small stand-in headers for `esp_sleep` and `esp_mspi` |
-| `board.c` | LED, clock readback, uptime, console on USB Serial/JTAG and UART0 (with their receive interrupts), device ID, restart |
+| `board.c` | LED, clock readback, uptime, console on USB Serial/JTAG and UART0 (receive interrupts, UART transmit interrupt and queue), device ID, restart |
 | `syscalls.c` | newlib fd 0-2 on the console; once the shell runs, stdout and stderr go through the shell's console layer |
 | `panic.c` | `panicHandler` / `xt_unhandled_exception`: register dump |
 | `include/sdkconfig.h` | The `CONFIG_` symbols the compiled sources need, shared by the bootloader and the application |

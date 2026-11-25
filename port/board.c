@@ -5,6 +5,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+#include "tx_api.h"
+#include "tx_thread.h"
 
 #include "sdkconfig.h"
 #include "esp_cpu.h"
@@ -25,6 +29,9 @@
 #include "hal/uart_hal.h"
 #include "hal/usb_serial_jtag_ll.h"
 #include "xtensa_api.h"
+#include "xtensa/config/core.h"
+#include "xtensa/corebits.h"
+#include "xtensa/xtruntime.h"
 #include "board.h"
 
 /* ---- LED ----------------------------------------------------------------- */
@@ -110,8 +117,16 @@ void board_device_id(uint8_t id[BOARD_DEVICE_ID_SIZE])
     id[5] = (uint8_t) mac0;
 }
 
+static void uart_tx_flush(void);
+
+/*
+ * The UART's transmit ring is emptied first, so that the last lines (the
+ * shell's "Rebooting", or the download-mode notice) are on the line before
+ * the reset; uart_tx_flush() says how long that can take.
+ */
 void board_restart(void)
 {
+    uart_tx_flush();
     esp_rom_software_reset_system();
     for (;;) {
     }
@@ -142,13 +157,14 @@ void board_restart_to_download(void)
  */
 
 /*
- * How long to wait for room in a TX FIFO before concluding that it does not
- * drain.  Once that happens output to that transport is dropped without
- * waiting until the FIFO has room again, so a stalled transport costs one
- * timeout, not one per character.  On USB this is a host that does not read;
- * a UART sends at its baud rate whether anyone listens or not (128 bytes, a
- * full FIFO, take 11 ms at 115200 baud), so there it only guards against a
- * transmitter that does not run.
+ * How long to wait for the transmit path of a transport to make progress
+ * (room in its TX FIFO, or for the UART room in its ring) before concluding
+ * that it does not drain.  Once that happens output to that transport is
+ * dropped without waiting until there is room again, so a stalled transport
+ * costs one timeout, not one per character.  On USB this is a host that does
+ * not read; a UART sends at its baud rate whether anyone listens or not (128
+ * bytes, a full FIFO, take 11 ms at 115200 baud), so there it only guards
+ * against a transmitter that does not run.
  */
 #define CONSOLE_TX_TIMEOUT_MS   50u
 
@@ -250,21 +266,293 @@ static int uart_wait_writable(void)
     return 1;
 }
 
-static void uart_write(const char *buf, uint32_t len)
+/*
+ * Transmission.  From a thread, console_write() copies the bytes into a ring
+ * and returns; the UART's "TX FIFO below the empty threshold" interrupt moves
+ * them from the ring into the 128-byte FIFO.  This is how ESP-IDF's UART
+ * driver serves its TX ring buffer (uart_rx_intr_handler_default() and
+ * uart_enable_tx_intr() in upper_hal_uart/src/uart.c): the handler disables
+ * and clears the interrupt, fills the FIFO, and clears and enables it again
+ * while bytes are left; a writer clears and enables it after adding bytes.
+ * The status follows the FIFO level: cleared while the FIFO is below the
+ * threshold, it is raised again at once.
+ *
+ * Where the interrupt cannot serve the ring (before the kernel runs, in
+ * interrupt handlers, with interrupts masked, in the fault handlers), the
+ * writer first moves what is still in the ring into the FIFO and then its own
+ * bytes, polling for room.  Either way the bytes reach the line in the order
+ * in which they were written.
+ *
+ * The ring holds 4 KiB: as much as the RAM log (LOG_RAM_SIZE), whose dump is
+ * the longest output of the shell; help and ps are well below that.  Such an
+ * output is handed over at once and leaves in the background (0.36 s at
+ * 115200 baud).  A write that finds the ring full sleeps on a semaphore that
+ * the interrupt gives after each FIFO fill (about every 10 ms while the UART
+ * transmits), so nothing is cut off while the line runs, whether or not
+ * anyone listens.  When no room has appeared for CONSOLE_TX_TIMEOUT_MS the
+ * UART counts as stalled, as when its FIFO does not drain, and the rest is
+ * dropped.
+ *
+ * Lock: the ring indices and the UART's interrupt enable register are
+ * changed only with interrupts masked up to XCHAL_EXCM_LEVEL (what ThreadX's
+ * TX_DISABLE masks: every interrupt with a C handler), raised and never
+ * lowered, since the fault handlers run at level 15.  A locked section moves
+ * at most UART_TX_CHUNK bytes (a copy into the ring, or as many writes to the
+ * FIFO register), so the tick and the receive interrupts are held off for no
+ * more than that.  The head advances only once the bytes are in the ring and
+ * the tail only once they are in the FIFO, so a fault handler that cuts into
+ * any of this finds only bytes that are complete between the two; a fault
+ * inside the handler's FIFO fill itself would at worst send part of one
+ * chunk twice.
+ */
+#define UART_TX_RING_SIZE           4096u
+#define UART_TX_CHUNK               32u
+/*
+ * ESP-IDF's default (UART_EMPTY_THRESH_DEFAULT): the interrupt comes with 10
+ * bytes, 0.87 ms of line time, still in the FIFO, so the line does not pause
+ * for the interrupt latency, and one interrupt moves about 118 bytes.
+ */
+#define UART_TX_EMPTY_THRESHOLD     10u
+
+_Static_assert((UART_TX_RING_SIZE & (UART_TX_RING_SIZE - 1u)) == 0u,
+               "the ring indices wrap with a mask");
+
+static uint8_t uart_tx_ring[UART_TX_RING_SIZE];
+static volatile uint32_t uart_tx_head;      /* bytes ever added (wraps) */
+static volatile uint32_t uart_tx_tail;      /* bytes ever moved into the FIFO */
+static uint8_t uart_tx_irq_installed;       /* console_init() has set up the handler */
+
+/*
+ * Threads waiting for room: the interrupt gives the semaphore once for each
+ * at the end of every run.  A give for a waiter that has timed out lets a
+ * later one look again early, which is harmless.  The semaphore is created by
+ * the first thread that writes (state 0 -> 1 -> 2); until then writers poll.
+ */
+static TX_SEMAPHORE uart_tx_room;
+static volatile uint8_t uart_tx_room_state;
+static uint32_t uart_tx_waiters;
+
+static inline uint32_t min_u32(uint32_t a, uint32_t b)
 {
-    while (len > 0) {
-        uint32_t n;
+    return a < b ? a : b;
+}
+
+static inline uint32_t uart_tx_lock(void)
+{
+    return XTOS_SET_MIN_INTLEVEL(XCHAL_EXCM_LEVEL);
+}
+
+static inline void uart_tx_unlock(uint32_t ps)
+{
+    XTOS_RESTORE_INTLEVEL(ps);
+}
+
+/* The interrupt enable register is shared by transmit and receive. */
+static void uart_intr_enable(uint32_t mask, bool enable)
+{
+    uint32_t ps = uart_tx_lock();
+
+    if (enable) {
+        uart_ll_ena_intr_mask(console_uart.dev, mask);
+    } else {
+        uart_ll_disable_intr_mask(console_uart.dev, mask);
+    }
+    uart_tx_unlock(ps);
+}
+
+/* Moves up to UART_TX_CHUNK bytes, at most room, from the ring into the FIFO.  Locked. */
+static uint32_t uart_tx_ring_to_fifo(uint32_t room)
+{
+    uint32_t tail = uart_tx_tail;
+    uint32_t off = tail & (UART_TX_RING_SIZE - 1u);
+    uint32_t n = min_u32(min_u32(uart_tx_head - tail, room),
+                         min_u32(UART_TX_CHUNK, UART_TX_RING_SIZE - off));
+
+    uart_ll_write_txfifo(console_uart.dev, &uart_tx_ring[off], n);
+    uart_tx_tail = tail + n;
+    return n;
+}
+
+/*
+ * Whether the caller may leave its bytes to the interrupt: a thread, with
+ * interrupts enabled, once the kernel runs.  PS.INTLEVEL is nonzero in
+ * interrupt handlers (the dispatcher runs them at their level), under an
+ * interrupt lockout, in _start and tx_application_define() and in the fault
+ * handlers; PS.EXCM is set in exception handlers.
+ */
+static bool uart_tx_may_queue(void)
+{
+    uint32_t ps;
+
+    __asm__ volatile ("rsr.ps %0" : "=a" (ps));
+    return (ps & (PS_INTLEVEL_MASK | PS_EXCM_MASK)) == 0u
+           && TX_THREAD_GET_SYSTEM_STATE() == 0u
+           && _tx_thread_current_ptr != TX_NULL
+           && uart_tx_irq_installed;
+}
+
+/*
+ * The semaphore exists, or this thread creates it now.  Not under the lock:
+ * creating a ThreadX object may switch threads.
+ */
+static bool uart_tx_room_ready(void)
+{
+    uint32_t ps;
+    bool claimed;
+
+    if (uart_tx_room_state == 2u) {
+        return true;
+    }
+    ps = uart_tx_lock();
+    claimed = uart_tx_room_state == 0u;
+    if (claimed) {
+        uart_tx_room_state = 1u;
+    }
+    uart_tx_unlock(ps);
+    if (!claimed) {
+        return false;
+    }
+    (void) tx_semaphore_create(&uart_tx_room, "console uart tx", 0);
+    uart_tx_room_state = 2u;
+    return true;
+}
+
+/*
+ * Polled, in any context: what is in the ring, then buf.  Each step moves
+ * what fits into the FIFO under the lock, so that a handler cutting into this
+ * writer, or the interrupt where it can still run (uart_tx_flush() from a
+ * thread), takes bytes in order.  The wait for room is not locked.
+ */
+static void uart_write_polled(const char *buf, uint32_t len)
+{
+    uart_dev_t *hw = console_uart.dev;
+
+    while (len > 0 || uart_tx_head != uart_tx_tail) {
+        uint32_t ps;
+        uint32_t room;
 
         if (!uart_wait_writable()) {
             return;
         }
-        n = uart_ll_get_txfifo_len(console_uart.dev);
-        if (n > len) {
-            n = len;
+        ps = uart_tx_lock();
+        room = uart_ll_get_txfifo_len(hw);
+        if (uart_tx_head != uart_tx_tail) {
+            (void) uart_tx_ring_to_fifo(room);
+        } else {
+            uint32_t n = min_u32(min_u32(room, len), UART_TX_CHUNK);
+
+            uart_ll_write_txfifo(hw, (const uint8_t *) buf, n);
+            buf += n;
+            len -= n;
         }
-        uart_ll_write_txfifo(console_uart.dev, (const uint8_t *) buf, n);
-        buf += n;
-        len -= n;
+        uart_tx_unlock(ps);
+    }
+}
+
+/* From a thread: into the ring, waiting for room when it is full. */
+static void uart_write_queued(const char *buf, uint32_t len)
+{
+    uart_dev_t *hw = console_uart.dev;
+    const ULONG wait = (ULONG) (CONSOLE_TX_TIMEOUT_MS * TX_TIMER_TICKS_PER_SECOND / 1000u);
+
+    while (len > 0) {
+        uint32_t ps = uart_tx_lock();
+        uint32_t head = uart_tx_head;
+        uint32_t off = head & (UART_TX_RING_SIZE - 1u);
+        uint32_t n = min_u32(min_u32(len, UART_TX_RING_SIZE - (head - uart_tx_tail)),
+                             UART_TX_CHUNK);
+
+        if (n > 0) {
+            uint32_t first = min_u32(n, UART_TX_RING_SIZE - off);
+
+            memcpy(&uart_tx_ring[off], buf, first);
+            memcpy(&uart_tx_ring[0], buf + first, n - first);
+            uart_tx_head = head + n;
+            if ((uart_ll_get_intr_ena_status(hw) & UART_INTR_TXFIFO_EMPTY) == 0u) {
+                uart_ll_clr_intsts_mask(hw, UART_INTR_TXFIFO_EMPTY);
+                uart_ll_ena_intr_mask(hw, UART_INTR_TXFIFO_EMPTY);
+            }
+            uart_tx_stalled = 0;
+            uart_tx_unlock(ps);
+            buf += n;
+            len -= n;
+            continue;
+        }
+        if (uart_tx_stalled) {
+            uart_tx_unlock(ps);
+            return;
+        }
+        uart_tx_waiters++;
+        uart_tx_unlock(ps);
+        if (tx_semaphore_get(&uart_tx_room, wait) != TX_SUCCESS) {
+            uart_tx_stalled = 1;
+            return;
+        }
+    }
+}
+
+static void uart_write(const char *buf, uint32_t len)
+{
+    if (uart_tx_may_queue() && uart_tx_room_ready()) {
+        uart_write_queued(buf, len);
+    } else {
+        uart_write_polled(buf, len);
+    }
+}
+
+/*
+ * TX FIFO below the threshold: refill it from the ring, a chunk per locked
+ * section, until the FIFO is full or the ring is empty.  The interrupt stays
+ * enabled only while bytes are left, decided under the lock, so that a byte
+ * added by a writer is never left without it.  The waiting writers are woken
+ * every time, also when this run moved nothing: a polled writer (a handler,
+ * say) may have made the room since.  A writer that still finds the ring full
+ * waits again; the interrupt is then enabled, since the ring is not empty.
+ */
+static void uart_tx_isr(void)
+{
+    uart_dev_t *hw = console_uart.dev;
+    uint32_t waiters = 0;
+    uint32_t n;
+
+    uart_intr_enable(UART_INTR_TXFIFO_EMPTY, false);
+    uart_ll_clr_intsts_mask(hw, UART_INTR_TXFIFO_EMPTY);
+    do {
+        uint32_t ps = uart_tx_lock();
+
+        n = uart_tx_ring_to_fifo(uart_ll_get_txfifo_len(hw));
+        if (n == 0) {
+            if (uart_tx_head != uart_tx_tail) {
+                uart_ll_clr_intsts_mask(hw, UART_INTR_TXFIFO_EMPTY);
+                uart_ll_ena_intr_mask(hw, UART_INTR_TXFIFO_EMPTY);
+            }
+            waiters = uart_tx_waiters;
+            uart_tx_waiters = 0;
+        }
+        uart_tx_unlock(ps);
+    } while (n > 0);
+
+    for (; waiters > 0; waiters--) {
+        (void) tx_semaphore_put(&uart_tx_room);
+    }
+}
+
+/*
+ * Before a reset: the ring and the FIFO onto the line, polled, in any
+ * context.  At most a full ring and FIFO, 4224 bytes or 0.37 s at 115200
+ * baud; CONSOLE_TX_TIMEOUT_MS if the transmitter does not run.
+ */
+static void uart_tx_flush(void)
+{
+    uint32_t limit = esp_rom_get_cpu_ticks_per_us() * 1000u * CONSOLE_TX_TIMEOUT_MS;
+    uint32_t start;
+
+    uart_write_polled(NULL, 0);
+    start = esp_cpu_get_cycle_count();
+    while (!uart_tx_stalled && !uart_ll_is_tx_idle(console_uart.dev)) {
+        if ((uint32_t) (esp_cpu_get_cycle_count() - start) > limit) {
+            return;
+        }
     }
 }
 
@@ -304,9 +592,13 @@ static void uart_init(void)
     gpio_ll_pullup_en(&GPIO, U0RXD_GPIO_NUM);
     gpio_ll_func_sel(&GPIO, U0RXD_GPIO_NUM, U0RXD_MUX_FUNC);
 
-    /* No interrupts until console_rx_notify(); drop what arrived during the boot. */
+    /*
+     * No interrupts until the first queued write (transmit) and
+     * console_rx_notify() (receive); drop what arrived during the boot.
+     */
     uart_ll_disable_intr_mask(hw, UART_LL_INTR_MASK);
     uart_ll_clr_intsts_mask(hw, UART_LL_INTR_MASK);
+    uart_hal_set_txfifo_empty_thr(&console_uart, UART_TX_EMPTY_THRESHOLD);
     uart_hal_set_rxfifo_full_thr(&console_uart, 1);
     uart_ll_set_rx_tout(hw, 0);
     uart_ll_rxfifo_rst(hw);
@@ -345,13 +637,6 @@ static void console_rom_putc(char c)
     }
 }
 
-void console_init(void)
-{
-    uart_init();
-    esp_rom_install_channel_putc(1, console_rom_putc);
-    esp_rom_install_channel_putc(2, NULL);
-}
-
 static void (*console_rx_callback)(void);
 
 /*
@@ -374,7 +659,7 @@ static uint32_t uart_read(char *buf, uint32_t len)
         uart_rx_seen = 1;
     }
     if (console_rx_callback != NULL) {
-        uart_ll_ena_intr_mask(hw, UART_INTR_RXFIFO_FULL);
+        uart_intr_enable(UART_INTR_RXFIFO_FULL, true);
     }
     return n;
 }
@@ -406,19 +691,21 @@ int console_host_present(void)
 }
 
 /*
- * Receive interrupts.  The handlers run in ThreadX interrupt context (the
- * Xtensa layer brackets them with _tx_thread_context_save/restore).
+ * Interrupts.  The handlers run in ThreadX interrupt context (the Xtensa
+ * layer brackets them with _tx_thread_context_save/restore).
  *
- * USB: the flag means "a packet arrived", not "the FIFO holds data", so it is
- * cleared before the callback: whoever is woken empties the FIFO, and a
- * packet that arrives meanwhile raises the flag again.
+ * USB, receive: the flag means "a packet arrived", not "the FIFO holds data",
+ * so it is cleared before the callback: whoever is woken empties the FIFO,
+ * and a packet that arrives meanwhile raises the flag again.
  *
- * UART: "RX FIFO holds at least 1 byte" (the full threshold) stays raised
+ * UART: one handler for both directions.  Transmit: uart_tx_isr().
+ * Receive: "RX FIFO holds at least 1 byte" (the full threshold) stays raised
  * until the FIFO has been read, which the callback only arranges for, so the
- * handler masks it; uart_read() unmasks it.
+ * handler masks it; uart_read() unmasks it.  Only enabled bits show in the
+ * status, and receive is enabled only once there is a callback.
  */
 #define CONSOLE_RX_CPU_INTR         12  /* level 1, level-triggered, otherwise unused */
-#define CONSOLE_UART_RX_CPU_INTR    13  /* level 1, level-triggered, otherwise unused */
+#define CONSOLE_UART_CPU_INTR       13  /* level 1, level-triggered, otherwise unused */
 
 static void console_rx_isr(void *arg)
 {
@@ -427,12 +714,19 @@ static void console_rx_isr(void *arg)
     console_rx_callback();
 }
 
-static void console_uart_rx_isr(void *arg)
+static void console_uart_isr(void *arg)
 {
+    uint32_t status = uart_ll_get_intsts_mask(console_uart.dev);
+
     (void) arg;
-    uart_ll_disable_intr_mask(console_uart.dev, UART_INTR_RXFIFO_FULL);
-    uart_ll_clr_intsts_mask(console_uart.dev, UART_INTR_RXFIFO_FULL);
-    console_rx_callback();
+    if ((status & UART_INTR_TXFIFO_EMPTY) != 0u) {
+        uart_tx_isr();
+    }
+    if ((status & UART_INTR_RXFIFO_FULL) != 0u) {
+        uart_intr_enable(UART_INTR_RXFIFO_FULL, false);
+        uart_ll_clr_intsts_mask(console_uart.dev, UART_INTR_RXFIFO_FULL);
+        console_rx_callback();
+    }
 }
 
 void console_rx_notify(void (*callback)(void))
@@ -448,9 +742,26 @@ void console_rx_notify(void (*callback)(void))
     usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
     xt_ints_on(1u << CONSOLE_RX_CPU_INTR);
 
-    esp_rom_route_intr_matrix(0, ETS_UART0_INTR_SOURCE, CONSOLE_UART_RX_CPU_INTR);
-    xt_set_interrupt_handler(CONSOLE_UART_RX_CPU_INTR, console_uart_rx_isr, NULL);
     uart_ll_clr_intsts_mask(console_uart.dev, UART_INTR_RXFIFO_FULL);
-    uart_ll_ena_intr_mask(console_uart.dev, UART_INTR_RXFIFO_FULL);
-    xt_ints_on(1u << CONSOLE_UART_RX_CPU_INTR);
+    uart_intr_enable(UART_INTR_RXFIFO_FULL, true);
+}
+
+/*
+ * Runs in _start, with interrupts masked until the first thread runs.  The
+ * UART's handler is installed here rather than in console_rx_notify() so that
+ * transmission is interrupt-driven from the first thread on, shell or not;
+ * the UART raises nothing before a queued write or console_rx_notify()
+ * enables it.
+ */
+void console_init(void)
+{
+    uart_init();
+
+    esp_rom_route_intr_matrix(0, ETS_UART0_INTR_SOURCE, CONSOLE_UART_CPU_INTR);
+    xt_set_interrupt_handler(CONSOLE_UART_CPU_INTR, console_uart_isr, NULL);
+    xt_ints_on(1u << CONSOLE_UART_CPU_INTR);
+    uart_tx_irq_installed = 1;
+
+    esp_rom_install_channel_putc(1, console_rom_putc);
+    esp_rom_install_channel_putc(2, NULL);
 }

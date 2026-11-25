@@ -56,7 +56,9 @@ static inline int shell_serial_os_read(char *buf, size_t len)
 
 /*
  * console_write() gives up on USB after 50 ms when the host stops reading;
- * the UART takes it at the baud rate, listener or not.
+ * for the UART it queues the bytes for its transmit interrupt, which sends
+ * them at the baud rate, listener or not, and waits only while that queue
+ * (4 KiB) is full.
  */
 static inline void shell_serial_os_write(const char *buf, size_t len)
 {
