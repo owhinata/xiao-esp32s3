@@ -42,8 +42,9 @@ notice.
   Copyright (c) The Regents of the University of California and
   contributors; its text is in those files.
 
-The sources that the build fetches into lib/ (Eclipse ThreadX and Espressif's
-HAL components) are not part of this repository and carry their own licences.
+The sources that the build fetches into lib/ (Eclipse ThreadX, Espressif's
+HAL components and a few ESP-IDF components) are not part of this repository
+and carry their own licences.
 
 
                                  Apache License

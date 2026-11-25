@@ -4,7 +4,8 @@ Bare-metal [Eclipse ThreadX](https://github.com/eclipse-threadx/threadx) on the
 XIAO ESP32S3, built on
 [esp-hal-3rdparty](https://github.com/espressif/esp-hal-3rdparty) (an
 unmodified mirror of ESP-IDF's components, used here without ESP-IDF's build
-system, FreeRTOS or the second-stage bootloader).
+system or FreeRTOS).  The board boots through ESP-IDF's own second-stage
+bootloader, built from the same sources.
 
 Status: **runs on a XIAO ESP32S3** (ESP32-S3R8, chip revision v0.2), executing
 from flash at 240 MHz, with an interactive shell on the USB console.  See
@@ -24,7 +25,7 @@ from flash at 240 MHz, with an interactive shell on the USB console.  See
 | Run times | ThreadX execution profile kit on the CPU cycle counter |
 | LED | GPIO21, active low |
 | CPU clock | 240 MHz from the PLL (`BOARD_CPU_FREQ_MHZ`) |
-| Image | Booted directly by the ROM; code and constants execute from flash |
+| Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, the firmware as the factory application at 0x10000 |
 
 ## Build
 
@@ -35,20 +36,26 @@ cmake --build build
 ```
 
 The first configure downloads the compiler (~90 MB) into `tools/` and the
-two upstream source trees (ThreadX and esp-hal-3rdparty, ~370 MB) into
-`lib/`, each at the commit pinned in `CMakeLists.txt`.  Neither directory is
-tracked by this repository.
-Outputs are `build/xiao_esp32s3_threadx.elf`, `.bin` (ESP image) and `.map`.
+upstream sources into `lib/`, each at the commit pinned in `CMakeLists.txt`:
+ThreadX and esp-hal-3rdparty (~370 MB), and three directories of ESP-IDF
+itself that the bootloader needs and the mirror does not carry (~4 MB).
+Neither directory is tracked by this repository.
+
+Outputs in `build/`: `bootloader.bin`, `partition-table.bin` and
+`xiao_esp32s3_threadx.bin` (the application), with their `.elf` and `.map`.
 
 ## Run
 
 ```sh
-cmake --build build --target flash    # write the image to flash offset 0
+cmake --build build --target flash        # bootloader, partition table and application
+cmake --build build --target app-flash    # the application only (0x10000)
 ```
 
-`flash` **replaces the bootloader that is at offset 0** (whatever firmware was
-on the board stops booting until it is written back; the ROM download mode
+`flash` **replaces whatever is at the start of the flash** (the firmware that
+was on the board stops booting until it is written back; the ROM download mode
 itself cannot be erased, so the board is always recoverable with esptool).
+`app-flash` is enough once the bootloader and the partition table are on the
+board.
 
 esptool resets the board into download mode by itself through USB Serial/JTAG,
 so the buttons are only needed if the running firmware has taken the USB pins
@@ -103,57 +110,62 @@ STATE: X running, R ready, B blocked, S suspended
 cpu_active: 0.2% in the 2.915 s since the previous "ps"
 ```
 
+The `(interrupts)` figure is the time spent inside interrupt handlers.  Getting
+into and out of an interrupt (saving and restoring the context) is not part of
+it; that time is counted with the thread, or the idle time, that was
+interrupted or resumed.
+
 `date` counts from 1970-01-01 at boot: nothing sets the clock yet.
 `sys_clock_settime()` is there for a future time source.  rp2040-connect's
 `fault` is not built, because its record is laid out for a Cortex-M.
 
 ## How it boots
 
-There is no second-stage bootloader and no ESP-IDF start-up code.
+The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
 
-1. The image is built with `esptool elf2image --ram-only-header`.  The mask ROM
-   sees only its RAM segments, loads them into internal SRAM and jumps to
-   `_start` (`port/startup.c`).  `script/add_boot_digest.py` adds the SHA-256
-   the ROM checks at that point.
-2. `_start` masks interrupts, points VECBASE at the vectors, clears `.bss` and
-   turns off the watchdogs the ROM armed.
-3. Clocks: ESP-IDF's own `bootloader_clock_configure()` turns the PLL on and
-   runs the CPU from it at 80 MHz.
-4. `flash_map_image()` (`port/flash_map.c`) finds the two flash segments that
-   sit behind the RAM segments in the same image, sets up the cache and MMU
-   through the HAL and the flash pins and timing through `bootloader_support`,
-   and maps them: code at 0x42000000, constants at 0x3C000000.
-5. CPU to 240 MHz, console, `main()`.
+1. The mask ROM loads the second-stage bootloader from flash offset 0.
+2. The bootloader (`bootloader/CMakeLists.txt`; 75 unmodified ESP-IDF sources)
+   sets up the clocks (PLL, CPU at 80 MHz), the flash and the cache, reads the
+   partition table (`partitions.csv`: nvs, phy_init, a 7 MB factory
+   application), verifies the application image, loads its RAM segments, maps
+   its flash segments and jumps to `_start`.  Its log goes to the USB console.
+3. `_start` (`port/startup.c`) does what ESP-IDF's application start-up does
+   at this point, in the same order: vectors and CPU state, `.bss`, the cache
+   geometry and the boundary between code and data in the shared MMU table,
+   CPU to 240 MHz, the RTC watchdog the bootloader armed for the application
+   off, then the console and `main()`.
 
-Everything up to step 4 has to run from RAM; the linker script
-(`ldscript/xiao_esp32s3.ld`) lists what is kept there and why, and describes
-the memory layout.  Two facts that are easy to get wrong and cost a debugging
-session here:
+The memory layout and the list of code that has to run from RAM are in
+`ldscript/xiao_esp32s3.ld`, with the reasons.  Points that are easy to get
+wrong:
 
 - The instruction cache uses the first 16 KiB of SRAM0 as its own memory.
-  Anything linked there works until the first instruction is fetched from
-  flash, and is then overwritten.
-- ESP-IDF's second-stage bootloader only reads flash as data.  Executing from it also needs
-  the cache geometry set and the ROM told where code ends and data begins in
-  the shared MMU table (`rom_config_instruction_cache_mode`,
-  `Cache_Set_IDROM_MMU_Size`), which ESP-IDF does in its application start-up.
+  Nothing may be linked there.
+- The bootloader runs from the top of internal SRAM while it loads the
+  application and refuses an image whose loaded segments reach into it, so
+  everything loaded ends below 0x3FCDB700.  The memory above is free again once
+  the application runs and is part of the heap.
+- The bootloader maps the flash but leaves the cache geometry and
+  `Cache_Set_IDROM_MMU_Size` to the application.  Without them the first
+  instruction fetched from flash faults.
+- The RAM log (`.dram0.noinit`) has to stay clear of what the bootloader and
+  the ROM's download mode write; the linker script asserts it.
 
-What is still missing compared with an ESP-IDF start-up:
+What ESP-IDF's application start-up does and this firmware does not:
 
-- `rtc_init()` is not called.  It trims the internal voltage regulators from
-  eFuse calibration values; without it they run at the defaults compiled into
-  `rtc_init.c`.  Needed before the radio is used, and the conservative choice
-  if 240 MHz ever proves unstable on a board.
+- `rtc_init()`, which trims the internal voltage regulators from eFuse
+  calibration values.  Needed before the radio is used.
 - PSRAM (8 MB on this board) is not initialized.
-- Only core 0 runs.  ThreadX (non-SMP) is single-core; the layer is built with
-  `portNUM_PROCESSORS=1`.
+- Only core 0 runs.  ThreadX (non-SMP) is single-core; core 1 is left as the
+  ROM leaves it.
 
 ## Layout
 
 ```
+bootloader/     build of ESP-IDF's second-stage bootloader
 cmake/          toolchain file (downloads the compiler), upstream fetch
+partitions.csv  partition table
 ldscript/       linker script
-script/         build helpers
 shell/common/   shell engine and commands, copied from rp2040-connect
 shell/port/     this board's part of the shell
 lib/            upstream sources, fetched by CMake; read-only, not tracked
@@ -177,15 +189,22 @@ as it is, and to write only what connects it to ThreadX and to this board.
 | `xtensa/esp32s3/libxt_hal.a` | Xtensa HAL (window spill, extra-state save) |
 | `esp_system/port/arch/xtensa/panic_handler_asm.S` | `_xt_panic` |
 | `esp_hal_wdt/wdt_hal_iram.c` | Watchdog control |
-| `esp_hal_cache/cache_hal.c`, `mmu_hal.c` | Cache and MMU for the flash mapping |
-| `bootloader_support/src/bootloader_clock_init.c` | Clock set-up before the flash is mapped |
-| `bootloader_support/bootloader_flash/src/bootloader_flash_config_esp32s3.c` | Flash pin drive, dummy-phase levels, chip-select timing |
+| `bootloader/subproject/main/bootloader_start.c`, `bootloader_support/`, and what they need of `efuse`, `esp_rom`, `esp_hw_support`, `log`, `hal` | The second-stage bootloader, with ESP-IDF's own linker scripts |
+| `esp_app_format/esp_app_desc.c` | The application descriptor the bootloader expects at the start of the image |
+| `partition_table/gen_esp32part.py`, `check_sizes.py` | Partition table generation and size checks |
 | `esp_hal_systimer/systimer_hal.c`, `esp_hw_support/port/esp32s3/systimer.c` | Microsecond uptime clock |
-| `esp_hw_support/port/esp32s3/rtc_clk.c`, `rtc_clk_init.c`, `esp_hw_support/regi2c_ctrl.c`, `esp_hal_regi2c/esp32s3/rom.regi2c.ld` | PLL and CPU clock |
+| `esp_hw_support/port/esp32s3/rtc_clk.c`, `esp_hw_support/regi2c_ctrl.c`, `esp_hal_regi2c/esp32s3/rom.regi2c.ld` | CPU clock |
 | `esp_rom/patches/esp_rom_cache_esp32s2_esp32s3.c` | Work-arounds for ROM cache bugs |
 | `esp_rom/patches/esp_rom_sys.c` + ROM | `esp_rom_printf`, console channel, ticks-per-us |
 | LL headers of `esp_hal_gpio`, `esp_hal_usb`, `hal` | GPIO, USB Serial/JTAG, eFuse |
 | `soc/`, `esp_rom/` linker scripts | Peripheral and ROM symbol addresses |
+
+**ESP-IDF, unmodified**
+
+The mirror lacks three directories the bootloader cannot be built without:
+`esp_image_verify` (the image loader), `esp_bootloader_format` and
+`esp_mspi/include`.  They are fetched from ESP-IDF itself, at the commit the
+mirror was generated from, into `lib/esp-idf`.
 
 Espressif's Xtensa layer is the RTOS-neutral half of what ESP-IDF's FreeRTOS
 port is built on.  It calls the RTOS through the names in `xtensa_rtos.h`,
@@ -234,13 +253,12 @@ the commands only the board can answer (`version`, `free`, `ps`).
 
 | File | Role |
 |---|---|
-| `startup.c` | Reset entry, clocks |
-| `flash_map.c` | Finds the flash segments in the image and maps them.  ESP-IDF's code for this is part of its image loader and cannot be called on its own, so this follows it; the flash pin and timing set-up it needs is called from `bootloader_support` |
-| `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: a `freertos/FreeRTOS.h` that provides critical sections only, small stand-in headers for `esp_sleep` and `esp_mspi`, and documented stubs |
+| `startup.c` | Application start-up after the bootloader |
+| `esp_compat/` | What the Espressif sources expect from parts of ESP-IDF that are not built or not in the mirror: a `freertos/FreeRTOS.h` that provides critical sections only, and small stand-in headers for `esp_sleep` and `esp_mspi` |
 | `board.c` | LED, clock readback, uptime, console (with its receive interrupt), device ID, restart |
 | `syscalls.c` | newlib fd 0-2 on the console; once the shell runs, stdout and stderr go through the shell's console layer |
 | `panic.c` | `panicHandler` / `xt_unhandled_exception`: register dump |
-| `include/sdkconfig.h` | The few `CONFIG_` symbols the HAL headers need |
+| `include/sdkconfig.h` | The `CONFIG_` symbols the compiled sources need, shared by the bootloader and the application |
 
 The C library is usable from threads and from `tx_application_define()`, not
 from interrupt handlers (output written from one bypasses the shell's console
@@ -252,8 +270,12 @@ using a coprocessor in an interrupt handler ends in a panic.
 Everything below has been observed on the board with the current image.  In
 the order a failure would show up:
 
-1. The banner appears after `flash`.  No output at all: the fault is before
-   or in the console, i.e. `_start`, the flash mapping, or USB Serial/JTAG.
+1. After `flash`, the ROM log is followed by the bootloader's
+   (`boot: ESP-IDF ... 2nd stage bootloader`, the partition table, the image
+   segments, `Loaded app from partition at offset 0x10000`) and then the
+   banner.  Nothing after the ROM's `entry` line: the bootloader.  Nothing
+   after `Loaded app`: `_start`.  A reset about 9 s after boot: the RTC
+   watchdog was not turned off.
 2. The banner shows the configured clock (240 MHz).
 3. The prompt appears and `help` lists the commands.  Banner but no prompt:
    the first context switch, the tick interrupt, or the receive interrupt.
@@ -263,7 +285,9 @@ the order a failure would show up:
    `date` advances with `uptime`.
 6. `id` prints the MAC address esptool reports.
 7. `devmem 0` ends in a register dump (the fault path), `reboot` comes back
-   to the banner, `bootsel` lets esptool connect.
+   to the banner, `bootsel` lets esptool connect, `dmesg` still shows the
+   lines of earlier boots after a `reboot`, and `app-flash` alone updates the
+   firmware.
 8. The LED blinks at 1 Hz.
 
 Every unhandled exception, including kernel and double exceptions, prints a

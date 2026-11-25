@@ -15,9 +15,6 @@
 /* CPU clock the start-up code switches to: 80, 160 or 240 (PLL). */
 #define BOARD_CPU_FREQ_MHZ      240
 
-/* Maps code and read-only data from flash; called once by _start, from RAM. */
-void     flash_map_image(void);
-
 /* Orange user LED on GPIO21, lit when the pin is driven low. */
 #define BOARD_LED_GPIO          21
 #define BOARD_LED_ACTIVE_LEVEL  0

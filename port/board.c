@@ -42,9 +42,9 @@ void board_led_set(int on)
 /* ---- CPU clock ----------------------------------------------------------- */
 
 /*
- * This image does not program the clock tree; it runs at whatever the ROM
- * bootloader selected.  Read the selection back rather than assume it, since
- * the ThreadX tick is derived from this number.
+ * The clock tree is set up by the second-stage bootloader and _start
+ * (BOARD_CPU_FREQ_MHZ).  Read the selection back rather than assume it,
+ * since the ThreadX tick is derived from this number.
  */
 uint32_t board_cpu_freq_hz(void)
 {
@@ -114,8 +114,8 @@ void board_restart(void)
 /*
  * The ROM looks at this bit, which a software reset leaves alone, before it
  * looks at the strapping pin, and then waits for esptool on USB Serial/JTAG
- * (or UART0) instead of booting from flash.  A reset from esptool ("--after
- * hard-reset") or the RESET button clears it.
+ * (or UART0) instead of loading the second-stage bootloader from flash.  A
+ * reset from esptool ("--after hard-reset") or the RESET button clears it.
  */
 void board_restart_to_download(void)
 {

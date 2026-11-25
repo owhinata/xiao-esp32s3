@@ -12,8 +12,7 @@
  * With a single core every critical section excludes every other one, so
  * the lock argument carries no state: the interrupt level saved by the
  * outermost "enter" and the nesting depth are kept once, in
- * port/esp_compat/esp_stubs.c (in RAM, like the code that uses them before
- * the flash is mapped).
+ * port/esp_compat/esp_stubs.c.
  */
 #ifndef ESP_COMPAT_FREERTOS_H
 #define ESP_COMPAT_FREERTOS_H

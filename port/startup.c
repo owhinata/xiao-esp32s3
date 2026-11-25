@@ -1,25 +1,51 @@
 /*
- * Reset entry.
+ * Application entry.
  *
- * The ESP32-S3 ROM bootloader loads the RAM segments of the image into SRAM
- * and calls _start on its own stack with the windowed ABI already live.
- * Everything a second-stage bootloader and ESP-IDF's start-up code would have
- * done before the application runs, and that this image depends on, has to
- * happen here: clocks, and mapping the rest of the image from flash.
+ * ESP-IDF's second-stage bootloader (bootloader/) has verified and loaded
+ * the RAM segments of this image, mapped its code and read-only data from
+ * flash through the cache and MMU, and jumped to _start on the stack it was
+ * itself running on (the ROM's start-up stack), with the windowed ABI live
+ * and interrupts off.  Clocks run from the PLL with the CPU at
+ * CONFIG_BOOTLOADER_CPU_CLK_FREQ_MHZ, the flash interface is configured from
+ * the image header, the super watchdog feeds itself, and the RTC watchdog
+ * runs (CONFIG_BOOTLOADER_WDT_ENABLE).
  *
- * This whole file runs from RAM (see the linker script); until
- * flash_map_image() returns, nothing it calls may live in flash.
+ * What is left is what ESP-IDF's application start-up does on the ESP32-S3
+ * after the bootloader (call_start_cpu0() in esp_system/port/cpu_start.c), in
+ * the same order, for the parts this firmware uses:
+ *
+ *   init_cpu()            vectors
+ *   init_bss()            .bss (there is no RTC .bss)
+ *   ext_mem_init()        cache geometry, code/data split of the MMU table
+ *   system_early_init()   final CPU clock (esp_clk_init())
+ *   init_disable_rtc_wdt  RTC watchdog off (esp_system/startup_funcs.c)
+ *
+ * Left out, with the reason:
+ *   - cache_hal_init()/mmu_hal_ctx_init() in ext_mem_init() only set up the
+ *     HALs' state for the flash and MMU drivers, which are not built.
+ *   - sys_rtc_init(): esp_rtc_init() is rtc_init(), not called yet (README);
+ *     its RTC watchdog part applies only without CONFIG_BOOTLOADER_WDT_ENABLE.
+ *   - mspi_init(): flash chip state and timing tuning for the flash driver,
+ *     and the PSRAM, neither of which is used.
+ *   - system_early_init(): the memory region protection the bootloader has
+ *     already set (bootloader_init_mem()); stopping the second core and
+ *     Cache_Set_IDROM_MMU_Info(), which only the PSRAM code reads; the
+ *     peripheral clock gating, interrupt matrix clear and cache error
+ *     interrupt of a full ESP-IDF system.
+ *
+ * This file runs from RAM (see the linker script): it reconfigures the cache
+ * that the code in flash is fetched through.
  */
 #include <stdint.h>
 #include <string.h>
 
-#include "bootloader_clock.h"
 #include "esp_cpu.h"
 #include "esp_rom_sys.h"
+#include "esp32s3/rom/cache.h"
 #include "hal/wdt_hal.h"
+#include "soc/ext_mem_defs.h"
 #include "soc/rtc.h"
 #include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
 #include "xtensa/config/core.h"
 #include "xtensa/corebits.h"
 #include "xtensa/xtruntime.h"
@@ -28,36 +54,69 @@
 
 extern char _vector_table;
 extern char _bss_start, _bss_end;
+extern char _flash_text_start, _flash_text_end;
 extern int  main(void);
 
+/* ROM functions without a declaration in the esp_rom headers (cpu_start.c declares them the same way). */
+extern void rom_config_instruction_cache_mode(uint32_t cfg_cache_size, uint8_t cfg_cache_ways,
+                                              uint8_t cfg_cache_line_size);
+extern void rom_config_data_cache_mode(uint32_t cfg_cache_size, uint8_t cfg_cache_ways,
+                                       uint8_t cfg_cache_line_size);
+
 /*
- * The ROM arms watchdogs before it starts the image and expects the next
- * stage to take them over.  Nothing here feeds them, so switch them off:
- *
- *   - RTC watchdog and timer group 0 watchdog: "flash boot" protection.
- *   - Super watchdog: cannot be disabled, only put in auto-feed mode.
+ * Cache geometry: ESP-IDF's defaults for the ESP32-S3
+ * (CONFIG_ESP32S3_INSTRUCTION_CACHE_SIZE and friends).  The caches live in
+ * internal SRAM: the instruction cache in the first bytes of SRAM0, which the
+ * linker script therefore leaves empty (ICACHE_SIZE there is the single source
+ * of the size), the data cache at the top of SRAM2.
  */
-static void watchdog_disable(wdt_hal_context_t *wdt)
+extern char _icache_size;       /* absolute symbol, value = size in bytes */
+#define BOARD_ICACHE_SIZE       ((uint32_t) &_icache_size)
+#define BOARD_DCACHE_SIZE       0x8000u     /* 32 KiB */
+#define BOARD_CACHE_WAYS        8u
+#define BOARD_CACHE_LINE_SIZE   32u
+
+/*
+ * ext_mem_init(): what executing from flash needs on top of the bootloader's
+ * mapping, which only ever read flash as data.
+ */
+static void cache_init(void)
 {
-    wdt_hal_write_protect_disable(wdt);
-    wdt_hal_set_flashboot_en(wdt, false);
-    wdt_hal_disable(wdt);
-    wdt_hal_write_protect_enable(wdt);
+    /* Cache geometry. */
+    rom_config_instruction_cache_mode(BOARD_ICACHE_SIZE, BOARD_CACHE_WAYS, BOARD_CACHE_LINE_SIZE);
+    Cache_Suspend_DCache();
+    rom_config_data_cache_mode(BOARD_DCACHE_SIZE, BOARD_CACHE_WAYS, BOARD_CACHE_LINE_SIZE);
+    Cache_Resume_DCache(0);
+
+    /*
+     * The instruction and data windows share one MMU table, and the ROM's
+     * cache code has to be told how many of its entries are used for code
+     * (ESP_ROM_NEEDS_SET_CACHE_MMU_SIZE).  The code starts on the first page
+     * of the instruction window; the linker script puts the read-only data on
+     * the pages after it.
+     */
+    {
+        const uint32_t text_size = (uint32_t) (&_flash_text_end - &_flash_text_start);
+        const uint32_t irom_entries_size =
+            (text_size + CONFIG_MMU_PAGE_SIZE - 1u) / CONFIG_MMU_PAGE_SIZE * sizeof(uint32_t);
+
+        Cache_Set_IDROM_MMU_Size(irom_entries_size, CACHE_DROM_MMU_MAX_END - irom_entries_size);
+    }
 }
 
-static void watchdogs_disable(void)
+/*
+ * The bootloader leaves the RTC watchdog running to cover the boot (and has
+ * already cleared the flash-boot protection of the RTC and timer group 0
+ * watchdogs and put the super watchdog in auto-feed mode).  Nothing here
+ * feeds it: switch it off, as ESP-IDF's init_disable_rtc_wdt does.
+ */
+static void rtc_watchdog_disable(void)
 {
-    wdt_hal_context_t rwdt  = RWDT_HAL_CONTEXT_DEFAULT();
-    wdt_hal_context_t mwdt0 = { .inst = WDT_MWDT0, .mwdt_dev = &TIMERG0 };
-    wdt_hal_context_t mwdt1 = { .inst = WDT_MWDT1, .mwdt_dev = &TIMERG1 };
+    wdt_hal_context_t rwdt = RWDT_HAL_CONTEXT_DEFAULT();
 
-    watchdog_disable(&rwdt);
-    watchdog_disable(&mwdt0);
-    watchdog_disable(&mwdt1);
-
-    REG_WRITE(RTC_CNTL_SWD_WPROTECT_REG, RTC_CNTL_SWD_WKEY_VALUE);
-    REG_SET_BIT(RTC_CNTL_SWD_CONF_REG, RTC_CNTL_SWD_AUTO_FEED_EN);
-    REG_WRITE(RTC_CNTL_SWD_WPROTECT_REG, 0);
+    wdt_hal_write_protect_disable(&rwdt);
+    wdt_hal_disable(&rwdt);
+    wdt_hal_write_protect_enable(&rwdt);
 }
 
 /* What ESP-IDF's application start-up does (esp_clk_init): the final CPU speed. */
@@ -76,7 +135,7 @@ void __attribute__((noreturn, section(".entry.text"))) _start(void)
 
     /*
      * Mask everything the kernel manages and drop whatever interrupt enables
-     * the ROM left behind, then take over the vectors.
+     * the ROM and the bootloader left behind, then take over the vectors.
      */
     (void) XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL);
     esp_cpu_intr_disable(0xFFFFFFFFu);
@@ -95,16 +154,7 @@ void __attribute__((noreturn, section(".entry.text"))) _start(void)
 
     memset(&_bss_start, 0, (size_t) (&_bss_end - &_bss_start));
 
-    watchdogs_disable();
-
-    /*
-     * ESP-IDF's bootloader clock set-up: PLL on, CPU at
-     * CONFIG_BOOTLOADER_CPU_CLK_FREQ_MHZ (80).  The flash clock is derived
-     * from the same source, so this comes before the flash is mapped.
-     */
-    bootloader_clock_configure();
-    flash_map_image();
-    /* From here on code and constants in flash are reachable. */
+    cache_init();
 
     clock_set_cpu_mhz(BOARD_CPU_FREQ_MHZ);
 
@@ -115,6 +165,8 @@ void __attribute__((noreturn, section(".entry.text"))) _start(void)
      * the requested frequency was refused.
      */
     esp_rom_set_cpu_ticks_per_us(board_cpu_freq_hz() / 1000000u);
+
+    rtc_watchdog_disable();
 
     console_init();
 

@@ -5,9 +5,11 @@
  * rtc_clk.c (rtc_clk_slow_src_set()) tells the sleep code which oscillators
  * must stay powered during light/deep sleep.  This firmware never enters
  * those sleep modes, so only the part of the interface that rtc_clk.c uses is
- * declared, with the same names and signatures as upstream; the functions
- * are stubs in port/esp_compat/esp_stubs.c.  A source that needs any other
- * sleep sub-mode fails to compile here, on purpose.
+ * declared, with the same names and signatures as upstream, so that rtc_clk.c
+ * compiles in both images.  The functions have no implementation:
+ * rtc_clk_slow_src_set() is not linked into the application, and the
+ * bootloader's build of it (BOOTLOADER_BUILD) does not call them.  A source
+ * that needs any other sleep sub-mode fails to compile here, on purpose.
  */
 #ifndef ESP_COMPAT_ESP_SLEEP_INTERNAL_H
 #define ESP_COMPAT_ESP_SLEEP_INTERNAL_H

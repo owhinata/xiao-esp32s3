@@ -3,8 +3,9 @@
  * The board's part of the RAM log (shell/common/compat/port/log_ram_os.h,
  * read only by shell/common/compat/log/log_ram.c):
  *
- * - the ring lives in .noinit, which _start neither clears nor loads
- *   (ldscript/xiao_esp32s3.ld), so it survives "reboot" and the RESET
+ * - the ring lives in .noinit, which neither the bootloader nor _start
+ *   loads or clears, below what the ROM and the bootloader write during a
+ *   reset (ldscript/xiao_esp32s3.ld), so it survives "reboot" and the RESET
  *   button but not a power cycle;
  * - the lock is the ThreadX port's interrupt lockout, usable in interrupt
  *   handlers and before the kernel runs;

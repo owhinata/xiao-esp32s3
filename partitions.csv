@@ -1,0 +1,10 @@
+# Partition table of the XIAO ESP32S3 (8 MB flash), ESP-IDF's single-app
+# layout (partitions_singleapp.csv) with a larger factory partition.
+# Built into partition-table.bin by ESP-IDF's gen_esp32part.py and written at
+# CONFIG_PARTITION_TABLE_OFFSET (0x8000).  Empty offsets are filled in by the
+# tool: nvs at 0x9000, phy_init at 0xf000, factory at 0x10000.  The last
+# 960 KiB of the flash (0x710000-0x800000) are left unassigned.
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     ,        0x6000,
+phy_init, data, phy,     ,        0x1000,
+factory,  app,  factory, ,        7M,
