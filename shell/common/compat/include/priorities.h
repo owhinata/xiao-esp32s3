@@ -48,7 +48,9 @@
 /* common/imu/time_sync.c:295 time_sync_tid (2048, 9) */
 
 #define APP_PRIO_TIME_SYNC          APP_PRIO_FROM_ZEPHYR(9)
+#ifndef APP_STACK_TIME_SYNC
 #define APP_STACK_TIME_SYNC         2048
+#endif
 
 /* common/imu/imu_stream.c:579 imu_stream_tid (2048, 9) */
 
@@ -138,6 +140,16 @@
 #define APP_PRIO_TELNET_SERVICE     APP_PRIO_FROM_ZEPHYR(14)
 #ifndef APP_STACK_TELNET_SERVICE
 #define APP_STACK_TELNET_SERVICE    2048
+#endif
+
+/* common/compat/zperf_iperf3.c zperf_server_tid (2048, 14): the iperf3
+ * server of "zperf tcp download", which runs in Zephyr's
+ * net_socket_service thread (above) in the Zephyr build.
+ */
+
+#define APP_PRIO_ZPERF_SERVER       APP_PRIO_FROM_ZEPHYR(14)
+#ifndef APP_STACK_ZPERF_SERVER
+#define APP_STACK_ZPERF_SERVER      2048
 #endif
 
 #endif /* COMMON_COMPAT_INCLUDE_PRIORITIES_H */

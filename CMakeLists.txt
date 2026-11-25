@@ -1012,6 +1012,16 @@ set(SHELL_WIFI_PROFILE "${SHELL_COMMON}/imu/wifi_profile.c")
 # Copy of Zephyr's file (v4.5.0, unchanged in rp2040-connect): "wifi cred".
 set(SHELL_WIFI_CRED_SHELL
     "${SHELL_COMMON}/compat/subsys/net/lib/wifi_credentials/wifi_credentials_shell.c")
+# "zperf": the port's minimal iperf3 (the server's thread zperf_server_tid)
+# and the command, the TCP part of Zephyr's zperf_shell.c.
+set(SHELL_ZPERF
+    "${SHELL_COMMON}/compat/zperf_iperf3.c"
+    "${SHELL_COMMON}/compat/zephyr_zperf_shell.c")
+# "ntp": the time synchronization (its thread time_sync_tid) with its
+# estimate.
+set(SHELL_TIME_SYNC
+    "${SHELL_COMMON}/imu/time_sync.c"
+    "${SHELL_COMMON}/imu/time_offset.c")
 
 add_library(shell OBJECT
     # The Zephyr-compatibility kernel layer on ThreadX
@@ -1058,6 +1068,12 @@ add_library(shell OBJECT
     "${SHELL_COMMON}/compat/libc_net/inet.c"
     # The shell on Telnet
     "${SHELL_COMMON}/compat/shell_engine/shell_telnet.c"
+    # "zperf" (the TCP tests of the iperf3 protocol, rp2040-connect's
+    # zperf.cmake) and "ntp" (the time synchronization against the default
+    # gateway, which the realtime clock of "date" follows, as imu.cmake
+    # builds it)
+    ${SHELL_ZPERF}
+    ${SHELL_TIME_SYNC}
     # The persistent store and "kv": the copies of Zephyr's settings on NVS
     # in the Zephyr build's format, on the flash device of the store's area
     # (zephyr_flash_kv.c, on shell/port/flash_kv_os.c), as rp2040-connect's
@@ -1119,10 +1135,10 @@ target_link_libraries(shell PUBLIC threadx)
 # The prelude of the shared sources (the Zephyr build's Kconfig values they
 # use, compat/port/generic/common_prelude.h) on the sources that
 # rp2040-connect's builds on the Pico SDK give it to (compat.cmake,
-# wifi.cmake), and on the board's sockets for the priority they register
-# with, as rp2040-connect's NINA binding (nina.cmake).  Not on the shell
-# engine, the network part (net_offload, libc_net) and "ifconfig", which are
-# written without it.
+# wifi.cmake, kv.cmake, zperf.cmake, imu.cmake), and on the board's sockets
+# for the priority they register with, as rp2040-connect's NINA binding
+# (nina.cmake).  Not on the shell engine, the network part (net_offload,
+# libc_net) and "ifconfig", which are written without it.
 set_source_files_properties(
     "${SHELL_COMMON}/compat/log/log_ram.c"
     "${SHELL_COMMON}/compat/log/log_ring.c"
@@ -1141,6 +1157,8 @@ set_source_files_properties(
     "${SHELL_WIFI_CRED_BACKEND}"
     "${SHELL_WIFI_PROFILE}"
     ${SHELL_KV_SOURCES}
+    ${SHELL_ZPERF}
+    ${SHELL_TIME_SYNC}
     PROPERTIES COMPILE_OPTIONS "-include;${SHELL_COMMON}/compat/port/generic/common_prelude.h")
 # "wifi cred" as wifi.cmake builds it: with the prelude, and without
 # -Wformat, as it prints a uint32_t (long here) with %d; the values are

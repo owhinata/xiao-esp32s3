@@ -41,6 +41,13 @@
  * (wifi_credentials.c, "wifi cred"): it registers its hooks as with the
  * NINA driver (nina_wifi_set_reconnect_ops(), shell/port/nina_wifi.h), and
  * this file hands them to the driver (struct net_wifi_reconnect_ops).
+ *
+ * At the end of the start-up (zephyr_net_app_start()), the network
+ * applications of rp2040-connect's start, in its order (imu/app_init.c,
+ * imu/app_main.c): the threads of the time synchronization ("ntp",
+ * shell/common/imu/time_sync.c), of the profile and of the iperf3 server
+ * ("zperf tcp download", shell/common/compat/zperf_iperf3.c), then the
+ * time synchronization's and the profile's initialization.
  */
 #include <errno.h>
 #include <stdatomic.h>
@@ -61,6 +68,7 @@
 #include "priorities.h"
 #include "net/wifi.h"
 #include "nina_wifi.h"
+#include "time_sync.h"
 #include "wifi_profile.h"
 #include "zephyr_compat.h"
 #include "zephyr_net_socket.h"
@@ -683,14 +691,25 @@ void zephyr_net_wifi_credentials_init(void)
 	(void)wifi_credentials_init();
 }
 
-int zephyr_net_wifi_profile_start(void)
+static int thread_started(int ret, const char *name)
 {
-	int ret = K_THREAD_DEFINE_START(wifi_reconnect_tid);
-
 	if (ret < 0) {
-		LOG_ERR("Could not start %s: %d", "wifi_reconnect_tid", ret);
-		return ret;
+		LOG_ERR("Could not start %s: %d", name, ret);
 	}
-	(void)wifi_profile_init();
-	return 0;
+	return ret;
+}
+
+int zephyr_net_app_start(void)
+{
+	int sync = thread_started(K_THREAD_DEFINE_START(time_sync_tid), "time_sync_tid");
+	int profile = thread_started(K_THREAD_DEFINE_START(wifi_reconnect_tid),
+				     "wifi_reconnect_tid");
+	int zperf = thread_started(K_THREAD_DEFINE_START(zperf_server_tid), "zperf_server_tid");
+
+	/* Before wifi_profile_init(), so that the automatic connection's event is seen. */
+	time_sync_init();
+	if (profile == 0) {
+		(void)wifi_profile_init();
+	}
+	return sync < 0 ? sync : profile < 0 ? profile : zperf;
 }

@@ -13,8 +13,9 @@
  * then ends: ESP-IDF's last start-up hooks, the persistent store in flash
  * (the shell's "kv") with the stored Wi-Fi networks ("wifi cred"), then
  * the Wi-Fi driver and lwIP (port/net/wifi.c, port/net/wlanif.c), then the
- * shell on Telnet (port 23), on lwIP's sockets, and the automatic
- * connection to a stored network.
+ * shell on Telnet (port 23), on lwIP's sockets, and the network
+ * applications: the time synchronization ("ntp"), the iperf3 server of
+ * "zperf" and the automatic connection to a stored network.
  */
 #include <stdio.h>
 
@@ -100,13 +101,14 @@ static void main_task(void *arg)
     /*
      * Once lwIP runs: the Telnet shell's listening socket and threads, as
      * rp2040-connect starts it after its network interface (a failure is
-     * logged and leaves no Telnet), then the automatic connection to a
-     * stored network (the Wi-Fi profile), as rp2040-connect's application
-     * start does it last.
+     * logged and leaves no Telnet), then the time synchronization, the
+     * iperf3 server's thread and the automatic connection to a stored
+     * network (the Wi-Fi profile), as rp2040-connect's application start
+     * does them last.
      */
     if (net_wifi_start() == 0) {
         (void) shell_telnet_init(PROMPT);
-        (void) zephyr_net_wifi_profile_start();
+        (void) zephyr_net_app_start();
     }
     vTaskDelete(NULL);
 }

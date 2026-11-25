@@ -29,13 +29,18 @@ int zephyr_net_initialize(void);
 void zephyr_net_wifi_credentials_init(void);
 
 /*
- * The automatic connection: starts the Wi-Fi profile's thread
- * (wifi_reconnect_tid, as rp2040-connect's app_threads_start()), then
- * wifi_profile_init(), which registers its hooks with the driver and, with
- * a network stored, has the thread connect to it 4 s later.  Once, from a
- * thread, after zephyr_net_wifi_credentials_init() and net_wifi_start().
- * 0, or a negative errno value (logged).
+ * The network applications and the automatic connection, as
+ * rp2040-connect's app_threads_start() and app_main() start them: the
+ * threads of the time synchronization (time_sync_tid), of the Wi-Fi
+ * profile (wifi_reconnect_tid) and of the iperf3 server of "zperf tcp
+ * download" (zperf_server_tid), in that order; then time_sync_init(), whose
+ * thread from then on asks the NTP server (the default gateway) every 2 s
+ * while connected, and wifi_profile_init(), which registers its hooks with
+ * the driver and, with a network stored, has its thread connect to it 4 s
+ * later (not when that thread did not start).  Once, from a thread, after
+ * zephyr_net_wifi_credentials_init() and net_wifi_start().  0, or the
+ * first negative errno value of the three starts (each failure logged).
  */
-int zephyr_net_wifi_profile_start(void);
+int zephyr_net_app_start(void);
 
 #endif /* SHELL_PORT_ZEPHYR_NET_WIFI_H */

@@ -32,7 +32,7 @@ UART0.
 | Heap | ESP-IDF's heap (`heap_caps` on TLSF; `malloc()` is esp_libc's): about 400 KiB of internal RAM and the RTC FAST memory, usable from interrupt handlers |
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
 | Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect`, `wifi status`, `wifi disconnect`, and `wifi cred` for stored networks with automatic connection |
-| TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23) |
+| TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23).  `zperf` runs iperf3 TCP tests in both directions, and `ntp` keeps the clock of `date` on the NTP server at the default gateway |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, a 28 KiB `settings` partition at 0x9000, the firmware as the factory application at 0x10000 |
 | Settings | rp2040-connect's key-value store (Zephyr settings on Zephyr NVS) in the `settings` partition, written through ESP-IDF's esp_flash driver; the `kv` command |
 
@@ -113,15 +113,17 @@ Available commands:
   free     : Show the use of malloc()
   help     : Prints the help message.
   id       : Show the board's unique ID (the factory MAC address)
-  kv       : Key-value store: kv set|sethex|get|delete <key> ..., kv wipe confirm
   ifconfig : Show the network interface: ifconfig [wlan0]
              (MAC address, state, IPv4 address, default router, netmask)
+  kv       : Application key-value storage
+  ntp      : Network time synchronization
   ps       : List the tasks
   reboot   : Restart the board
   sleep    : Sleep for <ms> milliseconds (Zephyr's kernel sleep)
   uptime   : Show the time since the start (SYSTIMER) and the ticks
   version  : Show the versions of the kernel, HAL and compiler
   wifi     : Wi-Fi commands
+  zperf    : Zperf commands
 ```
 
 **Settings.**  `kv set <key> <text>`, `kv sethex <key> <hex>`, `kv get <key>`
@@ -193,8 +195,15 @@ into and out of an interrupt (saving and restoring the context) is not part of
 it; that time is counted with the thread, or the idle time, that was
 interrupted or resumed.
 
-`date` counts from 1970-01-01 at boot: nothing sets the clock yet.
-`sys_clock_settime()` is there for a future time source.
+`date` counts from 1970-01-01 at boot until the first NTP reply, then shows
+UTC.  While connected, the board asks the NTP server on the default gateway
+(port 123) every 2 s; `ntp status` shows the exchanges and the estimate.
+The clock is only ever stepped forward.
+
+`zperf tcp upload <pc> 5201 10 1K` runs an iperf3 TCP test against
+`iperf3 -s` on the PC.  `zperf tcp download 5201` starts an iperf3 server
+for `iperf3 -c <board> -t 10` (one TCP stream; no `-R`, `-u` or `-P`), until
+`zperf tcp download stop`.
 
 After a fatal error the board restarts by itself.  `fault` then shows the
 record of the error that ended the last run (the reason, EXCCAUSE, the
@@ -236,7 +245,8 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    task, "main", which then starts the Wi-Fi driver in station mode
    (ESP-IDF's event loop, `esp_wifi_init()`, `esp_wifi_start()`, which
    calibrates the PHY), then lwIP with the station's network interface
-   and the Telnet shell, and ends.  ESP-IDF's own
+   the Telnet shell, the time synchronization and the iperf3 server's
+   thread, and ends.  ESP-IDF's own
    start-up lines (`app_init`, `heap_init`) appear on the console before
    the banner.
 

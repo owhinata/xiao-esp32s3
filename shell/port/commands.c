@@ -353,9 +353,12 @@ SHELL_CMD_REGISTER(ps, NULL, "List the tasks", cmd_ps);
  * "fault" the record of shell/port/fault_record.h), "wifi"
  * (shell/common/compat/zephyr_wifi_shell.c, on shell/port/zephyr_net_wifi.c),
  * "ifconfig" (shell/common/shell/ifconfig_shell.c, on the interface
- * that shell/port/zephyr_net_wifi.c keeps) and "kv" (shell/common/imu/
+ * that shell/port/zephyr_net_wifi.c keeps), "kv" (shell/common/imu/
  * kv_store.c with "kv wipe" of shell/common/compat/kv_store_wipe.c, on the
- * flash of shell/port/flash_kv_os.c).
+ * flash of shell/port/flash_kv_os.c), "ntp" (shell/common/imu/time_sync.c,
+ * which sets the realtime clock of "date") and "zperf"
+ * (shell/common/compat/zephyr_zperf_shell.c, on the iperf3 of
+ * shell/common/compat/zperf_iperf3.c).
  */
 SHELL_ENGINE_CMD_DECLARE(bootsel);
 SHELL_ENGINE_CMD_DECLARE(date);
@@ -366,10 +369,12 @@ SHELL_ENGINE_CMD_DECLARE(help);
 SHELL_ENGINE_CMD_DECLARE(id);
 SHELL_ENGINE_CMD_DECLARE(ifconfig);
 SHELL_ENGINE_CMD_DECLARE(kv);
+SHELL_ENGINE_CMD_DECLARE(ntp);
 SHELL_ENGINE_CMD_DECLARE(reboot);
 SHELL_ENGINE_CMD_DECLARE(sleep);
 SHELL_ENGINE_CMD_DECLARE(uptime);
 SHELL_ENGINE_CMD_DECLARE(wifi);
+SHELL_ENGINE_CMD_DECLARE(zperf);
 
 /* Sorted by name, as Zephyr's "help" lists them. */
 const struct shell_engine_cmd shell_engine_cmds[] = {
@@ -383,12 +388,14 @@ const struct shell_engine_cmd shell_engine_cmds[] = {
     SHELL_ENGINE_CMD(id),
     SHELL_ENGINE_CMD(ifconfig),
     SHELL_ENGINE_CMD(kv),
+    SHELL_ENGINE_CMD(ntp),
     SHELL_ENGINE_CMD(ps),
     SHELL_ENGINE_CMD(reboot),
     SHELL_ENGINE_CMD(sleep),
     SHELL_ENGINE_CMD(uptime),
     SHELL_ENGINE_CMD(version),
     SHELL_ENGINE_CMD(wifi),
+    SHELL_ENGINE_CMD(zperf),
 };
 
 const size_t shell_engine_cmd_count = sizeof(shell_engine_cmds) / sizeof(shell_engine_cmds[0]);

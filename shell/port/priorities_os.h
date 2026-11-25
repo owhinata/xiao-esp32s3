@@ -72,4 +72,23 @@
  */
 #define APP_STACK_TELNET_SERVICE 4096
 
+/*
+ * The iperf3 server of "zperf tcp download", "zperf_server_tid"
+ * (shell/common/compat/zperf_iperf3.c, the shared default 2048 bytes): the
+ * same poll path as "telnet_service", and after it the server's JSON
+ * (snprintf()) and the command's report of each test, which it prints to
+ * the session that started the server with newlib's printf, as "net_mgmt"
+ * prints the "wifi" command's results.  "ps" shows what is left.
+ */
+#define APP_STACK_ZPERF_SERVER  6144
+
+/*
+ * The time synchronization's thread "time_sync_tid" (shell/common/imu/
+ * time_sync.c, the shared default 2048 bytes): a UDP send and receive
+ * through the socket layer to lwIP (each lwIP call waits for "tcpip") and
+ * the 64-bit arithmetic of the estimate; it prints nothing.  "ps" shows
+ * what is left.
+ */
+#define APP_STACK_TIME_SYNC     4096
+
 #endif /* PRIORITIES_OS_H */

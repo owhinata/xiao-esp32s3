@@ -8,9 +8,10 @@
  * the start, board_uptime_us()), and the realtime clock is the uptime plus
  * a base, under a spinlock (the 64-bit base is two words).
  *
- * Nothing sets the realtime clock yet, so it counts from 1970-01-01 at the
- * start.  A time source (to come over BLE or USB) sets it with
- * sys_clock_settime(SYS_CLOCK_REALTIME, ...); "date"
+ * The realtime clock counts from 1970-01-01 at the start until the time
+ * synchronization (shell/common/imu/time_sync.c, "ntp") sets it with
+ * sys_clock_settime(SYS_CLOCK_REALTIME, ...) from its estimate of the NTP
+ * server's time, and then only ever forward; "date"
  * (shell/common/shell/kernel_shell.c) shows it.  newlib's gettimeofday()
  * (and time(), which calls it) and settimeofday() are put on the same clock
  * (below), so that the firmware has one realtime clock.
