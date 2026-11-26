@@ -5,7 +5,7 @@
  * queried for the bytes waiting, deleted.  ESP-IDF's ringbuf.c is built on
  * FreeRTOS's internal event lists, which ThreadX's FreeRTOS layer does not
  * have; this one keeps the same semantics for these calls on a critical
- * section (FreeRTOSConfig.h) and a ThreadX event flags group.  Every other
+ * section (FreeRTOSConfig.h) and lists of waiting threads.  Every other
  * function of the header (the item buffers, static and ISR variants, queue
  * sets) is left undefined, so a use of one fails at the link.
  *
@@ -27,10 +27,21 @@
  *                             acquire pointers, and the bytes waiting (not
  *                             counting a loan).
  *
+ * A thread that has to wait checks its request and puts itself on the list
+ * of senders or of receivers in one critical section, then waits on a
+ * ThreadX semaphore of its own.  A change that can satisfy a request (data
+ * sent; a loan returned, which makes room and may end a receiver's wait)
+ * takes every waiter of that kind off its list and wakes it, in the
+ * critical section of the change: each re-checks its own request, and one
+ * whose request still does not fit puts itself back.  So no wake-up is lost
+ * between a check and the wait, and no waiter takes one that another
+ * needed.  The timeout is a deadline from the call across the re-waits.
+ *
  * The critical section masks the interrupts and ThreadX's preemption for
- * the bookkeeping and the copy of one item: the callers' items are the
- * isochronous packets of an audio stream (at most wMaxPacketSize, 1023
- * bytes at full speed), a copy of about a microsecond.  For threads only
+ * the bookkeeping, the wake-ups (one semaphore put per waiter) and the copy
+ * of one item: the callers' items are the isochronous packets of an audio
+ * stream (at most wMaxPacketSize, 1023 bytes at full speed), a copy of about
+ * a microsecond.  For threads only
  * (FreeRTOS tasks or not): the waits are ThreadX ones, and no call comes
  * from an interrupt handler (usb_host_uac calls them from its client task
  * and from its users' tasks).  Deleting a buffer that a thread waits on is
@@ -48,9 +59,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
 
-/* Event flags: data or room may have come. */
-#define RB_EVENT_DATA   0x1u
-#define RB_EVENT_ROOM   0x2u
+/* A thread waiting for room (sender) or data (receiver). */
+typedef struct waiter {
+    struct waiter *next;
+    TX_SEMAPHORE wake;
+} waiter_t;
 
 typedef struct {
     uint8_t *storage;
@@ -58,7 +71,8 @@ typedef struct {
     size_t head;                /* offset of the oldest byte not returned (ESP-IDF's free pointer) */
     size_t lent;                /* bytes from head on that a receiver holds */
     size_t waiting;             /* bytes after the loan, not received yet */
-    TX_EVENT_FLAGS_GROUP events;
+    waiter_t *senders;          /* waiting for room */
+    waiter_t *receivers;        /* waiting for data, or for the loan to end */
 } ringbuf_t;
 
 static size_t wrap(const ringbuf_t *rb, size_t off)
@@ -66,40 +80,82 @@ static size_t wrap(const ringbuf_t *rb, size_t off)
     return off >= rb->size ? off - rb->size : off;
 }
 
-/* Inside the critical section: clears the flag before the caller waits on it. */
-static void flag_clear(ringbuf_t *rb, ULONG flag)
+/* Inside the critical section: wakes every waiter of the list and empties it. */
+static void wake_all(waiter_t **list)
 {
-    (void) tx_event_flags_set(&rb->events, ~flag, TX_AND);
+    waiter_t *w = *list;
+
+    *list = NULL;
+    while (w != NULL) {
+        waiter_t *next = w->next;
+
+        (void) tx_semaphore_put(&w->wake);
+        w = next;
+    }
 }
 
-static void flag_set(ringbuf_t *rb, ULONG flag)
+/* Inside the critical section: takes the waiter off the list if it is still on it. */
+static void unlist(waiter_t **list, waiter_t *w)
 {
-    (void) tx_event_flags_set(&rb->events, flag, TX_OR);
+    for (; *list != NULL; list = &(*list)->next) {
+        if (*list == w) {
+            *list = w->next;
+            return;
+        }
+    }
 }
 
 /*
- * Waits for the flag at most until the deadline (ticks of tx_time_get()).
- * false when the time is up.
+ * The ticks left until the deadline (start + ticks of tx_time_get()), 0 when
+ * the time is up.
  */
-static bool flag_wait(ringbuf_t *rb, ULONG flag, TickType_t ticks, ULONG start)
+static ULONG ticks_left(TickType_t ticks, ULONG start)
 {
-    ULONG actual;
-    ULONG wait;
+    ULONG elapsed;
 
-    if (ticks == 0u) {
-        return false;
-    }
     if (ticks == portMAX_DELAY) {
-        wait = TX_WAIT_FOREVER;
-    } else {
-        ULONG elapsed = tx_time_get() - start;
+        return TX_WAIT_FOREVER;
+    }
+    elapsed = tx_time_get() - start;
+    return elapsed >= ticks ? 0u : ticks - elapsed;
+}
 
-        if (elapsed >= ticks) {
+/*
+ * Inside the critical section, after a failed check: puts the waiter on the
+ * list and leaves the critical section, waits at most left ticks, and takes
+ * the waiter off the list again.  The caller re-checks its request.
+ */
+static void wait_on(waiter_t **list, waiter_t *w, ULONG left)
+{
+    w->next = *list;
+    *list = w;
+    portEXIT_CRITICAL();
+    (void) tx_semaphore_get(&w->wake, left);
+    portENTER_CRITICAL();
+    unlist(list, w);
+}
+
+/*
+ * The waiter's semaphore, created on the first wait of a call: false when it
+ * cannot be.  A wake-up given after the waiter left the list on its timeout
+ * stays in the count and only makes a later wait re-check early.
+ */
+static bool waiter_open(waiter_t *w, bool *open)
+{
+    if (!*open) {
+        if (tx_semaphore_create(&w->wake, "ringbuf", 0u) != TX_SUCCESS) {
             return false;
         }
-        wait = ticks - elapsed;
+        *open = true;
     }
-    return tx_event_flags_get(&rb->events, flag, TX_OR, &actual, wait) == TX_SUCCESS;
+    return true;
+}
+
+static void waiter_close(waiter_t *w, bool open)
+{
+    if (open) {
+        (void) tx_semaphore_delete(&w->wake);
+    }
 }
 
 RingbufHandle_t xRingbufferCreate(size_t xBufferSize, RingbufferType_t xBufferType)
@@ -119,11 +175,6 @@ RingbufHandle_t xRingbufferCreate(size_t xBufferSize, RingbufferType_t xBufferTy
         return NULL;
     }
     rb->size = xBufferSize;
-    if (tx_event_flags_create(&rb->events, "ringbuf") != TX_SUCCESS) {
-        free(rb->storage);
-        free(rb);
-        return NULL;
-    }
     return rb;
 }
 
@@ -134,7 +185,6 @@ void vRingbufferDelete(RingbufHandle_t xRingbuffer)
     if (rb == NULL) {
         return;
     }
-    (void) tx_event_flags_delete(&rb->events);
     free(rb->storage);
     free(rb);
 }
@@ -144,6 +194,9 @@ BaseType_t xRingbufferSend(RingbufHandle_t xRingbuffer, const void *pvItem, size
 {
     ringbuf_t *rb = xRingbuffer;
     ULONG start = tx_time_get();
+    waiter_t self;
+    bool open = false;
+    BaseType_t ret;
 
     if (xItemSize > rb->size) {
         return pdFALSE;
@@ -152,6 +205,8 @@ BaseType_t xRingbufferSend(RingbufHandle_t xRingbuffer, const void *pvItem, size
         return pdTRUE;
     }
     for (;;) {
+        ULONG left;
+
         portENTER_CRITICAL();
         if (rb->size - rb->lent - rb->waiting >= xItemSize) {
             size_t at = wrap(rb, rb->head + rb->lent + rb->waiting);
@@ -160,16 +215,25 @@ BaseType_t xRingbufferSend(RingbufHandle_t xRingbuffer, const void *pvItem, size
             memcpy(&rb->storage[at], pvItem, first);
             memcpy(rb->storage, (const uint8_t *) pvItem + first, xItemSize - first);
             rb->waiting += xItemSize;
-            flag_set(rb, RB_EVENT_DATA);
+            wake_all(&rb->receivers);
             portEXIT_CRITICAL();
-            return pdTRUE;
+            ret = pdTRUE;
+            break;
         }
-        flag_clear(rb, RB_EVENT_ROOM);
+        left = ticks_left(xTicksToWait, start);
+        if (left == 0u || !open) {
+            portEXIT_CRITICAL();
+            if (left == 0u || !waiter_open(&self, &open)) {
+                ret = pdFALSE;
+                break;
+            }
+            continue;
+        }
+        wait_on(&rb->senders, &self, left);
         portEXIT_CRITICAL();
-        if (!flag_wait(rb, RB_EVENT_ROOM, xTicksToWait, start)) {
-            return pdFALSE;
-        }
     }
+    waiter_close(&self, open);
+    return ret;
 }
 
 void *xRingbufferReceiveUpTo(RingbufHandle_t xRingbuffer, size_t *pxItemSize, TickType_t xTicksToWait,
@@ -177,17 +241,22 @@ void *xRingbufferReceiveUpTo(RingbufHandle_t xRingbuffer, size_t *pxItemSize, Ti
 {
     ringbuf_t *rb = xRingbuffer;
     ULONG start = tx_time_get();
+    waiter_t self;
+    bool open = false;
+    void *item = NULL;
 
     if (xMaxSize == 0u) {
         return NULL;
     }
     for (;;) {
+        ULONG left;
+
         portENTER_CRITICAL();
         if (rb->lent == 0u && rb->waiting > 0u) {
             size_t to_end = rb->size - rb->head;
             size_t n = rb->waiting < xMaxSize ? rb->waiting : xMaxSize;
-            void *item = &rb->storage[rb->head];
 
+            item = &rb->storage[rb->head];
             if (n > to_end) {
                 n = to_end;
             }
@@ -195,14 +264,21 @@ void *xRingbufferReceiveUpTo(RingbufHandle_t xRingbuffer, size_t *pxItemSize, Ti
             rb->waiting -= n;
             portEXIT_CRITICAL();
             *pxItemSize = n;
-            return item;
+            break;
         }
-        flag_clear(rb, RB_EVENT_DATA);
+        left = ticks_left(xTicksToWait, start);
+        if (left == 0u || !open) {
+            portEXIT_CRITICAL();
+            if (left == 0u || !waiter_open(&self, &open)) {
+                break;
+            }
+            continue;
+        }
+        wait_on(&rb->receivers, &self, left);
         portEXIT_CRITICAL();
-        if (!flag_wait(rb, RB_EVENT_DATA, xTicksToWait, start)) {
-            return NULL;
-        }
     }
+    waiter_close(&self, open);
+    return item;
 }
 
 void vRingbufferReturnItem(RingbufHandle_t xRingbuffer, void *pvItem)
@@ -213,10 +289,10 @@ void vRingbufferReturnItem(RingbufHandle_t xRingbuffer, void *pvItem)
     if (rb->lent != 0u && pvItem == &rb->storage[rb->head]) {
         rb->head = wrap(rb, rb->head + rb->lent);
         rb->lent = 0;
-        flag_set(rb, RB_EVENT_ROOM);
+        wake_all(&rb->senders);
+        /* A receiver may wait for the loan to end. */
         if (rb->waiting > 0u) {
-            /* A receiver may wait for the loan to end. */
-            flag_set(rb, RB_EVENT_DATA);
+            wake_all(&rb->receivers);
         }
     }
     portEXIT_CRITICAL();

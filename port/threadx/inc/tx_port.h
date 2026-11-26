@@ -52,7 +52,9 @@
  *     (tx_api.h declares the execution profile fields for
  *     TX_EXECUTION_PROFILE_ENABLE),
  *   - no _tx_clib_heap_start/_end: the C library's malloc() is ESP-IDF's
- *     heap (esp_libc heap.c on heap_caps), not newlib's on _sbrk_r().
+ *     heap (esp_libc heap.c on heap_caps), not newlib's on _sbrk_r(),
+ *   - the thread's reent is reclaimed by the completed and terminated
+ *     extensions (TX_CLIB_THREAD_EXIT_EXTENSION), not by the entry wrapper.
  */
 
 /* Thread-safe C library support (port/threadx/src/tx_clib_newlib.c). */
@@ -90,7 +92,7 @@
 struct TX_THREAD_STRUCT;
 
 extern void _tx_clib_reent_init (struct TX_THREAD_STRUCT *thread_ptr);
-extern void _tx_clib_reent_cleanup (struct TX_THREAD_STRUCT *thread_ptr, int partial);
+extern void _tx_clib_reent_cleanup (struct TX_THREAD_STRUCT *thread_ptr);
 extern void _tx_clib_thread_setup(struct TX_THREAD_STRUCT *thread_ptr);
 
 #include    <sys/reent.h>
@@ -102,9 +104,17 @@ extern void _tx_clib_thread_setup(struct TX_THREAD_STRUCT *thread_ptr);
     struct _reent       tx_thread_clib_reent;               /* C lib reentrancy struct */
 #define TX_CLIB_THREAD_CREATE_EXTENSION(thread_ptr)
 #define TX_CLIB_THREAD_DELETE_EXTENSION(thread_ptr)
-#define TX_CLIB_THREAD_EXIT_EXTENSION(thread_ptr)
+/* Every run of a thread ends in TX_COMPLETED or TX_TERMINATED, once, before
+   the thread can be reset or deleted; both extensions run with interrupts
+   enabled and preemption disabled (tx_thread_shell_entry.c,
+   tx_thread_terminate.c), where the reent's memory can go back to the heap. */
+#define TX_CLIB_THREAD_EXIT_EXTENSION(thread_ptr) \
+    _tx_clib_reent_cleanup(thread_ptr);
 #define TX_THREAD_CLIB_EXTENSION(thread_ptr) \
     _tx_clib_thread_setup(thread_ptr);
+#ifdef TX_NOT_INTERRUPTABLE
+#error "_tx_clib_reent_cleanup() calls free(), which needs interrupts enabled"
+#endif
 #else
 #define TX_CLIB_THREAD_EXTENSION
 #define TX_CLIB_THREAD_EXTENSION_END
@@ -411,9 +421,11 @@ extern void _xt_coproc_release(void * coproc_sa_base, int core_id);
 #define TX_THREAD_DELETE_EXTENSION(thread_ptr) \
         _xt_coproc_release(&thread_ptr->tx_thread_cp_state, 0);
 #define TX_THREAD_COMPLETED_EXTENSION(thread_ptr) \
-        _xt_coproc_release(&thread_ptr->tx_thread_cp_state, 0);
+        _xt_coproc_release(&thread_ptr->tx_thread_cp_state, 0); \
+        TX_CLIB_THREAD_EXIT_EXTENSION(thread_ptr)
 #define TX_THREAD_TERMINATED_EXTENSION(thread_ptr) \
-        _xt_coproc_release(&thread_ptr->tx_thread_cp_state, 0);
+        _xt_coproc_release(&thread_ptr->tx_thread_cp_state, 0); \
+        TX_CLIB_THREAD_EXIT_EXTENSION(thread_ptr)
 #define TX_THREAD_CP_EXTENSION(thread_ptr) \
     /* Initialize XT_CP_ASA ptr to aligned save area: */ \
     /* NOTE: keep this matched with xtensa_context.h. */ \
@@ -424,8 +436,10 @@ extern void _xt_coproc_release(void * coproc_sa_base, int core_id);
             & -XCHAL_TOTAL_SA_ALIGN);
 #else
 #define TX_THREAD_DELETE_EXTENSION(thread_ptr)
-#define TX_THREAD_TERMINATED_EXTENSION(thread_ptr)
-#define TX_THREAD_COMPLETED_EXTENSION(thread_ptr)
+#define TX_THREAD_TERMINATED_EXTENSION(thread_ptr) \
+        TX_CLIB_THREAD_EXIT_EXTENSION(thread_ptr)
+#define TX_THREAD_COMPLETED_EXTENSION(thread_ptr) \
+        TX_CLIB_THREAD_EXIT_EXTENSION(thread_ptr)
 #define TX_THREAD_CP_EXTENSION(thread_ptr)
 #endif
 

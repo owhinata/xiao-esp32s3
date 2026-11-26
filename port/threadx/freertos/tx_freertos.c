@@ -1755,7 +1755,6 @@ BaseType_t xQueueSendToFront(QueueHandle_t xQueue,
     TX_INTERRUPT_SAVE_AREA;
     UINT timeout;
     UINT ret;
-    // TODO-
 
     configASSERT(xQueue != NULL);
     configASSERT(pvItemToQueue != NULL);
@@ -1766,19 +1765,17 @@ BaseType_t xQueueSendToFront(QueueHandle_t xQueue,
         timeout = (UINT)xTicksToWait;
     }
 
-    if(xQueue->p_set != NULL) {
-        TX_DISABLE;
-        _tx_thread_preempt_disable++;
-    }
-
     // Wait for space to be available on the queue.
     ret = tx_semaphore_get(&xQueue->write_sem, timeout);
     if(ret != TX_SUCCESS) {
         return pdFALSE;
     }
 
-    // Enqueue the message at the front.
+    // Enqueue the message at the front.  Preemption stays disabled until the
+    // queue set, if any, has been told, so that a reader woken by read_sem
+    // does not run before the set holds the queue.
     TX_DISABLE;
+    _tx_thread_preempt_disable++;
     // Push back the read pointer.
     if(xQueue->p_read == xQueue->p_mem) {
         xQueue->p_read = xQueue->p_mem + (xQueue->msg_size * (xQueue->queue_length - 1u));
@@ -1791,30 +1788,24 @@ BaseType_t xQueueSendToFront(QueueHandle_t xQueue,
 
     // Signal that there is an additional message available on the queue.
     ret = tx_semaphore_put(&xQueue->read_sem);
-    if(ret != TX_SUCCESS) {
-        if(xQueue->p_set != NULL) {
-            _tx_thread_preempt_disable--;
-            TX_RESTORE;
-        }
-        TX_FREERTOS_ASSERT_FAIL();
-        return pdFALSE;
-    }
-
-    if(xQueue->p_set != NULL) {
+    if((ret == TX_SUCCESS) && (xQueue->p_set != NULL)) {
         // To prevent deadlocks don't wait when posting on a queue set.
         ret = tx_queue_send(&xQueue->p_set->queue, &xQueue, TX_NO_WAIT);
-        if((ret != TX_SUCCESS) && (ret != TX_QUEUE_FULL)) {
-            // Fatal error, queue full errors are ignored on purpose to match the original behaviour.
-            _tx_thread_preempt_disable--;
-            TX_RESTORE;
-            TX_FREERTOS_ASSERT_FAIL();
-            return pdFALSE;
+        if(ret == TX_QUEUE_FULL) {
+            // Queue full errors are ignored on purpose to match the original behaviour.
+            ret = TX_SUCCESS;
         }
+    }
 
-        TX_RESTORE;
-        _tx_thread_preempt_disable--;
+    TX_DISABLE;
+    _tx_thread_preempt_disable--;
+    TX_RESTORE;
 
-        _tx_thread_system_preempt_check();
+    _tx_thread_system_preempt_check();
+
+    if(ret != TX_SUCCESS) {
+        TX_FREERTOS_ASSERT_FAIL();
+        return pdFALSE;
     }
 
     return pdPASS;
@@ -1918,13 +1909,16 @@ BaseType_t xQueuePeek(QueueHandle_t xQueue,
 
     // Restore the original space on the queue.
     ret = tx_semaphore_put(&xQueue->read_sem);
+
+    _tx_thread_preempt_disable--;
+    TX_RESTORE;
+
+    _tx_thread_system_preempt_check();
+
     if(ret != TX_SUCCESS) {
         TX_FREERTOS_ASSERT_FAIL();
         return pdFALSE;
     }
-
-    _tx_thread_preempt_disable--;
-    TX_RESTORE;
 
     return pdPASS;
 }
@@ -2061,22 +2055,24 @@ BaseType_t xQueueReset(QueueHandle_t xQueue)
 }
 
 
-BaseType_t xQueueOverwrite(QueueHandle_t xQueue,
-                           const void * pvItemToQueue)
+/* One attempt of xQueueOverwrite(), atomic against senders, receivers and
+   interrupt handlers.  Returns TX_SUCCESS, or TX_NOT_AVAILABLE when every slot
+   of the queue is claimed by a sender or receiver that has taken its
+   semaphore token but not yet moved the item (neither an unclaimed item to
+   replace nor an unclaimed free slot to fill). */
+static UINT txfr_queue_overwrite_try(QueueHandle_t xQueue,
+                                     const void * pvItemToQueue)
 {
     TX_INTERRUPT_SAVE_AREA;
     UINT ret;
-    UINT read_post;
     uint8_t *p_write_temp;
 
-    configASSERT(xQueue != NULL);
-    configASSERT(pvItemToQueue != NULL);
-
-    read_post = 0u;
+    ret = TX_SUCCESS;
     TX_DISABLE;
+    _tx_thread_preempt_disable++;
 
     if(xQueue->read_sem.tx_semaphore_count != 0u) {
-        // Go back one message.
+        // Replace the newest message; the counts do not change.
         p_write_temp = xQueue->p_write;
         if(p_write_temp == xQueue->p_mem) {
             p_write_temp = (xQueue->p_mem + (xQueue->msg_size * (xQueue->queue_length - 1u)));
@@ -2085,25 +2081,63 @@ BaseType_t xQueueOverwrite(QueueHandle_t xQueue,
         }
 
         memcpy(p_write_temp, pvItemToQueue, xQueue->msg_size);
-    } else {
+    } else if(xQueue->write_sem.tx_semaphore_count != 0u) {
+        // Take a free slot as xQueueSend() does.  A count above 0 means no
+        // thread is suspended on write_sem, so the count is taken directly.
+        xQueue->write_sem.tx_semaphore_count--;
         memcpy(xQueue->p_write, pvItemToQueue, xQueue->msg_size);
         if(xQueue->p_write >= (xQueue->p_mem + (xQueue->msg_size * (xQueue->queue_length - 1u)))) {
             xQueue->p_write = xQueue->p_mem;
         } else {
             xQueue->p_write += xQueue->msg_size;
         }
-        read_post = 1u;
-    }
 
-    TX_RESTORE;
-
-    if(read_post == 1u) {
         // Signal that there is an additional message available on the queue.
         ret = tx_semaphore_put(&xQueue->read_sem);
-        if(ret != TX_SUCCESS) {
-            TX_FREERTOS_ASSERT_FAIL();
-            return pdFALSE;
+        if((ret == TX_SUCCESS) && (xQueue->p_set != NULL)) {
+            // To prevent deadlocks don't wait when posting on a queue set.
+            ret = tx_queue_send(&xQueue->p_set->queue, &xQueue, TX_NO_WAIT);
+            if(ret == TX_QUEUE_FULL) {
+                // Queue full errors are ignored on purpose to match the original behaviour.
+                ret = TX_SUCCESS;
+            }
         }
+    } else {
+        ret = TX_NOT_AVAILABLE;
+    }
+
+    _tx_thread_preempt_disable--;
+    TX_RESTORE;
+
+    _tx_thread_system_preempt_check();
+
+    return ret;
+}
+
+
+BaseType_t xQueueOverwrite(QueueHandle_t xQueue,
+                           const void * pvItemToQueue)
+{
+    UINT ret;
+
+    configASSERT(xQueue != NULL);
+    configASSERT(pvItemToQueue != NULL);
+
+    // A sender or receiver between its semaphore and its copy is a thread
+    // that this one preempted; let it finish.
+    for(;;) {
+        ret = txfr_queue_overwrite_try(xQueue, pvItemToQueue);
+        if(ret != TX_NOT_AVAILABLE) {
+            break;
+        }
+        if(tx_thread_sleep(1u) != TX_SUCCESS) {
+            return pdFAIL;
+        }
+    }
+
+    if(ret != TX_SUCCESS) {
+        TX_FREERTOS_ASSERT_FAIL();
+        return pdFALSE;
     }
 
     return pdPASS;
@@ -2114,10 +2148,23 @@ BaseType_t xQueueOverwriteFromISR(QueueHandle_t xQueue,
                                   const void * pvItemToQueue,
                                   BaseType_t *pxHigherPriorityTaskWoken)
 {
+    UINT ret;
+
     configASSERT(xQueue != NULL);
     configASSERT(pvItemToQueue != NULL);
 
-    return xQueueOverwrite(xQueue, pvItemToQueue);
+    // The interrupted thread may be the sender or receiver between its
+    // semaphore and its copy; it cannot finish before this returns.
+    ret = txfr_queue_overwrite_try(xQueue, pvItemToQueue);
+    if(ret == TX_NOT_AVAILABLE) {
+        return pdFAIL;
+    }
+    if(ret != TX_SUCCESS) {
+        TX_FREERTOS_ASSERT_FAIL();
+        return pdFALSE;
+    }
+
+    return pdPASS;
 }
 
 

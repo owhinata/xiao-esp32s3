@@ -13,12 +13,15 @@
  *     Implementing that family also makes stdio streams thread-safe, which
  *     the original (malloc and env only) did not.
  *
- * The interface towards the rest of the port is unchanged: _tx_clib_init(),
- * _tx_clib_thread_setup(), _tx_clib_reent_init(), _tx_clib_reent_cleanup(),
- * and the per-thread reent pointer that the scheduler copies into
- * _impure_ptr on every context switch.  There is no heap here: malloc() and
- * the rest of the family are ESP-IDF's (esp_libc heap.c on heap_caps), so
- * newlib's allocator, its _sbrk_r() and its malloc lock are not linked.
+ * The interface towards the rest of the port is the original's:
+ * _tx_clib_init(), _tx_clib_thread_setup(), _tx_clib_reent_init(),
+ * _tx_clib_reent_cleanup() and the per-thread reent pointer that the
+ * scheduler copies into _impure_ptr on every context switch, except that
+ * _tx_clib_reent_cleanup() is called once from the thread completed and
+ * terminated extensions instead of twice (partial, full) from the wrapper.
+ * There is no heap here: malloc() and the rest of the family are ESP-IDF's
+ * (esp_libc heap.c on heap_caps), so newlib's allocator, its _sbrk_r() and
+ * its malloc lock are not linked.
  *
  * On top of that, the _lock_*() functions of ESP-IDF's
  * esp_libc/platform_include/sys/lock.h, which Espressif sources (esp_phy)
@@ -200,8 +203,14 @@ struct _reent *__getreent(void)
     return global_reent != NULL ? global_reent : _impure_ptr;
 }
 
+/*
+ * The reent is initialized before the thread's pointer is set to it, both
+ * under the interrupt lockout, so _tx_clib_reent_cleanup() sees either the
+ * global reent or a complete one.
+ */
 void _tx_clib_reent_init(TX_THREAD *thread_ptr)
 {
+    TX_INTERRUPT_SAVE_AREA
     struct _reent *reent;
 
     if (thread_ptr == TX_NULL) {
@@ -209,52 +218,68 @@ void _tx_clib_reent_init(TX_THREAD *thread_ptr)
     }
 
     reent = &thread_ptr->tx_thread_clib_reent;
-    memset(reent, 0, sizeof(*reent));
     _REENT_INIT_PTR(reent);
+
+    TX_DISABLE
     thread_ptr->tx_thread_clib_ptr = reent;
+    if (thread_ptr == _tx_thread_current_ptr) {
+        _impure_ptr = reent;
+    }
+    TX_RESTORE
 }
 
 /*
- * partial != 0: the thread has finished but may be restarted.
- * partial == 0: release everything the C library allocated for the thread.
- * stdin/stdout/stderr are global streams here, so there is nothing per-thread
- * to flush or close in the partial case.
+ * Releases what the C library allocated for the thread's reent (_mp, _r48,
+ * the localtime/asctime buffers, ...; stdin/stdout/stderr are the global
+ * streams and are not closed).  Called by the completed and terminated
+ * extensions (TX_CLIB_THREAD_EXIT_EXTENSION in tx_port.h): every run of a
+ * thread ends in one of the two, once, with interrupts enabled and
+ * preemption disabled, before the thread can be reset or deleted.  The caller
+ * is the ending thread itself (return from its entry, tx_thread_terminate()
+ * of itself) or the thread that terminates it.  The thread is TX_COMPLETED or
+ * TX_TERMINATED by then and does not run its code again; its stack is still
+ * there (tx_thread_delete() refuses until the transition has finished).
+ *
+ * tx_thread_clib_ptr points at the thread's own reent only between the
+ * wrapper's initialization and this function, which moves it back to the
+ * global reent first: a thread that never reached the wrapper, or whose reent
+ * is already reclaimed, is skipped.  newlib's _reclaim_reent() does nothing
+ * for the reent _impure_ptr points at, and the scheduler points _impure_ptr at
+ * the current thread's reent, so an ending current thread is switched to the
+ * global reent before the reclaim.  Preemption is disabled, so the scheduler
+ * does not set _impure_ptr back in between; interrupt handlers do not use the
+ * C library.  _reclaim_reent() only calls free() (ESP-IDF's heap, a critical
+ * section) and the reent's cleanup function, which closes nothing here.
  */
-void _tx_clib_reent_cleanup(TX_THREAD *thread_ptr, int partial)
+void _tx_clib_reent_cleanup(TX_THREAD *thread_ptr)
 {
-    if (partial == 0) {
-        _reclaim_reent(&thread_ptr->tx_thread_clib_reent);
+    TX_INTERRUPT_SAVE_AREA
+    struct _reent *reent = &thread_ptr->tx_thread_clib_reent;
+
+    TX_DISABLE
+    if (thread_ptr->tx_thread_clib_ptr != reent) {
+        TX_RESTORE
+        return;
     }
+    thread_ptr->tx_thread_clib_ptr = global_reent;
+    if (_impure_ptr == reent) {
+        _impure_ptr = global_reent;
+    }
+    TX_RESTORE
+
+    _reclaim_reent(reent);
 }
 
 /* Every thread is entered through this wrapper (see _tx_clib_thread_setup). */
 static void thread_wrapper(ULONG arg)
 {
-    TX_INTERRUPT_SAVE_AREA
     TX_THREAD *thread_ptr = _tx_thread_current_ptr;
 
     (void) arg;
 
     _tx_clib_reent_init(thread_ptr);
 
-    TX_DISABLE
-    _impure_ptr = thread_ptr->tx_thread_clib_ptr;
-    TX_RESTORE
-
     (thread_ptr->tx_real_thread_entry)(thread_ptr->tx_thread_entry_parameter);
-
-    _tx_clib_reent_cleanup(thread_ptr, 1);
-    _tx_clib_reent_cleanup(thread_ptr, 0);
-
-    /*
-     * The reent is gone; fall back to the global one until the thread is
-     * reset and runs the wrapper again.  The scheduler copies this pointer to
-     * _impure_ptr on the next switch to this thread.
-     */
-    TX_DISABLE
-    thread_ptr->tx_thread_clib_ptr = global_reent;
-    _impure_ptr = global_reent;
-    TX_RESTORE
 }
 
 void _tx_clib_thread_setup(TX_THREAD *thread_ptr)
