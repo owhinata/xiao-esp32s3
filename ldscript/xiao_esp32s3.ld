@@ -3,9 +3,11 @@
  * bootloader and executing from flash.
  *
  * The image is a standard ESP-IDF application image ("esptool elf2image"):
- * the bootloader (bootloader/) finds it in the "factory" partition, checks
- * its SHA-256, copies the RAM segments into SRAM, maps the two flash segments
- * through the cache and MMU, and jumps to _start (port/startup.c).
+ * the bootloader (bootloader/) picks one of the two OTA partitions ("ota_0",
+ * "ota_1"; otadata says which), checks the image's SHA-256, copies the RAM
+ * segments into SRAM, maps the two flash segments through the cache and MMU
+ * at the same virtual addresses whichever partition they are in, and jumps
+ * to _start (port/startup.c).
  *
  * Address spaces:
  *
@@ -411,7 +413,8 @@ SECTIONS
             .literal.multi_heap_internal_unlock .text.multi_heap_internal_unlock
             .literal.assert_valid_block .text.assert_valid_block)
         */esp_libc/src/heap.c.obj(.literal .literal.* .text .text.*)
-        *esp_cache_msync.c.obj(.literal .literal.* .text .text.*)
+        *esp_cache_msync.c.obj(
+            .literal.esp_cache_get_alignment .text.esp_cache_get_alignment)
         *esp_mspi_align.c.obj(
             .literal.esp_mspi_get_alignment .text.esp_mspi_get_alignment)
         . = ALIGN(4);
@@ -445,19 +448,37 @@ SECTIONS
      *     esp_hal_mspi/linker.lf, esp_hal_cache/linker.lf: the API, the chip
      *     drivers, the host driver, the HAL's command part, the no-OS cache
      *     suspend, the cache HAL), the list of chip drivers it searches, and
-     *     the cache flush stand-in it calls (flash_mmap.c).  Whole objects:
-     *     their functions that only run with the cache on (the start-up of
-     *     the chip) cost a little RAM,
+     *     the cache flush it calls (flash_mmap.c's IRAM_ATTR functions, with
+     *     the MMU driver's lookup of its mappings in esp_mmu_map.c).  Whole
+     *     objects: their functions that only run with the cache on (the
+     *     start-up of the chip) cost a little RAM,
+     *   - ESP-IDF's MMU driver (esp_mm), which writes the MMU table with the
+     *     cache frozen: its IRAM_ATTR functions (esp_mmu_map.c), the MMU HAL
+     *     (mmu_hal.c; esp_hal_cache/linker.lf), the freeze itself (the
+     *     stand-in esp_cache_utils.c) and the critical section around the
+     *     invalidation (esp_cache_msync.c; esp_mm/linker.lf keeps the whole
+     *     object out of flash, here the rest of it is in .iram0.fast),
      *   - interrupt entry/exit and context switch, with the execution profile
      *     kit they call (tx_execution_profile.c).
      * The same list appears in .dram0.data for the read-only data of these
-     * objects.  Keep the two in step.  ldscript/check_ram_refs.py checks
-     * after every link that nothing in these objects refers to the flash.
+     * objects (not for the objects named only for their IRAM_ATTR functions,
+     * whose read-only data stays in flash).  Keep the two in step.
+     * ldscript/check_ram_refs.py checks after every link that nothing in
+     * these objects refers to the flash.  The objects named for their
+     * IRAM_ATTR functions come before the generic .iram1 pattern, which
+     * would take those first, and after the first pattern, under which the
+     * linker's map lists the literals it gathers at the start of the
+     * section.
      */
     .iram0.text :
     {
         . = ALIGN(4);
         *(.entry.literal .entry.text)
+        *flash_mmap.c.obj(.iram1.literal .iram1 .iram1.*)
+        *esp_mmu_map.c.obj(.iram1.literal .iram1 .iram1.*)
+        *esp_cache_msync.c.obj(
+            .literal.esp_cache_sync_ops_enter_critical_section .text.esp_cache_sync_ops_enter_critical_section
+            .literal.esp_cache_sync_ops_exit_critical_section .text.esp_cache_sync_ops_exit_critical_section)
         EXCLUDE_FILE(*libusb_host.a:hcd_dwc.c.obj) *(.iram1.literal .iram1 .iram1.*)
         *startup.c.obj(.literal .literal.* .text .text.*)
         *panic.c.obj(.literal .literal.* .text .text.*)
@@ -470,7 +491,6 @@ SECTIONS
         *esp_rom_cache_esp32s2_esp32s3.c.obj(.literal .literal.* .text .text.*)
         *mspi_timing.c.obj(.literal .literal.* .text .text.*)
         *board_flash_os.c.obj(.literal .literal.* .text .text.*)
-        *flash_mmap.c.obj(.literal .literal.* .text .text.*)
         *esp_flash_api.c.obj(.literal .literal.* .text .text.*)
         *spi_flash_chip_drivers.c.obj(.literal .literal.* .text .text.*)
         *spi_flash_chip_generic.c.obj(.literal .literal.* .text .text.*)
@@ -485,6 +505,8 @@ SECTIONS
         *spi_flash_encrypt_hal_iram.c.obj(.literal .literal.* .text .text.*)
         *spi_flash_os_func_noos.c.obj(.literal .literal.* .text .text.*)
         *cache_hal.c.obj(.literal .literal.* .text .text.*)
+        *mmu_hal.c.obj(.literal .literal.* .text .text.*)
+        *esp_cache_utils.c.obj(.literal .literal.* .text .text.*)
         *xtensa_context.S.obj(.literal .literal.* .text .text.*)
         *xtensa_intr_asm.S.obj(.literal .literal.* .text .text.*)
         *tx_*.S.obj(.literal .literal.* .text .text.*)
@@ -515,7 +537,6 @@ SECTIONS
         *esp_rom_cache_esp32s2_esp32s3.c.obj(.rodata .rodata.*)
         *mspi_timing.c.obj(.rodata .rodata.*)
         *board_flash_os.c.obj(.rodata .rodata.*)
-        *flash_mmap.c.obj(.rodata .rodata.*)
         *esp_flash_api.c.obj(.rodata .rodata.*)
         *spi_flash_chip_drivers.c.obj(.rodata .rodata.*)
         *spi_flash_chip_generic.c.obj(.rodata .rodata.*)
@@ -530,6 +551,8 @@ SECTIONS
         *spi_flash_encrypt_hal_iram.c.obj(.rodata .rodata.*)
         *spi_flash_os_func_noos.c.obj(.rodata .rodata.*)
         *cache_hal.c.obj(.rodata .rodata.*)
+        *mmu_hal.c.obj(.rodata .rodata.*)
+        *esp_cache_utils.c.obj(.rodata .rodata.*)
         *xtensa_context.S.obj(.rodata .rodata.*)
         *xtensa_intr_asm.S.obj(.rodata .rodata.*)
         *xtensa_vectors.S.obj(.rodata .rodata.*)
@@ -591,10 +614,16 @@ SECTIONS
      * sections of the Wi-Fi libraries that .iram0.fast does not take
      * (.wifislpiram: ESP-IDF's CONFIG_ESP_WIFI_SLP_IRAM_OPT, off by
      * default).
+     *
+     * _instruction_reserved_start/_end here and _rodata_reserved_start/_end
+     * in .flash.rodata are ESP-IDF's names for the two ranges that the
+     * bootloader maps: ESP-IDF's MMU driver (esp_mmu_map_init(), port/
+     * startup.c) keeps their pages out of the ones it hands out.
      */
     .flash.text :
     {
         _flash_text_start = ABSOLUTE(.);
+        _instruction_reserved_start = ABSOLUTE(.);
         *(.literal .text .literal.* .text.*)
         *(.wifi0iram .wifi0iram.* .wifirxiram .wifirxiram.* .wifislprxiram .wifislprxiram.*)
         *(.wifislpiram .wifislpiram.* .wifiorslpiram .wifiorslpiram.* .wifiextrairam .wifiextrairam.*)
@@ -612,6 +641,7 @@ SECTIONS
         *(.fini.literal .fini .init.literal .init)
         . = ALIGN(4);
         _flash_text_end = ABSOLUTE(.);
+        _instruction_reserved_end = ABSOLUTE(.);
     } > irom_seg
 
     /*
@@ -624,6 +654,7 @@ SECTIONS
     .flash.rodata _flash_rodata_vma :
     {
         _flash_rodata_start = ABSOLUTE(.);
+        _rodata_reserved_start = ABSOLUTE(.);
         /* esp_app_desc_t, first: the bootloader and esptool look for it here. */
         KEEP(*(.rodata_desc .rodata_desc.*))
         *(.rodata .rodata.* .gnu.linkonce.r.*)
@@ -699,6 +730,7 @@ SECTIONS
         __init_array_end = ABSOLUTE(.);
         . = ALIGN(4);
         _flash_rodata_end = ABSOLUTE(.);
+        _rodata_reserved_end = ABSOLUTE(.);
     } > drom_seg
 
     ASSERT(esp_app_desc == _flash_rodata_start,

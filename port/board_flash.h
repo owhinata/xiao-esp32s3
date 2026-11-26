@@ -1,10 +1,11 @@
 /*
  * The flash, through ESP-IDF's esp_flash driver (port/board_flash.c,
  * port/board_flash_os.c), for the persistent store.  Only the "settings"
- * partition of partitions.csv can be written or erased; the build passes
- * its offset and size, read from the partition table at configure time, as
- * BOARD_SETTINGS_OFFSET and BOARD_SETTINGS_SIZE to the sources that need
- * them.
+ * partition of partitions.csv and the otadata partition (written by
+ * ESP-IDF's OTA code through the driver) can be written or erased; the
+ * build passes the offset and size of "settings", read from the partition
+ * table at configure time, as BOARD_SETTINGS_OFFSET and BOARD_SETTINGS_SIZE
+ * to the sources that need them.
  *
  * No Espressif type appears here: the shell's side of the store includes
  * this header and must not see sdkconfig.h.
@@ -32,8 +33,8 @@ bool board_flash_settings_ok(void);
  * 256-byte program chunk or one sector erase at a time, and the chip is
  * idle at the end of each: calls of different threads may interleave
  * between those steps.  0, or a negative errno: -EINVAL for a request
- * outside the flash, a write or erase outside the "settings" partition
- * (nothing is touched) or a buffer outside internal RAM, -ENODEV when the
+ * outside the flash, a write or erase outside the partitions that are
+ * open (nothing is touched) or a buffer outside internal RAM, -ENODEV when the
  * driver (reads) or the partition table (writes, erases) is not usable,
  * -ETIMEDOUT when the chip did not finish in the driver's time, -EIO for
  * any other failure.

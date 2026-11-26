@@ -122,6 +122,35 @@
 #define CONFIG_BOOTLOADER_OFFSET_IN_FLASH       0x0
 #define CONFIG_PARTITION_TABLE_OFFSET           0x8000
 
+/*
+ * The partition table carries its MD5 (ESP-IDF's default, what
+ * gen_esp32part.py writes): esp_partition's partition.c checks it when it
+ * loads the table.
+ */
+#define CONFIG_PARTITION_TABLE_MD5              1
+
+/*
+ * Rollback of an update (ESP-IDF's default): the bootloader marks a newly
+ * selected OTA image as pending verification when it first starts it, and
+ * if the image starts again while still pending, aborts it and starts the
+ * previous one.  Different from ESP-IDF: the image is confirmed by the
+ * application (CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_BY_APP), not right
+ * before app_main() (CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_ON_STARTUP,
+ * ESP-IDF's default, which would also confirm an image whose network does
+ * not work).  No compiled source tests the confirm option; it is here as
+ * the choice that leaves the other undefined.
+ */
+#define CONFIG_BOOTLOADER_APP_ROLLBACK          1
+#define CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_BY_APP 1
+
+/*
+ * The application runs from flash through the image's code and read-only
+ * data sections (ESP-IDF's default build type, which also sets this):
+ * ESP-IDF's MMU driver keeps the pages the bootloader mapped for them out
+ * of its own (esp_mmu_map.c).
+ */
+#define CONFIG_APP_BUILD_USE_FLASH_SECTIONS     1
+
 /* ---- Second-stage bootloader (ESP-IDF's defaults) ---------------------- */
 
 /* CPU clock the bootloader runs at; _start raises it to BOARD_CPU_FREQ_MHZ. */

@@ -17,11 +17,15 @@
  *
  *   init_cpu()            vectors
  *   init_bss()            .bss (there is no RTC .bss)
- *   ext_mem_init()        the cache HAL's state (cache_hal_init()), cache
+ *   ext_mem_init()        the cache HAL's and the MMU HAL's state
+ *                         (cache_hal_init(), mmu_hal_ctx_init()), cache
  *                         geometry, code/data split of the MMU table
  *   sys_rtc_init()        esp_rtc_init(): rtc_init(), the regulators and the
  *                         SAR peripherals (o-code calibration after power-on);
  *                         the CPU clock kept running in WAITI (see _start)
+ *   mspi_init()           esp_mmu_map_init(): the MMU driver's free pages,
+ *                         all but the ones the bootloader mapped for this
+ *                         image (spi_flash_mmap(), the OTA code)
  *   system_early_init()   esp_clk_init(): RTC fast and slow clocks, the slow
  *                         clock's calibration, the final CPU clock; the
  *                         peripheral clock gates (esp_perip_clk_init()); the
@@ -39,10 +43,8 @@
  * ThreadX, whose objects can only be made from tx_application_define() on.
  *
  * Left out, with the reason:
- *   - mmu_hal_ctx_init() in ext_mem_init() only sets up the MMU HAL's state
- *     for ESP-IDF's MMU driver (esp_mm), which is not built.
- *   - mspi_init(): timing tuning, which the flash at 80 MHz in DIO mode does
- *     not need, and the PSRAM, which is not used.
+ *   - the rest of mspi_init(): timing tuning, which the flash at 80 MHz in
+ *     DIO mode does not need, and the PSRAM, which is not used.
  *   - system_early_init(): the memory region protection the bootloader has
  *     already set (bootloader_init_mem()); stopping the second core and
  *     Cache_Set_IDROM_MMU_Info(), which only the PSRAM code reads; the
@@ -63,11 +65,13 @@
 #include "esp_cpu.h"
 #include "esp_err.h"
 #include "esp_intr_alloc.h"
+#include "esp_private/esp_mmu_map_private.h"
 #include "esp_rom_sys.h"
 #include "esp_private/cache_err_int.h"
 #include "esp_private/esp_sys_event.h"
 #include "esp32s3/rom/cache.h"
 #include "hal/cache_hal.h"
+#include "hal/mmu_hal.h"
 #include "hal/wdt_hal.h"
 #include "soc/ext_mem_defs.h"
 #include "soc/soc.h"
@@ -128,8 +132,12 @@ static void __attribute__((noinline)) cache_init(void)
      * bootloader left them.
      */
     const cache_hal_config_t config = { .core_nums = 1 };
+    const mmu_hal_config_t mmu_config = { .core_nums = 1 };
 
     cache_hal_init(&config);
+
+    /* The MMU HAL's state, which ESP-IDF's MMU driver (esp_mm) works through. */
+    mmu_hal_ctx_init(&mmu_config);
 
     /* Cache geometry. */
     rom_config_instruction_cache_mode(BOARD_ICACHE_SIZE, BOARD_CACHE_WAYS, BOARD_CACHE_LINE_SIZE);
@@ -259,6 +267,15 @@ void __attribute__((noreturn, section(".entry.text"))) _start(void)
      * variable (delays, the ThreadX tick) and CCOUNT scaled to it.
      */
     esp_rtc_init();
+
+    /*
+     * ESP-IDF's MMU driver: the linear address space minus the pages that
+     * hold this image's code and read-only data (_instruction_reserved_*,
+     * _rodata_reserved_*; see the linker script).  From flash, as in
+     * ESP-IDF.
+     */
+    esp_mmu_map_init();
+
     esp_clk_init();
 
     /*

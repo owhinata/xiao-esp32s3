@@ -35,7 +35,7 @@ UART0.
 | USB host | Espressif's USB Host Library (espressif/esp-usb) with external hubs, on the USB OTG controller (full speed) through the internal PHY of the USB-C connector; started by `usb host start`.  While it runs, the USB-C console is off |
 | Audio input | A USB Audio Class microphone on the USB host: UAC 1.0 through Espressif's UAC host driver (esp-usb `usb_host_uac`), UAC 2.0 through `port/usb/audio_uac2.c`.  16-bit PCM, mixed to one channel, decimated by 3 (a 51-tap FIR) from 48 kHz or taken as it is at 16 kHz, high-passed at 30 Hz to remove the DC offset, and freed of mains hum by notches at 50 Hz (or 60 Hz) and its harmonics up to 420 Hz, for `port/usb/audio.h`; the `uac` command |
 | TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23).  `zperf` runs iperf3 TCP tests in both directions, and `ntp` keeps the clock of `date` on the NTP server at the default gateway |
-| Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, a 28 KiB `settings` partition at 0x9000, the firmware as the factory application at 0x10000 |
+| Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, a 28 KiB `settings` partition at 0x9000, two 3 MB application slots (`ota_0` at 0x10000, `ota_1` at 0x310000) and `otadata` at 0x610000, which records the slot to boot; the last 1.9 MB are unassigned |
 | Settings | rp2040-connect's key-value store (Zephyr settings on Zephyr NVS) in the `settings` partition, written through ESP-IDF's esp_flash driver; the `kv` command |
 
 ## Build
@@ -55,21 +55,24 @@ libraries (~6 MB), the parts of Espressif's mbedTLS that are built
 (~7 MB), and lwIP (Espressif's fork, ~5 MB).
 Neither directory is tracked by this repository.
 
-Outputs in `build/`: `bootloader.bin`, `partition-table.bin` and
-`xiao_esp32s3_threadx.bin` (the application), with their `.elf` and `.map`.
+Outputs in `build/`: `bootloader.bin`, `partition-table.bin`,
+`ota_data_initial.bin` (a blank `otadata`) and `xiao_esp32s3_threadx.bin`
+(the application), with their `.elf` and `.map`.
 
 ## Run
 
 ```sh
-cmake --build build --target flash        # bootloader, partition table and application
-cmake --build build --target app-flash    # the application only (0x10000)
+cmake --build build --target flash        # bootloader, partition table, blank otadata and application
+cmake --build build --target app-flash    # the application (ota_0, 0x10000) and blank otadata
 ```
 
 `flash` **replaces whatever is at the start of the flash** (the firmware that
 was on the board stops booting until it is written back; the ROM download mode
 itself cannot be erased, so the board is always recoverable with esptool).
 `app-flash` is enough once the bootloader and the partition table are on the
-board.
+board.  Neither target writes the `settings` partition.  Both write a blank
+`otadata`, so that the bootloader starts the image just written to `ota_0`
+whatever slot ran before (ESP-IDF's `app-flash` leaves `otadata` alone).
 
 Both targets go through `script/flash.py`, which finds the board's USB
 Serial/JTAG port by its USB ID (303a:1001) and lets esptool reset the chip into
@@ -119,6 +122,7 @@ Available commands:
              (MAC address, state, IPv4 address, default router, netmask)
   kv       : Application key-value storage
   ntp      : Network time synchronization
+  ota      : Firmware update slots (OTA)
   ps       : List the tasks
   reboot   : Restart the board
   sleep    : Sleep for <ms> milliseconds (Zephyr's kernel sleep)
@@ -200,6 +204,10 @@ the ROM download mode, where esptool can connect.  A reset from esptool or the
 RESET button returns to the firmware.  `id` prints the factory MAC address
 from eFuse.
 
+`ota status` shows the two application slots: which one this image runs
+from, which one the bootloader starts next, and for each its otadata entry
+(sequence number and state) and its image's version and build time.
+
 `dmesg` shows a log kept in RAM that survives a reset, so it also holds the
 lines of earlier boots.
 
@@ -254,20 +262,24 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
 1. The mask ROM loads the second-stage bootloader from flash offset 0.
 2. The bootloader (`bootloader/CMakeLists.txt`; 75 unmodified ESP-IDF sources)
    sets up the clocks (PLL, CPU at 80 MHz), the flash and the cache, reads the
-   partition table (`partitions.csv`: settings, a 7 MB factory
-   application), verifies the application image, loads its RAM segments, maps
+   partition table (`partitions.csv`: settings, two application slots and
+   otadata), picks the slot that otadata selects (`ota_0` when otadata is
+   blank, which it then records), verifies the application image, loads its RAM segments, maps
    its flash segments and jumps to `_start`.  Its log goes to UART0 and to the
    USB console.
 3. `_start` (`port/startup.c`) does what ESP-IDF's application start-up does
    at this point, in the same order: vectors and CPU state, `.bss`, the cache
    geometry and the boundary between code and data in the shared MMU table,
    `esp_rtc_init()` (the internal regulators trimmed from eFuse),
+   `esp_mmu_map_init()` (ESP-IDF's MMU driver, through which the partition
+   and OTA code map flash),
    `esp_clk_init()` (calibration of the RTC slow clock, CPU to 240 MHz), the
    peripheral clock gates as ESP-IDF leaves them (`esp_perip_clk_init()`),
    the cache error interrupt, the
    RTC watchdog the bootloader armed for the application off, the console,
    ESP-IDF's core start-up hooks (the heap, esp_timer's clock, the flash
-   driver, which also checks that the partition table has `settings`), the
+   driver, which also checks that the partition table has `settings` and
+   opens only that partition and otadata for writing), the
    constructors, then `main()`.  The later hooks run where ESP-IDF runs
    them: in `tx_application_define()` (esp_timer's task) and in the first
    task, "main", which then starts the Wi-Fi driver in station mode

@@ -42,7 +42,8 @@ fetch_upstream(esp-idf
     components/esp_mspi/esp_mspi_align
     components/esp_sleep/include
     components/nvs_flash/include
-    components/esp_partition/include
+    components/esp_partition
+    components/app_update
     components/esp_netif/include
     components/lwip/include
     components/lwip/port
@@ -293,14 +294,16 @@ add_executable(app
     "${PORT_DIR}/syscalls.c"
     "${PORT_DIR}/stdio_wrap.c"
     "${PORT_DIR}/esp_log_ram.c"
+    "${PORT_DIR}/ota_slots.c"
     "${PORT_DIR}/net/wifi.c"
     "${PORT_DIR}/net/wlanif.c"
     "${PORT_DIR}/net/lwip_bridge.c"
     "${PORT_DIR}/usb/audio.c"
     "${PORT_DIR}/usb/audio_uac2.c"
     "${PORT_DIR}/usb/host.c"
+    "${PORT_DIR}/esp_compat/esp_cache_utils.c"
     "${PORT_DIR}/esp_compat/esp_sleep.c"
-    "${PORT_DIR}/esp_compat/flash_mmap.c"
+    "${PORT_DIR}/esp_compat/esp_system.c"
     "${PORT_DIR}/esp_compat/lwip_vfs.c"
     "${PORT_DIR}/esp_compat/mspi_timing.c"
     "${PORT_DIR}/esp_compat/nvs.c"
@@ -867,7 +870,28 @@ add_library(esp_idf OBJECT
     "${ESP_HAL}/esp_hal_mspi/spi_flash_hal_iram.c"
     "${ESP_HAL}/esp_hal_mspi/spi_flash_encrypt_hal_iram.c"
     "${ESP_HAL}/esp_system/port/soc/esp32s3/cache_err_int.c"
-    "${ESP_HAL}/bootloader_support/src/flash_partitions.c")
+    "${ESP_HAL}/bootloader_support/src/flash_partitions.c"
+    # Firmware updates: ESP-IDF's OTA API (app_update) on its partition API
+    # (esp_partition, the target's part with its start-up hook), the
+    # application side of the image check (esp_image_verify, with the
+    # SHA-256 of the PSA crypto core), the otadata helpers and the chip check
+    # of bootloader_support, bootloader_flash.c's mapping on spi_flash_mmap();
+    # that on ESP-IDF's MMU driver (esp_mm, its layout for this chip) and the
+    # MMU HAL.  port/esp_compat/ota_os.c has what they ask of ESP-IDF's
+    # system and cache code.
+    "${ESP_IDF}/app_update/esp_ota_ops.c"
+    "${ESP_IDF}/esp_partition/partition.c"
+    "${ESP_IDF}/esp_partition/partition_target.c"
+    "${ESP_IDF}/esp_image_verify/src/esp_image_format.c"
+    "${ESP_IDF}/esp_image_verify/src/bootloader_sha.c"
+    "${ESP_IDF}/esp_image_verify/src/bootloader_sha_flash.c"
+    "${ESP_HAL}/bootloader_support/src/bootloader_common.c"
+    "${ESP_HAL}/bootloader_support/src/bootloader_common_loader.c"
+    "${ESP_HAL}/bootloader_support/bootloader_flash/src/bootloader_flash.c"
+    "${ESP_HAL}/esp_mm/esp_mmu_map.c"
+    "${ESP_HAL}/esp_mm/port/esp32s3/ext_mem_layout.c"
+    "${ESP_HAL}/spi_flash/flash_mmap.c"
+    "${ESP_HAL}/esp_hal_cache/mmu_hal.c")
 target_include_directories(esp_idf PRIVATE
     "${ESP_HAL}/esp_libc/platform_include"
     "${ESP_HAL}/esp_timer/include"
@@ -884,6 +908,10 @@ target_include_directories(esp_idf PRIVATE
     "${ESP_HAL}/esp_hw_support/ldo/include"
     "${ESP_HAL}/esp_system/port/include/private"
     "${ESP_HAL}/bootloader_support/include"
+    "${ESP_HAL}/bootloader_support/bootloader_flash/include"
+    "${ESP_HAL}/esp_app_format/include"
+    "${ESP_IDF}/esp_bootloader_format/include"
+    "${ESP_IDF}/app_update/include"
     "${ESP_IDF}/esp_mspi/mspi_intr/include")
 target_link_libraries(esp_idf PRIVATE esp_wifi_headers freertos threadx esp_hal)
 # Assertions on, as ESP-IDF builds them by default (assert(),
@@ -945,6 +973,28 @@ set_source_files_properties("${ESP_HAL}/esp_security/src/esp_crypto_periph_clk.c
                COMPILE_OPTIONS "-include;stdbool.h")
 set_source_files_properties("${ESP_HAL}/esp_system/port/esp_system_chip.c"
     PROPERTIES COMPILE_DEFINITIONS "IDF_VER_DEF=\"${IDF_VER}\"")
+# The image check's private headers, and for its SHA-256 the PSA crypto
+# core's headers and configuration (mbedtls_config).
+get_target_property(MBEDTLS_CONFIG_INCLUDES mbedtls_config INTERFACE_INCLUDE_DIRECTORIES)
+get_target_property(MBEDTLS_CONFIG_DEFINITIONS mbedtls_config INTERFACE_COMPILE_DEFINITIONS)
+set_source_files_properties(
+    "${ESP_IDF}/esp_image_verify/src/esp_image_format.c"
+    "${ESP_IDF}/esp_image_verify/src/bootloader_sha.c"
+    "${ESP_IDF}/esp_image_verify/src/bootloader_sha_flash.c"
+    PROPERTIES
+        INCLUDE_DIRECTORIES "${ESP_IDF}/esp_image_verify/private_include;${MBEDTLS_CONFIG_INCLUDES}"
+        COMPILE_DEFINITIONS "${MBEDTLS_CONFIG_DEFINITIONS}")
+# bootloader_support's private headers, as its component sees them.
+set_source_files_properties(
+    "${ESP_HAL}/bootloader_support/src/bootloader_common.c"
+    "${ESP_HAL}/bootloader_support/src/bootloader_common_loader.c"
+    "${ESP_HAL}/bootloader_support/bootloader_flash/src/bootloader_flash.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/bootloader_support/private_include")
+# esp_mm's private header of the address regions (ext_mem_layout.h).
+set_source_files_properties(
+    "${ESP_HAL}/esp_mm/esp_mmu_map.c"
+    "${ESP_HAL}/esp_mm/port/esp32s3/ext_mem_layout.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/esp_mm")
 # The flash driver as ESP-IDF builds it: no inlining in the sources whose
 # functions are placed one by one (spi_flash/CMakeLists.txt, "Avoid cache
 # miss by unexpected inlining").  Those of its sources that run with the
@@ -1024,6 +1074,14 @@ target_include_directories(app PRIVATE
 # The partition table's format and its check (esp_flash_partitions.h).
 set_source_files_properties("${PORT_DIR}/board_flash.c"
     PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/bootloader_support/include")
+# The OTA and partition APIs and the formats they use (otadata's entries,
+# the application description).
+set_source_files_properties("${PORT_DIR}/ota_slots.c"
+    PROPERTIES INCLUDE_DIRECTORIES
+        "${ESP_IDF}/app_update/include;${ESP_HAL}/bootloader_support/include;${ESP_HAL}/esp_app_format/include;${ESP_IDF}/esp_bootloader_format/include")
+# esp_mm's private declarations: the MMU driver's start-up, the cache freeze.
+set_source_files_properties("${PORT_DIR}/startup.c" "${PORT_DIR}/esp_compat/esp_cache_utils.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/esp_mm/include")
 # xtensa_rtos is an object library: the vectors are reached only through the
 # linker script and VECBASE, so nothing would pull them out of an archive.
 target_link_libraries(app PRIVATE esp_wifi_headers shell esp_idf ${ESP_WIFI_GROUP} lwip usb_host usb_host_uac
@@ -1168,6 +1226,7 @@ add_library(shell OBJECT
     "${SHELL_PORT}/commands.c"
     "${SHELL_PORT}/fault_record.c"
     "${SHELL_PORT}/flash_kv_os.c"
+    "${SHELL_PORT}/ota_shell.c"
     "${SHELL_PORT}/shell_port.c"
     "${SHELL_PORT}/uac_shell.c"
     "${SHELL_PORT}/usb_shell.c"
@@ -1272,13 +1331,14 @@ add_subdirectory(bootloader)
 # ---------------------------------------------------------------------------
 # Images, partition table and download targets (esptool from ./.venv)
 # ---------------------------------------------------------------------------
-# The standard ESP-IDF flash layout:
-#   0x0      bootloader.bin            ROM loads it (CONFIG_BOOTLOADER_OFFSET_IN_FLASH)
-#   0x8000   partition-table.bin       from partitions.csv (CONFIG_PARTITION_TABLE_OFFSET)
-#   0x10000  xiao_esp32s3_threadx.bin  the "factory" partition; the bootloader loads it
+# The standard ESP-IDF flash layout, with two OTA slots (partitions.csv):
+#   0x0       bootloader.bin            ROM loads it (CONFIG_BOOTLOADER_OFFSET_IN_FLASH)
+#   0x8000    partition-table.bin       from partitions.csv (CONFIG_PARTITION_TABLE_OFFSET)
+#   0x10000   xiao_esp32s3_threadx.bin  "ota_0", the slot the bootloader boots by default
+#   0x610000  ota_data_initial.bin      "otadata", blank: boot the default slot
 #
-# gen_esp32part.py, parttool.py and check_sizes.py are ESP-IDF's
-# (components/partition_table).  They need rich_click and esp_pylib, which
+# gen_esp32part.py, parttool.py, check_sizes.py and gen_empty_partition.py
+# are ESP-IDF's (components/partition_table).  They need rich_click and esp_pylib, which
 # esptool brings into the venv; no other package is needed.
 set(ESPTOOL "${CMAKE_CURRENT_LIST_DIR}/.venv/bin/esptool" CACHE FILEPATH "esptool executable")
 set(ESP_PYTHON "${CMAKE_CURRENT_LIST_DIR}/.venv/bin/python" CACHE FILEPATH
@@ -1318,8 +1378,10 @@ set(PARTITION_TOOLS "${ESP_HAL}/partition_table")
 set(PARTITION_CSV "${CMAKE_CURRENT_LIST_DIR}/partitions.csv")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${PARTITION_CSV}")
 
-# Where the bootloader will look for the application (the partition it boots
-# by default), as ESP-IDF's partition_table_get_partition_info() finds it.
+# Where the bootloader will look for the application when otadata is blank
+# (the partition it boots by default: the factory partition, or without one
+# the first OTA slot), as ESP-IDF's partition_table_get_partition_info()
+# finds it.
 execute_process(
     COMMAND "${ESP_PYTHON}" "${PARTITION_TOOLS}/parttool.py" -q
             --partition-table-offset ${PARTITION_TABLE_OFFSET}
@@ -1331,6 +1393,23 @@ execute_process(
 if(NOT _rc EQUAL 0 OR NOT APP_OFFSET)
     message(FATAL_ERROR "parttool.py could not read ${PARTITION_CSV}: ${_err}")
 endif()
+
+# The otadata partition, as ESP-IDF's app_update component finds it for its
+# blank image (its CMakeLists.txt).
+execute_process(
+    COMMAND "${ESP_PYTHON}" "${PARTITION_TOOLS}/parttool.py" -q
+            --partition-table-offset ${PARTITION_TABLE_OFFSET}
+            --primary-bootloader-offset ${BOOTLOADER_OFFSET}
+            --partition-table-file "${PARTITION_CSV}"
+            get_partition_info --partition-type data --partition-subtype ota --info offset size
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _otadata ERROR_VARIABLE _err
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+string(REGEX MATCH "^(0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)$" _match "${_otadata}")
+if(NOT _rc EQUAL 0 OR NOT _match)
+    message(FATAL_ERROR "No otadata partition in ${PARTITION_CSV}: ${_otadata}${_err}")
+endif()
+set(OTADATA_OFFSET "${CMAKE_MATCH_1}")
+set(OTADATA_SIZE "${CMAKE_MATCH_2}")
 
 # The persistent store's partition, "settings": where port/board_flash.c lets
 # writes and erases through and looks for it in the table on the board, and
@@ -1373,6 +1452,7 @@ set(ELF2IMAGE_ARGS --chip esp32s3 elf2image ${ESPTOOL_FLASH_ARGS}
 set(BOOTLOADER_BIN "${CMAKE_CURRENT_BINARY_DIR}/bootloader.bin")
 set(PARTITION_BIN  "${CMAKE_CURRENT_BINARY_DIR}/partition-table.bin")
 set(APP_BIN        "${CMAKE_CURRENT_BINARY_DIR}/xiao_esp32s3_threadx.bin")
+set(OTADATA_BIN    "${CMAKE_CURRENT_BINARY_DIR}/ota_data_initial.bin")
 
 # Bootloader image, checked against the space before the partition table.
 add_custom_command(OUTPUT "${BOOTLOADER_BIN}"
@@ -1403,7 +1483,14 @@ add_custom_command(OUTPUT "${APP_BIN}"
     DEPENDS app "${PARTITION_BIN}"
     COMMAND_EXPAND_LISTS VERBATIM)
 
-add_custom_target(images ALL DEPENDS "${BOOTLOADER_BIN}" "${PARTITION_BIN}" "${APP_BIN}")
+# otadata, blank (all 0xFF), as ESP-IDF's app_update component makes it: the
+# bootloader then boots the default slot.
+add_custom_command(OUTPUT "${OTADATA_BIN}"
+    COMMAND "${ESP_PYTHON}" "${PARTITION_TOOLS}/gen_empty_partition.py" ${OTADATA_SIZE} "${OTADATA_BIN}"
+    DEPENDS "${PARTITION_CSV}"
+    VERBATIM)
+
+add_custom_target(images ALL DEPENDS "${BOOTLOADER_BIN}" "${PARTITION_BIN}" "${APP_BIN}" "${OTADATA_BIN}")
 
 # script/flash.py finds the port, gets the chip into the ROM's download mode
 # (through USB Serial/JTAG as esptool does, or through the shell's "bootsel"
@@ -1415,18 +1502,26 @@ if(ESPPORT)
     list(APPEND FLASH_TOOL --port "${ESPPORT}")
 endif()
 
-# flash: all three images.  This replaces whatever is at the start of the
-# flash, the board's previous bootloader included.
+# flash: all four images.  This replaces whatever is at the start of the
+# flash, the board's previous bootloader included, and leaves "settings"
+# alone.
 add_custom_target(flash
     COMMAND ${FLASH_TOOL} -- ${ESPTOOL_FLASH_ARGS}
             ${BOOTLOADER_OFFSET} "${BOOTLOADER_BIN}"
             ${PARTITION_TABLE_OFFSET} "${PARTITION_BIN}"
+            ${OTADATA_OFFSET} "${OTADATA_BIN}"
             ${APP_OFFSET} "${APP_BIN}"
     DEPENDS images USES_TERMINAL COMMAND_EXPAND_LISTS VERBATIM)
 
-# app-flash: the application only, once the bootloader and the partition
-# table are on the board (ESP-IDF's "idf.py app-flash").
+# app-flash: the application, once the bootloader and the partition table
+# are on the board (ESP-IDF's "idf.py app-flash"), and blank otadata, which
+# ESP-IDF's app-flash does not write.  Without it a board that an update
+# has switched to the other slot would keep booting that slot, not the
+# image just written; blank otadata makes the bootloader boot the default
+# slot, this image, and fall back to the other one if this one does not
+# check out.
 add_custom_target(app-flash
     COMMAND ${FLASH_TOOL} -- ${ESPTOOL_FLASH_ARGS}
+            ${OTADATA_OFFSET} "${OTADATA_BIN}"
             ${APP_OFFSET} "${APP_BIN}"
     DEPENDS images USES_TERMINAL COMMAND_EXPAND_LISTS VERBATIM)

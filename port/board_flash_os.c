@@ -27,10 +27,12 @@
  * one of the HAL's tight loops, which do not delay, still ends in the
  * watchdog.  After end() the tick catches up the ticks it missed.
  *
- * region_protected() refuses every write and erase outside the "settings"
- * partition (BOARD_SETTINGS_OFFSET, BOARD_SETTINGS_SIZE from the partition
- * table at configure time) and every one until the partition table in
- * flash has been found to agree (port/board_flash.c).
+ * region_protected() lets a write or erase through only inside one of the
+ * regions that port/board_flash.c has opened (board_flash_os.h): the
+ * "settings" partition and otadata.  Nothing is open until the partition
+ * table in flash has been found to agree with the build; port/board_flash.c
+ * never opens a region in the bootloader, the partition table or the
+ * running application.
  *
  * board_flash_fault(): a fault inside a window (an exception, an assertion
  * of the driver, the cache error interrupt, the interrupt watchdog) enters
@@ -70,8 +72,11 @@ extern const esp_flash_os_functions_t esp_flash_noos_functions;
 static volatile bool window_open;
 static uint32_t window_ps;
 
-/* Set by port/board_flash.c once the partition table in flash agrees. */
-static volatile bool settings_writable;
+/* The open regions, [start, end); start == end is closed.  Written with interrupts masked. */
+static struct {
+    uint32_t start;
+    uint32_t end;
+} regions[BOARD_FLASH_REGION_COUNT];
 
 static esp_err_t window_start(void *arg, uint32_t flags)
 {
@@ -106,17 +111,23 @@ static esp_err_t window_delay_us(void *arg, uint32_t us)
     return ESP_OK;
 }
 
-/* True if [start, start + size) lies inside the partition; no sum can wrap. */
-static bool in_settings(size_t start, size_t size)
-{
-    return size <= BOARD_SETTINGS_SIZE && start >= BOARD_SETTINGS_OFFSET
-           && start - BOARD_SETTINGS_OFFSET <= BOARD_SETTINGS_SIZE - size;
-}
-
+/*
+ * ESP_OK if [start, start + size) lies inside one open region.  No sum can
+ * wrap; an empty request inside a region is let through, as the driver
+ * does nothing for it.  Called by the driver before it opens a window.
+ */
 static esp_err_t window_region_protected(void *arg, size_t start_addr, size_t size)
 {
     (void) arg;
-    return settings_writable && in_settings(start_addr, size) ? ESP_OK : ESP_ERR_NOT_ALLOWED;
+    for (unsigned int i = 0; i < BOARD_FLASH_REGION_COUNT; i++) {
+        uint32_t start = regions[i].start;
+        uint32_t end = regions[i].end;
+
+        if (start_addr >= start && start_addr < end && size <= end - start_addr) {
+            return ESP_OK;
+        }
+    }
+    return ESP_ERR_NOT_ALLOWED;
 }
 
 /*
@@ -131,9 +142,13 @@ const esp_flash_os_functions_t board_flash_os_functions = {
     .delay_us = window_delay_us,
 };
 
-void board_flash_os_allow_settings(void)
+void board_flash_os_set_region(enum board_flash_region region, uint32_t offset, uint32_t size)
 {
-    settings_writable = true;
+    uint32_t ps = XTOS_SET_MIN_INTLEVEL(XCHAL_EXCM_LEVEL);
+
+    regions[region].start = offset;
+    regions[region].end = offset + size;
+    XTOS_RESTORE_INTLEVEL(ps);
 }
 
 void board_flash_fault(void)

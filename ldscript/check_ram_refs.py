@@ -68,9 +68,10 @@ EXTRA_OBJECTS = (
 # object is the file name of the object (of the member, in an archive), the
 # section and the symbol are regular expressions on the whole name.
 ALLOWED = (
-    ("startup.c.obj", r"\.literal\.cache_init", r"_flash_text_(start|end)",
-     "the bounds of .flash.text as numbers (its size, for the MMU split), "
-     "not read"),
+    ("startup.c.obj", r"\.literal\.cache_init", r"_flash_text_(start|end)|_instruction_reserved_(start|end)",
+     "the bounds of .flash.text as numbers (its size, for the MMU split; "
+     "_instruction_reserved_* are other names of the same addresses), not "
+     "read"),
     ("startup.c.obj", r"\.entry\.literal", r".*",
      "_start calls into the flash only after cache_init(), its own function, "
      "has set the cache up (port/startup.c)"),
@@ -103,6 +104,16 @@ ALLOWED = (
      "the clock calibration, at start-up and from threads, with the cache on"),
     ("rtc_clk.c.obj", r"\.literal\.rtc_clk_slow_src_set", r"esp_sleep_sub_mode_.*",
      "the RTC slow clock's selection, at start-up with the cache on"),
+    ("esp_cache_msync.c.obj", r"\.literal\.esp_cache_sync_ops_exit_critical_section",
+     r"_tx_thread_system_preempt_check",
+     "the thread switch at the end of a critical section, made only when "
+     "the PS it restores has the interrupts open; it is entered only with "
+     "them masked (the cache freeze, port/esp_compat/esp_cache_utils.c, and "
+     "the flash driver's windows)"),
+    ("esp_mmu_map.c.obj", r"\.dram1\..*", r".*",
+     "the MMU driver's log tag (a DRAM_ATTR pointer to its string in "
+     "flash), read only by its functions in flash: the ones in RAM log "
+     "nothing at this log level"),
 )
 
 CODE_SECTIONS = (".iram0.vectors", ".iram0.text")
@@ -209,7 +220,7 @@ def parse_map(path, wanted):
     pending = None
     pattern = None
     head = re.compile(r"^(\.\S+)\s+0x[0-9a-f]+\s+0x[0-9a-f]+")
-    line_pattern = re.compile(r"^ (\*[^ (]*)\(.*\)\s*$")
+    line_pattern = re.compile(r"^ (?:EXCLUDE_FILE\([^)]*\) )?(\*[^ (]*)\(.*\)\s*$")
     line_full = re.compile(r"^ (\S+)\s+0x([0-9a-f]+)\s+0x([0-9a-f]+)\s+(\S.*)$")
     line_name = re.compile(r"^ (\S+)\s*$")
     line_rest = re.compile(r"^\s+0x([0-9a-f]+)\s+0x([0-9a-f]+)\s+(\S.*)$")

@@ -359,8 +359,9 @@ SHELL_CMD_REGISTER(ps, NULL, "List the tasks", cmd_ps);
  * which sets the realtime clock of "date"), "zperf"
  * (shell/common/compat/zephyr_zperf_shell.c, on the iperf3 of
  * shell/common/compat/zperf_iperf3.c), "usb" (shell/port/usb_shell.c,
- * on the USB host of port/usb/host.h) and "uac" (shell/port/uac_shell.c,
- * on the USB audio input of port/usb/audio.h).
+ * on the USB host of port/usb/host.h), "uac" (shell/port/uac_shell.c,
+ * on the USB audio input of port/usb/audio.h) and "ota"
+ * (shell/port/ota_shell.c, on the OTA slots of port/ota_slots.h).
  */
 SHELL_ENGINE_CMD_DECLARE(bootsel);
 SHELL_ENGINE_CMD_DECLARE(date);
@@ -372,6 +373,7 @@ SHELL_ENGINE_CMD_DECLARE(id);
 SHELL_ENGINE_CMD_DECLARE(ifconfig);
 SHELL_ENGINE_CMD_DECLARE(kv);
 SHELL_ENGINE_CMD_DECLARE(ntp);
+SHELL_ENGINE_CMD_DECLARE(ota);
 SHELL_ENGINE_CMD_DECLARE(reboot);
 SHELL_ENGINE_CMD_DECLARE(sleep);
 SHELL_ENGINE_CMD_DECLARE(uac);
@@ -393,6 +395,7 @@ const struct shell_engine_cmd shell_engine_cmds[] = {
     SHELL_ENGINE_CMD(ifconfig),
     SHELL_ENGINE_CMD(kv),
     SHELL_ENGINE_CMD(ntp),
+    SHELL_ENGINE_CMD(ota),
     SHELL_ENGINE_CMD(ps),
     SHELL_ENGINE_CMD(reboot),
     SHELL_ENGINE_CMD(sleep),
