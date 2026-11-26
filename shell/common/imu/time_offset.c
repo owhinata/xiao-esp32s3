@@ -46,12 +46,18 @@ static void update_rate(struct time_offset *t)
 	const struct time_offset_sample *first = &t->anchors[0];
 	const struct time_offset_sample *last = &t->anchors[t->anchor_count - 1];
 	int64_t span = last->mono_us - first->mono_us;
-	int64_t rate;
+	int64_t change, rate;
 
 	if (t->anchor_count < 2 || span < TIME_OFFSET_MIN_RATE_SPAN_US) {
 		return;
 	}
-	rate = (last->offset_us - first->offset_us) * 1000000000LL / span;
+	/* A change too large for the product (above 9223 s) is no rate either. */
+	if (__builtin_sub_overflow(last->offset_us, first->offset_us, &change) ||
+	    change > INT64_MAX / 1000000000LL || change < -(INT64_MAX / 1000000000LL)) {
+		rate = INT64_MAX;
+	} else {
+		rate = change * 1000000000LL / span;
+	}
 	if (rate > TIME_OFFSET_MAX_RATE_PPB || rate < -TIME_OFFSET_MAX_RATE_PPB) {
 		/* Not a plausible oscillator difference: a clock was stepped or
 		 * the path changed. Start over from the newest point. */

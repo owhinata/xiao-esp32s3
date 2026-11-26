@@ -13,7 +13,10 @@
  *   for the struct cast on it (the Cortex-M0+ faults on an unaligned word
  *   access; GCC does not align a local array with -Os),
  * - the index formats are %zu (idx is a size_t; -Wformat of NuttX's
- *   build).
+ *   build),
+ * - zephyr_settings_backend_load_key_cb() skips (logs and ignores) an
+ *   entry with a negative index or an SSID length above
+ *   WIFI_SSID_MAX_LEN, which would write outside the SSID cache.
  */
 
 #include <zephyr/kernel.h>
@@ -89,6 +92,11 @@ static int zephyr_settings_backend_load_key_cb(const char *key, size_t len,
 		return -EINVAL;
 	}
 
+	if (idx < 0) {
+		LOG_ERR("Settings error: negative index, entry %s skipped", key);
+		return 0;
+	}
+
 	if (len < sizeof(struct wifi_credentials_header)) {
 		LOG_ERR("Settings error: invalid settings length");
 		return -EINVAL;
@@ -101,6 +109,11 @@ static int zephyr_settings_backend_load_key_cb(const char *key, size_t len,
 	if (length_read < len) {
 		LOG_ERR("Settings error: entry incomplete");
 		return -ENODATA;
+	}
+
+	if (((struct wifi_credentials_header *)buf)->ssid_len > WIFI_SSID_MAX_LEN) {
+		LOG_ERR("Settings error: SSID too long, entry %s skipped", key);
+		return 0;
 	}
 
 	wifi_credentials_cache_ssid(idx, (struct wifi_credentials_header *)buf);

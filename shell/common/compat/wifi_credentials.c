@@ -13,7 +13,12 @@
  * - the entry buffers are aligned for the struct cast on them (the
  *   Cortex-M0+ faults on an unaligned word access),
  * - casts for the char/uint8_t mix of lookup_idx() and the formats of the
- *   ssize_t index (-Wpointer-sign and -Wformat of NuttX's build).
+ *   ssize_t index (-Wpointer-sign and -Wformat of NuttX's build),
+ * - a stored entry whose SSID, password, anonymous identity or key
+ *   password length exceeds its array is reported as corrupted
+ *   (wifi_credentials_get_by_ssid_personal_struct()), and a password
+ *   longer than the caller's buffer fails with -ENOBUFS
+ *   (wifi_credentials_get_by_ssid_personal()).
  */
 
 #include <string.h>
@@ -144,7 +149,11 @@ int wifi_credentials_get_by_ssid_personal_struct(const char *ssid, size_t ssid_l
 		goto exit;
 	}
 
-	if (buf->header.type < 0 || buf->header.type > WIFI_SECURITY_TYPE_MAX) {
+	if (buf->header.type < 0 || buf->header.type > WIFI_SECURITY_TYPE_MAX ||
+	    buf->header.ssid_len > WIFI_SSID_MAX_LEN ||
+	    buf->header.aid_length > sizeof(buf->header.anon_id) ||
+	    buf->header.key_passwd_length > sizeof(buf->header.key_passwd) ||
+	    buf->password_len > WIFI_CREDENTIALS_MAX_PASSWORD_LEN) {
 		LOG_ERR("Requested WiFi credentials entry is corrupted");
 		ret = -EPROTO;
 		goto exit;
@@ -325,6 +334,11 @@ int wifi_credentials_get_by_ssid_personal(const char *ssid, size_t ssid_len,
 		struct wifi_credentials_personal *header_personal =
 			(struct wifi_credentials_personal *)buf;
 
+		if (header_personal->password_len > password_buf_len) {
+			LOG_ERR("%s buffer too small", "WiFi password");
+			ret = -ENOBUFS;
+			break;
+		}
 		memcpy(password_buf, header_personal->password, header_personal->password_len);
 		*password_len = header_personal->password_len;
 		break;

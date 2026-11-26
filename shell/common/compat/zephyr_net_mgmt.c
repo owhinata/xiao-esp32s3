@@ -133,19 +133,12 @@ static void mgmt_run_callbacks(const struct mgmt_event_entry *mgmt_event)
   (void)k_mutex_unlock(&net_mgmt_callback_lock);
 }
 
-void net_mgmt_add_event_callback(struct net_mgmt_event_callback *cb)
-{
-  (void)k_mutex_lock(&net_mgmt_callback_lock, K_FOREVER);
-  cb->next = g_callbacks;
-  g_callbacks = cb;
-  (void)k_mutex_unlock(&net_mgmt_callback_lock);
-}
+/* Under net_mgmt_callback_lock. */
 
-void net_mgmt_del_event_callback(struct net_mgmt_event_callback *cb)
+static void mgmt_unlist_callback(struct net_mgmt_event_callback *cb)
 {
   struct net_mgmt_event_callback **p;
 
-  (void)k_mutex_lock(&net_mgmt_callback_lock, K_FOREVER);
   for (p = &g_callbacks; *p != NULL; p = &(*p)->next)
     {
       if (*p == cb)
@@ -154,7 +147,25 @@ void net_mgmt_del_event_callback(struct net_mgmt_event_callback *cb)
           break;
         }
     }
+}
 
+/* A callback already in the list is moved to its head, as Zephyr's
+ * sys_slist_find_and_remove() before the prepend does: never twice in it.
+ */
+
+void net_mgmt_add_event_callback(struct net_mgmt_event_callback *cb)
+{
+  (void)k_mutex_lock(&net_mgmt_callback_lock, K_FOREVER);
+  mgmt_unlist_callback(cb);
+  cb->next = g_callbacks;
+  g_callbacks = cb;
+  (void)k_mutex_unlock(&net_mgmt_callback_lock);
+}
+
+void net_mgmt_del_event_callback(struct net_mgmt_event_callback *cb)
+{
+  (void)k_mutex_lock(&net_mgmt_callback_lock, K_FOREVER);
+  mgmt_unlist_callback(cb);
   (void)k_mutex_unlock(&net_mgmt_callback_lock);
 }
 

@@ -37,9 +37,6 @@
  * - printk() of "Connection request failed with error" is LOG_ERR() (the
  *   Zephyr build's printk() goes to its log, CONFIG_LOG_PRINTK, so the
  *   message is in "dmesg" in both, here with the log's prefix);
- * - the scan's event callback is removed before it is added again: Zephyr's
- *   net_mgmt_add_event_callback() does that itself, the layer's does not
- *   (common/compat/zephyr_net_mgmt.c);
  * - the helpers it needs from Zephyr's wifi_mgmt.c (wifi_state_txt(),
  *   wifi_mode_txt(), wifi_link_mode_txt(), wifi_mfp_txt(),
  *   wifi_conn_status_txt(), wifi_disconn_reason_txt()), net/ip/utils.c
@@ -654,8 +651,6 @@ static int cmd_wifi_scan(const struct shell *sh, size_t argc, char *argv[])
 
 	context.sh = sh;
 
-	/* Zephyr's net_mgmt_add_event_callback() removes it first. */
-	net_mgmt_del_event_callback(&wifi_shell_scan_cb);
 	net_mgmt_add_event_callback(&wifi_shell_scan_cb);
 
 	if (net_mgmt(NET_REQUEST_WIFI_SCAN, iface, &params, sizeof(params))) {
