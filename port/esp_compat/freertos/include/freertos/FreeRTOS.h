@@ -46,8 +46,8 @@
  * one core carries no state.  portENTER_CRITICAL(mux) and
  * taskENTER_CRITICAL(mux) are the configuration's (FreeRTOSConfig.h),
  * which says what a critical section does here; the _ISR and _SAFE forms
- * are the same section, which serves threads, interrupt handlers, the
- * start-up and the fault path alike.
+ * of portENTER_CRITICAL() are the same section, which serves threads,
+ * interrupt handlers, the start-up and the fault path alike.
  */
 typedef spinlock_t                      portMUX_TYPE;
 
@@ -58,13 +58,6 @@ typedef spinlock_t                      portMUX_TYPE;
 #define portEXIT_CRITICAL_ISR(mux)      portEXIT_CRITICAL(mux)
 #define portENTER_CRITICAL_SAFE(mux)    portENTER_CRITICAL(mux)
 #define portEXIT_CRITICAL_SAFE(mux)     portEXIT_CRITICAL(mux)
-#define taskENTER_CRITICAL_ISR(mux)     portENTER_CRITICAL(mux)
-#define taskEXIT_CRITICAL_ISR(mux)      portEXIT_CRITICAL(mux)
-#define taskENTER_CRITICAL_SAFE(mux)    portENTER_CRITICAL(mux)
-#define taskEXIT_CRITICAL_SAFE(mux)     portEXIT_CRITICAL(mux)
-
-#define portSET_INTERRUPT_MASK_FROM_ISR()       taskENTER_CRITICAL_FROM_ISR()
-#define portCLEAR_INTERRUPT_MASK_FROM_ISR(x)    taskEXIT_CRITICAL_FROM_ISR(x)
 
 /* ---- Context ------------------------------------------------------------ */
 
@@ -114,7 +107,6 @@ static inline __attribute__((always_inline)) void esp_compat_yield_from_isr(int 
 /* Stock FreeRTOS's trace hooks of interrupt handlers; the layer has no tracing. */
 #define traceISR_ENTER(irq)
 #define traceISR_EXIT()
-#define traceISR_EXIT_TO_SCHEDULER()
 
 /* ---- Tasks -------------------------------------------------------------- */
 

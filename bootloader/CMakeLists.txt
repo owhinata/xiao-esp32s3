@@ -66,7 +66,7 @@ set(BL_INCLUDES
     "${ESP_HAL}/hal/platform_port/include"
     "${ESP_HAL}/hal/esp32s3/include"
     "${ESP_HAL}/hal/include")
-foreach(_c esp_hal_ana_conv esp_hal_cache esp_hal_clock esp_hal_debug_assist esp_hal_dma
+foreach(_c esp_hal_ana_conv esp_hal_cache esp_hal_clock esp_hal_dma
            esp_hal_gpio esp_hal_gpspi esp_hal_mspi esp_hal_pmu esp_hal_regi2c
            esp_hal_rtc_timer esp_hal_security esp_hal_systimer esp_hal_timg esp_hal_uart
            esp_hal_usb esp_hal_wdt)
@@ -79,15 +79,10 @@ list(APPEND BL_INCLUDES
     "${ESP_HAL}/esp_rom/esp32s3/include/esp32s3"
     "${ESP_HAL}/esp_rom/esp32s3"
     "${ESP_HAL}/esp_hw_support/include"
-    "${ESP_HAL}/esp_hw_support/include/soc"
-    "${ESP_HAL}/esp_hw_support/include/soc/esp32s3"
     "${ESP_HAL}/esp_hw_support/port/esp32s3/include"
     "${ESP_HAL}/esp_hw_support/port/esp32s3"
     "${ESP_HAL}/esp_hw_support/ldo/include"
-    "${ESP_HAL}/esp_hw_support/debug_probe/include"
     "${ESP_HAL}/esp_hw_support/etm/include"
-    "${ESP_HAL}/esp_hw_support/power_supply/include"
-    "${ESP_HAL}/esp_hw_support/modem/include"
     "${ESP_HAL}/esp_system/include"
     # Not in esp-hal-3rdparty, from ESP-IDF: the headers of esp_sleep
     # (rtc_clk.c) and of esp_mspi's timing tuning (rtc_init.c)

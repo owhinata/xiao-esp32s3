@@ -26,8 +26,6 @@
 #include "tx_user.h"
 #endif
 
-#define XT_RTOS_NAME            ThreadX
-
 #if !XCHAL_HAVE_XEA2
 #error "This ThreadX port requires Xtensa Exception Architecture 2 (XEA2)."
 #endif
@@ -84,8 +82,8 @@
  * CCOMPARE interrupt in place of a table entry (dispatch_c_isr).  It is the
  * board's board_tick_interrupt() (port/watchdog.c), which feeds the
  * interrupt watchdog and then calls _tx_timer_interrupt: this keeps the feed
- * out of the assembly of tx_timer_interrupt.S, whose own hook
- * (tx_timer_user_isr) the shell uses.
+ * out of the assembly of tx_timer_interrupt.S.  Its own hook, the weak
+ * tx_timer_user_isr, is not defined.
  */
 #ifndef TX_NO_TIMER
 #define XT_RTOS_TIMER_INT       board_tick_interrupt
@@ -104,9 +102,8 @@
 #define XT_RTOS_CP_STATE        _tx_thread_coproc_state
 #define XT_RTOS_CP_EXC_HOOK     _tx_thread_coproc_exc_hook
 
-/* Convenience macros used by the ThreadX assembly sources. */
+/* Convenience macro used by the ThreadX assembly sources. */
 #define XT_INTS_DISABLE(reg)    rsil reg, XCHAL_EXCM_LEVEL
-#define XT_INTS_ENABLE(reg)     wsr  reg, PS; rsync
 
 #define XT_INTEXC_HOOK_NUM      (1 + XCHAL_NUM_INTLEVELS + XCHAL_HAVE_NMI)
 

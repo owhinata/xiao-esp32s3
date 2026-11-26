@@ -10,9 +10,6 @@
 
 #define BOARD_NAME              "XIAO ESP32S3"
 
-/* Main crystal. */
-#define BOARD_XTAL_FREQ_HZ      40000000u
-
 /* CPU clock the start-up code switches to: 80, 160 or 240 (PLL). */
 #define BOARD_CPU_FREQ_MHZ      240
 
@@ -129,7 +126,6 @@ void     board_esp_log_attach(void);
  */
 void     console_init(void);    /* sets up UART0 and its interrupt; also routes esp_rom_printf() here */
 void     console_write(const char *buf, uint32_t len);
-void     console_puts(const char *s);
 int      console_read_nonblock(char *buf, uint32_t len);
 
 /*

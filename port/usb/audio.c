@@ -802,7 +802,7 @@ static int uac1_driver_alt(const struct usbaudio_info *info, uint8_t channels, u
  * UAC 2.0: audio_uac2.c takes the first alternate setting with that
  * channel count, 16 bits, a 2-byte subslot and a packet large enough for
  * the rate (uac2_packet_need()), at a rate of the clock.
- * why, when not NULL, says why not.
+ * why, when not NULL, says why not (UAC 1.0 only; it is not set for UAC 2.0).
  */
 static bool format_usable(const struct usbaudio_info *info, uint8_t channels, uint32_t rate, const char **why)
 {
@@ -811,14 +811,11 @@ static bool format_usable(const struct usbaudio_info *info, uint8_t channels, ui
 
     why = why != NULL ? why : &dummy;
     if (info->uac_version == 2u) {
-        *why = "no alternate setting has that channel count with 16 bits in 2 bytes";
         for (uint8_t i = 0; i < info->alt_count; i++) {
             const struct usbaudio_alt *a = &info->alts[i];
 
             if (a->channels == channels && a->bits == 16u && a->subframe == 2u) {
-                *why = "no alternate setting of that format has a packet large enough for the rate";
                 if (a->max_packet >= uac2_packet_need(rate, channels, a->subframe, a->sync)) {
-                    *why = "the clock does not offer the rate";
                     return offers(info, a, rate);
                 }
             }
@@ -1311,7 +1308,7 @@ static int serve_start(void)
     if (audio.streaming) {
         return -EBUSY;
     }
-    if (audio.arg.channels < 1u || audio.arg.channels > 2u || audio.arg.rate < 3u
+    if (audio.arg.channels > 2u || audio.arg.rate < 3u
         || (uint64_t) audio.arg.rate * frame > 192000u) {
         return -EINVAL;
     }
@@ -1405,7 +1402,6 @@ static int serve_quit(void)
     if (audio.version != 0u) {
         if (audio.streaming) {
             (void) serve_stop();
-            stream_end();
         }
         /* A UAC 2.0 one that does not close now is closed by uac2_uninstall(). */
         if (mic_close() != 0 && audio.version == 1u) {

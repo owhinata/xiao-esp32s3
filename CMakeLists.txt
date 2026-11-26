@@ -174,8 +174,6 @@ target_include_directories(esp_hal INTERFACE
     "${ESP_HAL}/esp_rom/esp32s3/include"
     "${ESP_HAL}/esp_rom/esp32s3/include/esp32s3"
     "${ESP_HAL}/esp_hw_support/include"
-    "${ESP_HAL}/esp_hw_support/include/soc"
-    "${ESP_HAL}/esp_hw_support/include/soc/esp32s3"
     "${ESP_HAL}/esp_hw_support/include/esp_private"
     "${ESP_HAL}/esp_hw_support/port/include"
     "${ESP_HAL}/esp_hw_support/port/esp32s3/include"
@@ -233,7 +231,7 @@ target_link_libraries(xtensa_rtos PUBLIC esp_hal)
 # ---------------------------------------------------------------------------
 # ThreadX kernel + port
 # ---------------------------------------------------------------------------
-# Kernel sources come from the submodule.  The architecture port is
+# Kernel sources come from lib/threadx.  The architecture port is
 # port/threadx: the ThreadX-specific half of upstream ports/xtensa/xcc,
 # adapted to the layer above.  Options live in port/threadx/inc/tx_user.h.
 file(GLOB TX_COMMON_SOURCES CONFIGURE_DEPENDS "${TX_DIR}/common/src/*.c")
@@ -388,8 +386,6 @@ add_library(esp_wifi_headers INTERFACE)
 target_include_directories(esp_wifi_headers INTERFACE
     "${ESP_HAL}/esp_wifi/include"
     "${ESP_HAL}/esp_wifi/include/local"
-    "${ESP_HAL}/esp_wifi/wifi_apps/include"
-    "${ESP_HAL}/esp_wifi/wifi_apps/nan_app/include"
     "${ESP_HAL}/esp_event/include"
     "${ESP_HAL}/esp_coex/include"
     "${WPA_DIR}/include"
@@ -556,9 +552,6 @@ target_compile_definitions(wpa_supplicant PRIVATE
     CONFIG_OWE_STA)
 target_link_libraries(wpa_supplicant PRIVATE esp_wifi_headers mbedtls_config freertos esp_hal)
 target_compile_options(wpa_supplicant PRIVATE -UNDEBUG)
-# As in ESP-IDF (its TODO: variables of the upstream code that are set and unused).
-set_source_files_properties("${WPA_DIR}/esp_supplicant/src/esp_common.c"
-    PROPERTIES COMPILE_OPTIONS "-Wno-unused-but-set-variable")
 
 # The Wi-Fi driver's binary libraries (lib/esp32-wifi-lib), the ones
 # ESP-IDF links for this chip, and the PHY's (lib/esp-phy-lib): libphy, and
@@ -589,9 +582,10 @@ set(ESP_WIFI_GROUP
 # ESP-IDF's hooks (the TCP initial sequence numbers, the DHCP options, the
 # IPv4 source route), the ARP check of an offered DHCP address, the socket
 # option extensions and if_index.  The include directories are ESP-IDF's
-# for the component, esp_libc's platform_include among them (sys/poll.h,
-# sys/ioctl.h), for lwIP and for the sources that include its headers
-# (lwip_headers).  The source list is ESP-IDF's for IPv4: without IPv6, PPP,
+# for the component but for the two no compiled source reads (include/apps,
+# port/esp32xx/include/sys), esp_libc's platform_include among them
+# (sys/poll.h, sys/ioctl.h), for lwIP and for the sources that include its
+# headers (lwip_headers).  The source list is ESP-IDF's for IPv4: without IPv6, PPP,
 # SLIP, the bridge, NAPT, AutoIP, SNTP, NetBIOS and the DHCP server.  Not
 # built: ESP-IDF's VFS glue (vfs_lwip.c) and its stand-in without VFS
 # (no_vfs_syscalls.c, whose _read_r()/_write_r() are port/syscalls.c's),
@@ -603,13 +597,11 @@ set(LWIP_PORT "${ESP_IDF}/lwip")
 add_library(lwip_headers INTERFACE)
 target_include_directories(lwip_headers INTERFACE
     "${LWIP_PORT}/include"
-    "${LWIP_PORT}/include/apps"
     "${LWIP_DIR}/include"
     "${LWIP_PORT}/port/include"
     "${LWIP_PORT}/port/freertos/include"
     "${LWIP_PORT}/port/esp32xx/include"
     "${LWIP_PORT}/port/esp32xx/include/arch"
-    "${LWIP_PORT}/port/esp32xx/include/sys"
     "${ESP_HAL}/esp_libc/platform_include")
 add_library(lwip STATIC
     "${LWIP_DIR}/api/api_lib.c"
@@ -653,15 +645,11 @@ add_library(lwip STATIC
     "${LWIP_PORT}/port/if_index.c"
     "${LWIP_PORT}/port/acd_dhcp_check.c")
 target_link_libraries(lwip PUBLIC lwip_headers PRIVATE freertos esp_hal)
-# As in ESP-IDF's CMakeLists.txt for the component (-Wno-address, the
-# definition, the per-file options), and assertions on (LWIP_ASSERT()
-# ends in the fault path, as the other Espressif sources' assert()).
-target_compile_options(lwip PRIVATE -Wno-address -UNDEBUG)
+# As in ESP-IDF's CMakeLists.txt for the component (the definition), and
+# assertions on (LWIP_ASSERT() ends in the fault path, as the other
+# Espressif sources' assert()).
+target_compile_options(lwip PRIVATE -UNDEBUG)
 target_compile_definitions(lwip PRIVATE ESP_LWIP_COMPONENT_BUILD)
-set_source_files_properties("${LWIP_DIR}/core/tcp.c"
-    PROPERTIES COMPILE_OPTIONS "-Wno-type-limits")
-set_source_files_properties("${LWIP_DIR}/core/netif.c"
-    PROPERTIES COMPILE_OPTIONS "-Wno-unused-but-set-variable")
 # The FreeRTOS layer's semaphores are not queues (see the OS adapters
 # below): sys_arch.c keeps the handle xSemaphoreCreateBinaryStatic()
 # returns in a QueueHandle_t and casts a semaphore to one for
@@ -881,8 +869,8 @@ add_library(esp_idf OBJECT
     # SHA-256 of the PSA crypto core), the otadata helpers and the chip check
     # of bootloader_support, bootloader_flash.c's mapping on spi_flash_mmap();
     # that on ESP-IDF's MMU driver (esp_mm, its layout for this chip) and the
-    # MMU HAL.  port/esp_compat/ota_os.c has what they ask of ESP-IDF's
-    # system and cache code.
+    # MMU HAL.  port/esp_compat/esp_system.c and esp_cache_utils.c have
+    # what they ask of ESP-IDF's system and cache code.
     "${ESP_IDF}/app_update/esp_ota_ops.c"
     "${ESP_IDF}/esp_partition/partition.c"
     "${ESP_IDF}/esp_partition/partition_target.c"

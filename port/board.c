@@ -633,16 +633,6 @@ void console_write(const char *buf, uint32_t len)
     uart_write(buf, len);
 }
 
-void console_puts(const char *s)
-{
-    uint32_t len = 0;
-
-    while (s[len] != '\0') {
-        len++;
-    }
-    console_write(s, len);
-}
-
 /*
  * Character sink for the ROM's printf (esp_rom_printf), which the HAL, the
  * Xtensa layer and the fault handlers print through.  Sent to the USB host

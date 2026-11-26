@@ -94,8 +94,6 @@ ALLOWED = (
     ("tx_timer_interrupt.S.obj", r"\.literal", r".*",
      "the tick's C part: an interrupt handler in flash, masked while the "
      "cache is off (port/board_flash_os.c)"),
-    ("tx_timer_interrupt.S.obj", r"\.text", r"_tx_timer_expiration_process|_tx_thread_time_slice",
-     "the same, for the functions the tick calls directly"),
     ("rtc_init.c.obj", r"\.literal\.rtc_init", r"rtc_sleep_pu|sar_periph_ctrl_init",
      "called by rtc_init() at start-up with the cache on, not during the "
      "o-code calibration"),

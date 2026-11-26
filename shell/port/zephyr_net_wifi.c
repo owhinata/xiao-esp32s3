@@ -100,7 +100,6 @@ enum work_kind {
 struct work {
 	enum work_kind kind;
 	int status;
-	unsigned int count;
 };
 
 /* More than the driver's side can have outstanding (one scan, a few results). */
@@ -119,14 +118,14 @@ static K_SEM_DEFINE(taken, 1, 1);
 static struct net_mgmt_event_callback taken_cb;
 
 /* From the driver's side (must not block): the work goes to the thread. */
-static void work_put(enum work_kind kind, int status, unsigned int count)
+static void work_put(enum work_kind kind, int status)
 {
 	k_spinlock_key_t key = k_spin_lock(&work_lock);
 	bool full = work_count == WORK_SLOTS;
 
 	if (!full) {
 		works[(work_head + work_count) % WORK_SLOTS] =
-			(struct work){.kind = kind, .status = status, .count = count};
+			(struct work){.kind = kind, .status = status};
 		work_count++;
 	}
 	k_spin_unlock(&work_lock, key);
@@ -316,12 +315,12 @@ static void link_down(void)
 
 static void connect_result(int status)
 {
-	work_put(WORK_CONNECT_RESULT, status, 0);
+	work_put(WORK_CONNECT_RESULT, status);
 }
 
 static void disconnected(int reason)
 {
-	work_put(WORK_DISCONNECT_RESULT, reason, 0);
+	work_put(WORK_DISCONNECT_RESULT, reason);
 }
 
 static const struct net_wifi_ops driver_ops = {
@@ -377,8 +376,9 @@ static const struct net_wifi_reconnect_ops reconnect_ops = {
 /* In the event loop's task. */
 static void scan_done(int status, unsigned int count, void *arg)
 {
+	ARG_UNUSED(count);
 	ARG_UNUSED(arg);
-	work_put(WORK_SCAN_DONE, status, count);
+	work_put(WORK_SCAN_DONE, status);
 }
 
 /* Zephyr's Wi-Fi management ---------------------------------------------- */

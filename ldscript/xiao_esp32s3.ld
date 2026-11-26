@@ -59,7 +59,7 @@
  *                              data-bus alias, so every byte of code in RAM
  *                              is a byte less of heap)
  *   [_data_start, _heap_start) .data, .bss and .noinit
- *   [_rtc_reserved_start, _rtc_reserved_end)  data kept in RTC FAST memory
+ *   [_rtc_reserved_start, _rtc_reserved_end)  .rtc_reserved (see there)
  *   the ROM's own data (the ROM's layout table, at run time)
  *
  * The instruction cache's memory at the start of SRAM0 is not in the table
@@ -111,7 +111,7 @@ MEMORY
     /*
      * The top 24 bytes of RTC FAST memory (0x600FE000-0x60100000), ESP-IDF's
      * rtc_reserved_seg without the bootloader's part
-     * (CONFIG_BOOTLOADER_RESERVE_RTC_SIZE is 0): the RTC timer's record.
+     * (CONFIG_BOOTLOADER_RESERVE_RTC_SIZE is 0), for .rtc_reserved.
      */
     rtc_reserved_seg (RW) : org = 0x60100000 - 0x18, len = 0x18
 }
@@ -594,10 +594,13 @@ SECTIONS
     _heap_start = ABSOLUTE(.);
 
     /*
-     * RTC FAST memory: only what ESP-IDF keeps at fixed addresses at its top
-     * (esp_clk.c's RTC timer record).  Nothing is linked into the rest
-     * (wake stubs, RTC_DATA_ATTR, RTC_NOINIT_ATTR), which is heap; the
-     * reservation of ESP-IDF's .rtc.force_fast for it is therefore empty.
+     * RTC FAST memory: nothing is linked into it (wake stubs, RTC_DATA_ATTR,
+     * RTC_NOINIT_ATTR), so all of it is heap; the reservation of ESP-IDF's
+     * .rtc.force_fast is empty.  .rtc_reserved takes what ESP-IDF keeps at
+     * a fixed address at the top, esp_clk.c's RTC timer record; nothing that
+     * is linked reads the record (esp_rtc_get_time_us() is not reached), so
+     * the section is empty too.  The heap's layout (memory_layout.c) reads
+     * the symbols of both.
      */
     _rtc_force_fast_end = ABSOLUTE(0x600FE000);
 

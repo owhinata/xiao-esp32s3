@@ -85,7 +85,6 @@ struct usbhost_device {
     uint8_t device_protocol;
     uint8_t interface_classes[4]; /* bInterfaceClass of alternate setting 0, in order, */
     uint8_t interface_count;    /* up to 4 of them */
-    uint8_t configuration;      /* bConfigurationValue, 0 when not configured */
     /* The string descriptors in ASCII ('?' for any other character), "" when absent. */
     char manufacturer[USBHOST_STRING_MAX];
     char product[USBHOST_STRING_MAX];

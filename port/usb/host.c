@@ -194,7 +194,6 @@ static void device_fill(usb_device_handle_t dev, const usb_device_info_t *info,
     out->address = info->dev_addr;
     out->speed = speed_of(info->speed);
     out->parent_port = info->parent.port_num;
-    out->configuration = info->bConfigurationValue;
     string_of(info->str_desc_manufacturer, out->manufacturer, sizeof(out->manufacturer));
     string_of(info->str_desc_product, out->product, sizeof(out->product));
     string_of(info->str_desc_serial_num, out->serial, sizeof(out->serial));

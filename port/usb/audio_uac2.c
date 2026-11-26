@@ -62,7 +62,6 @@ LOG_MODULE_REGISTER(uac2, LOG_LEVEL_INF);
 #define AUDIO_SUBCLASS_CONTROL  0x01u
 #define AUDIO_SUBCLASS_STREAMING 0x02u
 #define CS_INTERFACE            0x24u
-#define AC_INPUT_TERMINAL       0x02u
 #define AC_OUTPUT_TERMINAL      0x03u
 #define AC_FEATURE_UNIT         0x06u
 #define AC_CLOCK_SOURCE         0x0au
@@ -834,12 +833,18 @@ static void iso_done(usb_transfer_t *x)
 
 int uac2_install(const struct uac2_callbacks *callbacks)
 {
+    int ret = -ENOMEM;
+
     if (u2.installed) {
         return 0;
     }
+    /* A failed install leaves nothing behind, so that a later one can succeed. */
     if (!u2.done_created) {
-        if (tx_semaphore_create(&u2.done, "uac2", 0) != TX_SUCCESS
-            || tx_mutex_create(&u2.open_lock, "uac2", TX_INHERIT) != TX_SUCCESS) {
+        if (tx_semaphore_create(&u2.done, "uac2", 0) != TX_SUCCESS) {
+            return -ENOMEM;
+        }
+        if (tx_mutex_create(&u2.open_lock, "uac2", TX_INHERIT) != TX_SUCCESS) {
+            (void) tx_semaphore_delete(&u2.done);
             return -ENOMEM;
         }
         u2.done_created = true;
@@ -852,23 +857,28 @@ int uac2_install(const struct uac2_callbacks *callbacks)
         return -ENOMEM;
     }
     if (usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + CTRL_DATA_MAX, 0, &u2.ctrl) != ESP_OK) {
-        vSemaphoreDelete(u2.ctrl_done);
-        return -ENOMEM;
+        u2.ctrl = NULL;
+        goto fail_sem;
     }
     if (xTaskCreate(client_task, "uac2", APP_STACK_UAC2_CLIENT, NULL, APP_PRIO_UAC_DRIVER, NULL) != pdPASS) {
-        (void) usb_host_transfer_free(u2.ctrl);
-        vSemaphoreDelete(u2.ctrl_done);
-        return -ENOMEM;
+        goto fail_transfer;
     }
     (void) tx_semaphore_get(&u2.done, TX_WAIT_FOREVER);
     if (u2.result != ESP_OK) {
         LOG_ERR("usb_host_client_register: error 0x%x", (unsigned int) u2.result);
-        (void) usb_host_transfer_free(u2.ctrl);
-        vSemaphoreDelete(u2.ctrl_done);
-        return -EIO;
+        ret = -EIO;
+        goto fail_transfer;
     }
     u2.installed = true;
     return 0;
+
+fail_transfer:
+    (void) usb_host_transfer_free(u2.ctrl);
+    u2.ctrl = NULL;
+fail_sem:
+    vSemaphoreDelete(u2.ctrl_done);
+    u2.ctrl_done = NULL;
+    return ret;
 }
 
 /*

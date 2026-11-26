@@ -134,14 +134,14 @@
  * selected OTA image as pending verification when it first starts it, and
  * if the image starts again while still pending, aborts it and starts the
  * previous one.  Different from ESP-IDF: the image is confirmed by the
- * application (CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_BY_APP), not right
- * before app_main() (CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_ON_STARTUP,
- * ESP-IDF's default, which would also confirm an image whose network does
- * not work).  No compiled source tests the confirm option; it is here as
- * the choice that leaves the other undefined.
+ * application, not right before app_main()
+ * (CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_ON_STARTUP, ESP-IDF's default,
+ * which would also confirm an image whose network does not work, is not
+ * defined).  No compiled source tests the other choice of the option,
+ * CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_BY_APP, so it is not defined
+ * either.
  */
 #define CONFIG_BOOTLOADER_APP_ROLLBACK          1
-#define CONFIG_BOOTLOADER_APP_ROLLBACK_CONFIRM_BY_APP 1
 
 /*
  * The application runs from flash through the image's code and read-only
@@ -215,11 +215,9 @@
  * its handler never runs then.  The functions it would mark
  * ESP_TIMER_IRAM_ATTR are in flash.
  */
-#define CONFIG_ESP_TIMER_IMPL_SYSTIMER          1
 #define CONFIG_ESP_TIMER_TASK_STACK_SIZE        2048
 #define CONFIG_ESP_TIMER_INTERRUPT_LEVEL        1
 #define CONFIG_ESP_TIMER_TASK_AFFINITY          0x0
-#define CONFIG_ESP_TIMER_TASK_AFFINITY_CPU0     1
 #define CONFIG_ESP_TIMER_ISR_AFFINITY_CPU0      1
 
 /* ---- Heap (ESP-IDF's heap component, esp_libc's malloc()) ------------- */
@@ -276,7 +274,6 @@
  */
 #define CONFIG_ESP_PHY_ENABLED                  1
 #define CONFIG_ESP_PHY_MAX_TX_POWER             20
-#define CONFIG_ESP_PHY_MAX_WIFI_TX_POWER        20
 #define CONFIG_ESP_PHY_ENABLE_USB               1
 #define CONFIG_ESP_PHY_PLL_TRACK_PERIOD_MS      1000
 
@@ -285,11 +282,8 @@
  * universally administered addresses from the factory base MAC in eFuse,
  * Wi-Fi station = base, SoftAP + 1, Bluetooth + 2, Ethernet + 3.
  */
-#define CONFIG_ESP32S3_UNIVERSAL_MAC_ADDRESSES_FOUR 1
-#define CONFIG_ESP32S3_UNIVERSAL_MAC_ADDRESSES  4
 #define CONFIG_ESP_MAC_UNIVERSAL_MAC_ADDRESSES_FOUR 1
 #define CONFIG_ESP_MAC_UNIVERSAL_MAC_ADDRESSES  4
-#define CONFIG_ESP_MAC_ADDR_UNIVERSE_WIFI_STA   1
 #define CONFIG_ESP_MAC_ADDR_UNIVERSE_WIFI_AP    1
 #define CONFIG_ESP_MAC_ADDR_UNIVERSE_BT         1
 #define CONFIG_ESP_MAC_ADDR_UNIVERSE_ETH        1
@@ -329,22 +323,19 @@
  * it is not defined here).  The driver's interrupt stays masked while the
  * flash driver has the cache off.
  * Buffers: 10 static and 32 dynamic receive buffers, 32 dynamic transmit
- * buffers, 5 static management receive buffers; A-MPDU both ways with a
- * block-ack window of 6.  The Wi-Fi task is not pinned (one core).
+ * buffers, 5 static management receive buffers; A-MPDU both ways, with a
+ * receive block-ack window of 6.  The Wi-Fi task is not pinned (one core).
  */
 #define CONFIG_ESP_WIFI_ENABLED                 1
 #define CONFIG_ESP_WIFI_IRAM_OPT                1
 #define CONFIG_ESP_WIFI_RX_IRAM_OPT             1
 #define CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM    10
 #define CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM   32
-#define CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER       1
 #define CONFIG_ESP_WIFI_TX_BUFFER_TYPE          1
 #define CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM   32
-#define CONFIG_ESP_WIFI_STATIC_RX_MGMT_BUFFER   1
 #define CONFIG_ESP_WIFI_DYNAMIC_RX_MGMT_BUF     0
 #define CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF     5
 #define CONFIG_ESP_WIFI_AMPDU_TX_ENABLED        1
-#define CONFIG_ESP_WIFI_TX_BA_WIN               6
 #define CONFIG_ESP_WIFI_AMPDU_RX_ENABLED        1
 #define CONFIG_ESP_WIFI_RX_BA_WIN               6
 #define CONFIG_ESP_WIFI_SOFTAP_BEACON_MAX_LEN   752
@@ -358,7 +349,6 @@
 #define CONFIG_ESP_WIFI_RMAC_AUTO_RESET_INTERVAL 12
 #define CONFIG_ESP_WIFI_MBEDTLS_CRYPTO          1
 #define CONFIG_ESP_WIFI_ENABLE_WPA3_SAE         1
-#define CONFIG_ESP_WIFI_ENABLE_SAE_H2E          1
 #define CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA     1
 #define CONFIG_ESP_WIFI_GMAC_SUPPORT            1
 
@@ -491,7 +481,6 @@
 #define CONFIG_LWIP_ESP_LWIP_ASSERT             1
 #define CONFIG_LWIP_HOOK_TCP_ISN_DEFAULT        1
 #define CONFIG_LWIP_HOOK_DHCP_EXTRA_OPTION_NONE 1
-#define CONFIG_LWIP_HOOK_NETCONN_EXT_RESOLVE_NONE 1
 
 /* ---- mbedTLS (the supplicant's crypto) ---------------------------------- */
 
