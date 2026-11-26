@@ -1,15 +1,17 @@
 /*
- * USB audio input (port/usb/audio.c): a USB Audio Class 1.0 microphone
- * through esp-usb's usb_host_uac driver, on the USB host of port/usb/host.h.
- * The stream's PCM samples (16 bits, one or two channels) are mixed to one
- * channel, decimated by 3, to 16 kHz from a 48 kHz stream, and freed of
- * their DC offset (a 30 Hz high-pass), into a ring
- * that a consumer reads with usbaudio_read_16k().  This header does not
- * include esp-usb's or ESP-IDF's: its users see only these types.
+ * USB audio input (port/usb/audio.c): a USB Audio Class microphone on the
+ * USB host of port/usb/host.h, a UAC 1.0 one through esp-usb's
+ * usb_host_uac driver, a UAC 2.0 one through port/usb/audio_uac2.c.  The
+ * stream's PCM samples (16 bits, one or two channels) are mixed to one
+ * channel, decimated by 3 (to 16 kHz from a 48 kHz stream; a 16 kHz stream
+ * is taken as it is), and freed of their DC offset (a 30 Hz high-pass),
+ * into a ring that a consumer reads with usbaudio_read_16k().  This
+ * header does not include esp-usb's or ESP-IDF's: its users see only
+ * these types.
  *
  * The functions are for threads.  The requests (usbaudio_info(),
  * usbaudio_stream_start(), usbaudio_stream_stop()) take one caller at a
- * time and wait for the task "uac", which makes every call of the driver.
+ * time and wait for the task "uac", which makes every call of the drivers.
  */
 #ifndef PORT_USB_AUDIO_H
 #define PORT_USB_AUDIO_H
@@ -20,10 +22,10 @@
 
 /*
  * Called by usbhost_start() once the USB Host Library runs, before any
- * device can have enumerated (the driver's client sees only the devices
- * that come after it registers): creates the task "uac", which installs
- * the driver (with its event task "USB UAC Host") and opens the first
- * microphone interface that connects.  0, -ENOMEM, -EIO (logged),
+ * device can have enumerated (a client sees only the devices that come
+ * after it registers): creates the task "uac", which installs the UAC 1.0
+ * driver (with its event task "USB UAC Host") and the UAC 2.0 client (its
+ * task "uac2") and opens the first microphone that connects.  0, -ENOMEM, -EIO (logged),
  * -ETIMEDOUT.
  */
 int usbaudio_start(void);
@@ -47,12 +49,20 @@ struct usbaudio_alt {
     uint8_t subframe;           /* bSubframeSize, bytes per sample */
     uint8_t rate_count;         /* discrete rates in rates[], 0: the range */
     uint32_t rates[USBAUDIO_RATES_MAX];
-    uint32_t rate_min;          /* the continuous range, when rate_count is 0 */
+    uint32_t rate_min;          /* the continuous range, when rate_count is 0 (UAC 1.0) */
     uint32_t rate_max;
+};
+
+/* A range of a UAC 2.0 clock's sampling rates (GET RANGE). */
+struct usbaudio_rate_range {
+    uint32_t min;
+    uint32_t max;
+    uint32_t res;
 };
 
 struct usbaudio_info {
     bool open;                  /* a microphone interface is open */
+    uint8_t uac_version;        /* 1 or 2 */
     uint8_t address;            /* its device */
     uint8_t interface;          /* its AudioStreaming interface */
     uint16_t vid;
@@ -61,6 +71,19 @@ struct usbaudio_info {
     char product[USBAUDIO_STRING_MAX];
     uint8_t alt_count;          /* alternate settings with an endpoint (1 ..) */
     struct usbaudio_alt alts[USBAUDIO_ALTS_MAX];
+    /*
+     * UAC 2.0: the rates come from the stream's clock source, not from the
+     * alternate settings (whose rate fields stay 0).
+     */
+    uint8_t clock_id;
+    uint8_t clock_range_count;  /* ranges read, up to USBAUDIO_RATES_MAX */
+    struct usbaudio_rate_range clock_ranges[USBAUDIO_RATES_MAX];
+    uint32_t clock_rate;        /* its current rate (GET CUR), 0: not read */
+    uint8_t feature_unit;       /* on the microphone's path, 0: none */
+    bool volume_range_valid;    /* UAC 2.0: GET RANGE of the volume, 1/256 dB */
+    int16_t volume_min;
+    int16_t volume_max;
+    int16_t volume_res;
     bool streaming;
     /* While streaming, from the device (GET_CUR of its feature unit). */
     bool volume_valid;
@@ -74,7 +97,8 @@ int usbaudio_info(struct usbaudio_info *info);
 
 /*
  * Starts the stream at rate Hz with channels channels (1 or 2) of 16
- * bits, the driver choosing the alternate setting that has them.  0,
+ * bits, on the alternate setting that has them (UAC 2.0: with the clock
+ * set to rate and read back).  0,
  * -ENODEV (no microphone), -EBUSY (streaming), -EINVAL, -ENOTSUP (no
  * alternate setting has them), -EALREADY, -ETIMEDOUT, -EIO.
  */
@@ -117,7 +141,7 @@ struct usbaudio_stats {
     bool streaming;
     uint32_t rate;              /* of the stream, Hz */
     uint8_t channels;
-    uint32_t out_rate;          /* of the decimated samples, rate / 3 */
+    uint32_t out_rate;          /* of the output samples: rate / 3, or 16000 for a 16 kHz stream */
     uint32_t buffer_bytes;      /* the driver's ring buffer */
     uint64_t bytes;             /* PCM bytes read from the driver */
     uint64_t frames;            /* audio frames (a sample of every channel) */
@@ -134,7 +158,10 @@ struct usbaudio_stats {
     uint32_t wakeups;           /* the driver's RX_DONE events (its buffer passed the threshold) */
     uint32_t near_full;         /* drains that found the driver's buffer within one
                                    transfer of full, where it drops a transfer's data */
-    uint32_t transfer_errors;   /* the driver's TRANSFER_ERROR events */
+    uint32_t transfer_errors;   /* the driver's TRANSFER_ERROR events; UAC 2.0: failed transfers */
+    uint8_t uac_version;        /* of the microphone */
+    uint32_t overruns;          /* UAC 2.0: packets dropped, the buffer was full */
+    uint32_t packet_errors;     /* UAC 2.0: isochronous packets with an error status */
     uint32_t ring_lost;         /* decimated samples overwritten before the consumer read them */
     int64_t start_us;           /* esp_timer_get_time() of the start */
     int64_t first_us;           /* of the first and the last read that returned data, 0: none */
@@ -160,8 +187,8 @@ struct usbaudio_level {
 int usbaudio_level(struct usbaudio_level *level);
 
 /*
- * The next n decimated samples of a 48 kHz stream (16 kHz, one channel,
- * the mix of the stream's channels), waiting up to timeout_ms for them.
+ * The next n samples of a 48 kHz stream decimated, or of a 16 kHz one
+ * (16 kHz, one channel, the mix of the stream's channels), waiting up to timeout_ms for them.
  * For one consumer: the ring keeps the latest USBAUDIO_RING_SAMPLES; a
  * consumer that falls further behind loses the oldest (counted in
  * ring_lost) and goes on from the oldest kept.  A stream start empties the

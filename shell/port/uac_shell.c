@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * "uac": the USB audio input of port/usb/audio.h (a USB Audio Class 1.0
- * microphone on the USB host of "usb"), written as a Zephyr shell command.
+ * or 2.0 microphone on the USB host of "usb"), written as a Zephyr shell
+ * command.
  *
  *   uac info                      the open microphone interface: its device,
  *                                 its formats (channels, bits, sampling
@@ -17,6 +18,10 @@
  *   uac level [<seconds>]         the peak and RMS level of the decimated
  *                                 samples, in dBFS, four times a second for
  *                                 the time given (default 5 s)
+ *   uac dump [<samples>]          that many consecutive 16 kHz samples
+ *                                 (default 1600, at most 16000), read with
+ *                                 usbaudio_read_16k() into a buffer first,
+ *                                 then printed 16 per line and "END <count>"
  *   uac stats                     what the stream has delivered: counters,
  *                                 the measured rate against the nominal one
  *
@@ -159,15 +164,18 @@ static int cmd_uac_info(const struct shell *sh, size_t argc, char **argv)
         shell_print(sh, "No microphone");
         return 0;
     }
-    shell_print(sh, "microphone: device %u interface %u, %04x:%04x, \"%s\", \"%s\"", info->address,
-                info->interface, info->vid, info->pid, info->manufacturer, info->product);
+    shell_print(sh, "microphone: UAC %u.0, device %u interface %u, %04x:%04x, \"%s\", \"%s\"",
+                info->uac_version, info->address, info->interface, info->vid, info->pid,
+                info->manufacturer, info->product);
     for (uint8_t i = 0; i < info->alt_count; i++) {
         const struct usbaudio_alt *a = &info->alts[i];
         char rates[64];
         int n = 0;
 
-        if (a->rate_count == 0u) {
-            (void) snprintf(rates, sizeof(rates), "%u .. %u", (unsigned int) a->rate_min,
+        if (info->uac_version == 2u) {
+            (void) snprintf(rates, sizeof(rates), "rates of clock %u", info->clock_id);
+        } else if (a->rate_count == 0u) {
+            (void) snprintf(rates, sizeof(rates), "%u .. %u Hz", (unsigned int) a->rate_min,
                             (unsigned int) a->rate_max);
         } else {
             rates[0] = '\0';
@@ -175,9 +183,37 @@ static int cmd_uac_info(const struct shell *sh, size_t argc, char **argv)
                 n += snprintf(rates + n, sizeof(rates) - (size_t) n, "%s%u", j == 0u ? "" : " ",
                               (unsigned int) a->rates[j]);
             }
+            if (n >= 0 && (size_t) n < sizeof(rates)) {
+                (void) snprintf(rates + n, sizeof(rates) - (size_t) n, " Hz");
+            }
         }
-        shell_print(sh, "alternate %u: %u channel%s, %u bits in %u bytes, %s Hz", i + 1u, a->channels,
+        shell_print(sh, "alternate %u: %u channel%s, %u bits in %u bytes, %s", i + 1u, a->channels,
                     a->channels == 1u ? "" : "s", a->bits, a->subframe, rates);
+    }
+    if (info->uac_version == 2u) {
+        shell_print(sh, "clock %u: %u Hz now, %u range%s%s", info->clock_id,
+                    (unsigned int) info->clock_rate, info->clock_range_count,
+                    info->clock_range_count == 1u ? "" : "s",
+                    info->clock_range_count == 0u ? " (not read)" : ":");
+        for (uint8_t i = 0; i < info->clock_range_count; i++) {
+            const struct usbaudio_rate_range *rr = &info->clock_ranges[i];
+
+            shell_print(sh, "  %u .. %u Hz, step %u", (unsigned int) rr->min, (unsigned int) rr->max,
+                        (unsigned int) rr->res);
+        }
+        if (info->volume_range_valid) {
+            char lo[16];
+            char hi[16];
+            char step[16];
+
+            print_volume_db(lo, sizeof(lo), info->volume_min);
+            print_volume_db(hi, sizeof(hi), info->volume_max);
+            print_volume_db(step, sizeof(step), info->volume_res);
+            shell_print(sh, "feature unit %u: volume %s .. %s, step %s", info->feature_unit, lo, hi, step);
+        } else {
+            shell_print(sh, "feature unit %u: no volume range%s", info->feature_unit,
+                        info->feature_unit == 0u ? " (no feature unit)" : "");
+        }
     }
     if (!info->streaming) {
         shell_print(sh, "stream: stopped (volume and mute are read while it runs)");
@@ -228,7 +264,7 @@ static int cmd_uac_start(const struct shell *sh, size_t argc, char **argv)
     if (ret == 0) {
         shell_print(sh, "Streaming: %u Hz, %u channel%s, 16 bits; decimated to %u Hz",
                     (unsigned int) rate, (unsigned int) channels, channels == 1u ? "" : "s",
-                    (unsigned int) (rate / 3u));
+                    (unsigned int) (rate == 16000u ? rate : rate / 3u));
     }
     return report(sh, ret);
 }
@@ -367,6 +403,84 @@ static int cmd_uac_level(const struct shell *sh, size_t argc, char **argv)
     return 0;
 }
 
+/* ---- uac dump ------------------------------------------------------------ */
+
+#define DUMP_DEFAULT    1600u
+#define DUMP_MAX        16000u
+#define DUMP_CHUNK      1600u
+#define DUMP_WAIT_MS    1000u
+
+/*
+ * The capture goes into the buffer first and is printed after, so that the
+ * output's pace cannot make the reader fall behind the ring.  The first
+ * read may skip what the ring no longer holds (a reader that has not read
+ * for a while); a skip after it is a gap in the capture, which the END
+ * line reports.
+ */
+static int cmd_uac_dump(const struct shell *sh, size_t argc, char **argv)
+{
+    uint32_t want = DUMP_DEFAULT;
+    uint32_t got = 0;
+    uint32_t lost_after_first = 0;
+    struct usbaudio_stats st;
+    const char *why = "";
+    int16_t *buf;
+    char line[16 * 7 + 1];
+
+    if (argc > 1 && (!parse_u32(argv[1], &want) || want < 1u || want > DUMP_MAX)) {
+        shell_error(sh, "Not a number of samples (1 .. %u): %s", DUMP_MAX, argv[1]);
+        return -EINVAL;
+    }
+    buf = malloc(want * sizeof(*buf));
+    if (buf == NULL) {
+        return report(sh, -ENOMEM);
+    }
+    while (got < want) {
+        uint32_t n = want - got < DUMP_CHUNK ? want - got : DUMP_CHUNK;
+        int ret = usbaudio_read_16k(&buf[got], n, DUMP_WAIT_MS);
+
+        if (ret < 0) {
+            if (got == 0u) {
+                free(buf);
+                if (ret == -ENOTSUP) {
+                    shell_error(sh, "The stream does not give 16 kHz samples (it runs at neither 16 nor 48 kHz)");
+                    return ret;
+                }
+                return report(sh, -ESRCH);
+            }
+            why = ", the stream stopped";
+            break;
+        }
+        if (got == 0u) {
+            (void) usbaudio_stats(&st);
+            lost_after_first = st.ring_lost;
+        }
+        got += (uint32_t) ret;
+        if ((uint32_t) ret < n) {
+            why = ", timed out waiting for samples";
+            break;
+        }
+    }
+    (void) usbaudio_stats(&st);
+
+    for (uint32_t i = 0; i < got; i += 16u) {
+        size_t len = 0;
+
+        for (uint32_t j = i; j < got && j < i + 16u; j++) {
+            len += (size_t) snprintf(line + len, sizeof(line) - len, "%s%d", j == i ? "" : " ", buf[j]);
+        }
+        shell_print(sh, "%s", line);
+    }
+    free(buf);
+    if (st.ring_lost != lost_after_first) {
+        shell_print(sh, "END %u (gap: %u samples overwritten during the capture%s)", (unsigned int) got,
+                    (unsigned int) (st.ring_lost - lost_after_first), why);
+    } else {
+        shell_print(sh, "END %u%s", (unsigned int) got, why);
+    }
+    return 0;
+}
+
 /* ---- uac stats ----------------------------------------------------------- */
 
 static void print_seconds(char *buf, size_t size, int64_t us)
@@ -429,12 +543,18 @@ static int cmd_uac_stats(const struct shell *sh, size_t argc, char **argv)
     shell_print(sh, "driver buffer: %u bytes, near full %u times; transfer errors: %u",
                 (unsigned int) st.buffer_bytes, (unsigned int) st.near_full,
                 (unsigned int) st.transfer_errors);
+    if (st.uac_version == 2u) {
+        shell_print(sh, "UAC 2.0: packets dropped (buffer full) %u, packets with errors %u",
+                    (unsigned int) st.overruns, (unsigned int) st.packet_errors);
+    }
     shell_print(sh, "16 kHz ring: %u samples, %u lost by the consumer",
                 (unsigned int) USBAUDIO_RING_SAMPLES, (unsigned int) st.ring_lost);
     return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_uac,
+    SHELL_CMD_ARG(dump, NULL, "Print consecutive 16 kHz samples: dump [<samples>] (default 1600)",
+                  cmd_uac_dump, 1, 1),
     SHELL_CMD(info, NULL, "Show the microphone and its formats", cmd_uac_info),
     SHELL_CMD_ARG(level, NULL, "Show the level in dBFS: level [<seconds>] (default 5)",
                   cmd_uac_level, 1, 1),
@@ -447,4 +567,4 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_uac,
                   "volume [<0..100>]", cmd_uac_volume, 1, 1),
     SHELL_SUBCMD_SET_END);
 
-SHELL_CMD_REGISTER(uac, &sub_uac, "USB audio input (UAC 1.0 microphone)", NULL);
+SHELL_CMD_REGISTER(uac, &sub_uac, "USB audio input (UAC 1.0 or 2.0 microphone)", NULL);

@@ -1,13 +1,16 @@
 /*
- * USB audio input on the USB host of port/usb/host.c: esp-usb's USB Audio
- * Class 1.0 driver (lib/esp-usb, host/class/uac/usb_host_uac), a client of
- * the USB Host Library, unmodified, on ESP-IDF's ring buffer API
- * (port/esp_compat/freertos/ringbuf.c).
+ * USB audio input on the USB host of port/usb/host.c, for a microphone of
+ * either USB Audio Class: a UAC 1.0 one through esp-usb's driver (lib/
+ * esp-usb, host/class/uac/usb_host_uac, unmodified), a UAC 2.0 one through
+ * port/usb/audio_uac2.c (usb_host_uac refuses UAC 2.0).  Both are clients
+ * of the USB Host Library that fill a byte ring buffer (ESP-IDF's API,
+ * port/esp_compat/freertos/ringbuf.c) from their isochronous IN transfers;
+ * what comes after, the same for both, is here.
  *
- * Two FreeRTOS tasks, created when the host starts and ending when it
+ * Three FreeRTOS tasks, created when the host starts and ending when it
  * stops (their stacks go back to the FreeRTOS layer's pool):
  *
- *   "USB UAC Host"  the driver's own, which runs its client's events: the
+ *   "USB UAC Host"  usb_host_uac's own, which runs its client's events: the
  *                   devices that come and go, the isochronous IN transfers
  *                   (their completion copies the packets into the driver's
  *                   ring buffer and resubmits them) and the callbacks
@@ -15,28 +18,31 @@
  *                   still queued are done (6 ms with three transfers of
  *                   three 1 ms packets), so it runs above lwIP's "tcpip"
  *                   (shell/port/priorities_os.h).
- *   "uac"           this file's, which makes every other call of the
- *                   driver, so that none of them races another: it opens
- *                   the microphone interface when the driver reports it,
- *                   closes it when the device goes, serves the requests of
+ *   "uac2"          audio_uac2.c's client task, the same for a UAC 2.0
+ *                   device, at the same priority.
+ *   "uac"           this file's, which makes every other call of either,
+ *                   so that none of them races another: it opens the first
+ *                   microphone that either reports (a UAC 2.0 one with
+ *                   audio_uac2.c, any other with usb_host_uac), closes it
+ *                   when the device goes, serves the requests of
  *                   usbaudio_info(), usbaudio_stream_start(),
- *                   usbaudio_stream_stop() and usbaudio_stop(), and reads
- *                   the samples: woken by the driver's RX_DONE event (its
- *                   buffer passed a quarter), it drains the buffer with
- *                   uac_host_device_read() without waiting, mixes the
- *                   channels to one, decimates by 3, removes the DC
- *                   (a 30 Hz high-pass), keeps the level and the ring
- *                   of usbaudio_read_16k().
+ *                   usbaudio_stream_stop(), the volume and mute and
+ *                   usbaudio_stop(), and reads the samples: woken when the
+ *                   buffer passed a quarter, it drains it without waiting,
+ *                   mixes the channels to one, decimates by 3 (not a 16 kHz
+ *                   stream), removes the DC (a 30 Hz high-pass), keeps the
+ *                   level and the ring of usbaudio_read_16k().
  *
- * The driver's callbacks run in its task and must not block: they only
- * count, note and wake "uac".  The driver cannot be called from its own
- * task for anything that sends a control transfer (opening an interface
- * reads the volume range): the transfer completes in that same task.
+ * The callbacks run in the clients' tasks and must not block: they only
+ * count, note and wake "uac".  Neither client can be called from its own
+ * task for anything that sends a control transfer: the transfer completes
+ * in that same task.
  *
- * When the device goes, the driver stops the stream and releases the
- * interface in its task, then reports DISCONNECTED; "uac" then closes the
- * interface, which frees the driver's buffer.  Reading and closing happen
- * in the same task, so no read is under way when the buffer goes.
+ * When a UAC 1.0 device goes, the driver stops the stream and releases the
+ * interface in its task, then reports DISCONNECTED; for a UAC 2.0 one
+ * audio_uac2.c reports DEV_GONE and its transfers end.  "uac" then closes
+ * the microphone, which frees its buffer.  Reading and closing happen in
+ * the same task, so no read is under way when the buffer goes.
  *
  * No interrupt handler and no xTimer is involved; the C library is used
  * from the tasks only.
@@ -58,6 +64,7 @@
 #include "app_log.h"
 #include "priorities.h"
 #include "usb/audio.h"
+#include "usb/audio_uac2.h"
 
 LOG_MODULE_REGISTER(usbaudio, LOG_LEVEL_INF);
 
@@ -193,7 +200,7 @@ static struct {
 
     /*
      * The volume and mute last set, kept for the session (across streams,
-     * devices and host restarts); -1: none set, the device keeps its own.
+     * devices and host restarts); until one is set, the device keeps its own.
      */
     bool want_percent_set;
     uint8_t want_percent;
@@ -201,18 +208,21 @@ static struct {
     bool want_mute;
     int result;
 
-    /* Written by the driver's callbacks (its task), read by "uac". */
+    /* Written by the drivers' callbacks (their tasks), read by "uac". */
     volatile uint32_t pending;          /* a microphone interface to open: 0x10000 | address << 8
                                            | interface, 0: none */
+    volatile uint8_t open_address;      /* of the open microphone, 0: none */
     volatile uint32_t wakeups;
     volatile uint32_t transfer_errors;
 
     /* The task's own. */
-    uac_host_device_handle_t dev;
+    uint8_t version;                    /* of the open microphone: 1, 2, 0: none */
+    uac_host_device_handle_t dev;       /* UAC 1.0: the driver's interface */
     struct usbaudio_info info;          /* of the open interface, without the live fields */
     bool streaming;
     uint32_t rate;
     uint8_t channels;
+    uint8_t factor;                     /* of the decimation: 3, or 1 for a 16 kHz stream */
     uint32_t urb_bytes;                 /* the most one transfer brings */
     uint8_t carry[4];                   /* the start of a frame cut by a read */
     uint8_t carry_len;
@@ -318,7 +328,7 @@ static void level_add(int16_t s)
 }
 
 /*
- * PCM bytes from the driver: whole frames are mixed, decimated, measured
+ * PCM bytes from the microphone: whole frames are mixed, decimated, measured
  * and put into the ring; a cut frame's start waits for the next read.  The
  * bytes are at rx_buf + sizeof(audio.carry).
  */
@@ -356,15 +366,18 @@ static void process(size_t got)
             audio.dc_sum = 0;
             audio.dc_count = 0;
         }
-        if (decimate(&audio.dec, (int16_t) s, &out)) {
-            out = dc_block(&audio.dc_block, out);
-            level_add(out);
-            if (audio.ring != NULL) {
-                audio.ring[audio.written & RING_MASK] = out;
-                audio.written++;
-            }
-            outs++;
+        if (audio.factor == 1u) {
+            out = (int16_t) s;
+        } else if (!decimate(&audio.dec, (int16_t) s, &out)) {
+            continue;
         }
+        out = dc_block(&audio.dc_block, out);
+        level_add(out);
+        if (audio.ring != NULL) {
+            audio.ring[audio.written & RING_MASK] = out;
+            audio.written++;
+        }
+        outs++;
     }
     (void) tx_mutex_put(&audio.data_lock);
 
@@ -382,8 +395,18 @@ static void process(size_t got)
 /* The task's counters to the shared copy. */
 static void publish(void)
 {
-    audio.work.wakeups = audio.wakeups;
-    audio.work.transfer_errors = audio.transfer_errors;
+    if (audio.version == 2u) {
+        struct uac2_counters c;
+
+        uac2_counters(&c);
+        audio.work.wakeups = c.wakeups;
+        audio.work.transfer_errors = c.transfer_errors;
+        audio.work.overruns = c.overruns;
+        audio.work.packet_errors = c.packet_errors;
+    } else {
+        audio.work.wakeups = audio.wakeups;
+        audio.work.transfer_errors = audio.transfer_errors;
+    }
     audio.work.streaming = audio.streaming;
     (void) tx_mutex_get(&audio.data_lock, TX_WAIT_FOREVER);
     audio.work.ring_lost = audio.stats.ring_lost;   /* the consumer's count */
@@ -391,7 +414,24 @@ static void publish(void)
     (void) tx_mutex_put(&audio.data_lock);
 }
 
-/* Everything the driver's buffer holds, without waiting. */
+/* Up to size bytes of the microphone's buffer, without waiting: 0, -EAGAIN (empty), -EIO. */
+static int mic_read(uint8_t *buf, size_t size, size_t *got)
+{
+    uint32_t n = 0;
+    esp_err_t err;
+
+    if (audio.version == 2u) {
+        return uac2_read(buf, size, got);
+    }
+    err = uac_host_device_read(audio.dev, buf, (uint32_t) size, &n, 0);
+    *got = n;
+    if (err == ESP_ERR_TIMEOUT) {
+        return -EAGAIN;
+    }
+    return err == ESP_OK ? 0 : -EIO;
+}
+
+/* Everything the microphone's buffer holds, without waiting. */
 static void drain(void)
 {
     size_t total = 0;
@@ -400,15 +440,15 @@ static void drain(void)
         return;
     }
     for (;;) {
-        uint32_t got = 0;
-        esp_err_t err = uac_host_device_read(audio.dev, &rx_buf[sizeof(audio.carry)], RX_CHUNK, &got, 0);
+        size_t got = 0;
+        int err = mic_read(&rx_buf[sizeof(audio.carry)], RX_CHUNK, &got);
 
         audio.work.reads++;
-        if (err == ESP_ERR_TIMEOUT) {
+        if (err == -EAGAIN) {
             audio.work.empty_reads++;
             break;
         }
-        if (err != ESP_OK) {
+        if (err != 0) {
             audio.work.read_errors++;
             break;
         }
@@ -460,20 +500,56 @@ static void device_event(uac_host_device_handle_t handle, const uac_host_device_
 }
 
 /*
- * A streaming interface found in a device that enumerated.  Only
- * microphones are taken, the first one that is not open yet: it is opened
- * when no other is open.
+ * A microphone interface found in a device that enumerated, by either
+ * driver (a UAC 2.0 device is reported by both: usb_host_uac reports every
+ * streaming interface).  The first one that is not open yet is taken; it
+ * is opened when no other is open.
  */
+static void offer(uint8_t addr, uint8_t iface)
+{
+    bool take;
+
+    portENTER_CRITICAL();
+    take = audio.pending == 0u && addr != audio.open_address;
+    if (take) {
+        audio.pending = 0x10000u | ((uint32_t) addr << 8) | iface;
+    }
+    portEXIT_CRITICAL();
+    if (take) {
+        (void) tx_event_flags_set(&audio.events, EV_CONNECTED, TX_OR);
+    }
+}
+
 static void driver_event(uint8_t addr, uint8_t iface_num, const uac_host_driver_event_t event, void *arg)
 {
     (void) arg;
 
-    if (event != UAC_HOST_DRIVER_EVENT_RX_CONNECTED || audio.pending != 0u) {
-        return;
+    if (event == UAC_HOST_DRIVER_EVENT_RX_CONNECTED) {
+        offer(addr, iface_num);
     }
-    audio.pending = 0x10000u | ((uint32_t) addr << 8) | iface_num;
-    (void) tx_event_flags_set(&audio.events, EV_CONNECTED, TX_OR);
 }
+
+/* The UAC 2.0 client's callbacks (in its task). */
+static void uac2_connected(uint8_t addr, uint8_t iface)
+{
+    offer(addr, iface);
+}
+
+static void uac2_gone(void)
+{
+    (void) tx_event_flags_set(&audio.events, EV_DISCONNECTED, TX_OR);
+}
+
+static void uac2_data(void)
+{
+    (void) tx_event_flags_set(&audio.events, EV_DATA, TX_OR);
+}
+
+static const struct uac2_callbacks uac2_cb = {
+    .connected = uac2_connected,
+    .gone = uac2_gone,
+    .data = uac2_data,
+};
 
 /* ---- The task's steps --------------------------------------------------- */
 
@@ -504,10 +580,25 @@ static void interface_open(void)
     struct usbaudio_info *info = &audio.info;
     esp_err_t err;
 
-    if (c == 0u || audio.dev != NULL) {
+    int ret;
+
+    if (c == 0u || audio.version != 0u) {
         return;                 /* none, or it waits until the open one goes */
     }
     audio.pending = 0;
+    /* A UAC 2.0 device goes to audio_uac2.c; usb_host_uac would refuse it. */
+    ret = uac2_open(addr, info);
+    if (ret == 0) {
+        audio.version = 2;
+        audio.open_address = addr;
+        LOG_INF("microphone: device %u interface %u, %04x:%04x \"%s\", UAC 2.0", addr, info->interface,
+                info->vid, info->pid, info->product);
+        return;
+    }
+    if (ret != -ENOTSUP) {
+        LOG_ERR("device %u: UAC 2.0 microphone not usable (%d)", addr, ret);
+        return;
+    }
     err = uac_host_device_open(&config, &audio.dev);
     if (err != ESP_OK) {
         LOG_ERR("device %u interface %u: uac_host_device_open: error 0x%x", addr, iface,
@@ -515,8 +606,11 @@ static void interface_open(void)
         audio.dev = NULL;
         return;
     }
+    audio.version = 1;
+    audio.open_address = addr;
     memset(info, 0, sizeof(*info));
     info->open = true;
+    info->uac_version = 1;
     info->address = addr;
     info->interface = iface;
     if (uac_host_get_device_info(audio.dev, &dev_info) == ESP_OK) {
@@ -558,21 +652,38 @@ static void stream_end(void)
     publish();
 }
 
-/* After DISCONNECTED: the driver has stopped the stream; the interface is closed here. */
+/*
+ * Stops the stream if it runs (the UAC 1.0 driver has done that itself
+ * when the device went) and closes the microphone.  0, or -EIO when the
+ * UAC 1.0 driver kept it open.
+ */
+static int mic_close(void)
+{
+    esp_err_t err = ESP_OK;
+
+    if (audio.version == 2u) {
+        uac2_close();
+    } else if (audio.version == 1u) {
+        err = uac_host_device_close(audio.dev);
+        if (err != ESP_OK) {
+            LOG_ERR("uac_host_device_close: error 0x%x", (unsigned int) err);
+        }
+        audio.dev = NULL;
+    }
+    audio.version = 0;
+    audio.open_address = 0;
+    memset(&audio.info, 0, sizeof(audio.info));
+    return err == ESP_OK ? 0 : -EIO;
+}
+
+/* After DISCONNECTED: the driver has stopped a UAC 1.0 stream; the microphone is closed here. */
 static void interface_gone(void)
 {
-    esp_err_t err;
-
-    if (audio.dev == NULL) {
+    if (audio.version == 0u) {
         return;
     }
     stream_end();
-    err = uac_host_device_close(audio.dev);
-    if (err != ESP_OK) {
-        LOG_ERR("uac_host_device_close: error 0x%x", (unsigned int) err);
-    }
-    audio.dev = NULL;
-    memset(&audio.info, 0, sizeof(audio.info));
+    (void) mic_close();
     LOG_INF("microphone disconnected");
 }
 
@@ -593,36 +704,103 @@ static int errno_of(esp_err_t err)
     }
 }
 
-/*
- * The driver takes volume and mute only once the stream has started (its
- * interface READY or ACTIVE), and keeps the percentage only in the
- * interface it opened; a device that went and came back, or reset its
- * feature unit at the alternate setting's change, would have its own
- * default again.  So what was set last is set again at every start.
- */
-static void apply_settings(void)
+/* ---- Volume and mute, by the microphone's class ---------------------- */
+
+static int mic_volume_set(uint8_t percent)
 {
     esp_err_t err;
 
-    if (audio.want_percent_set) {
-        err = uac_host_device_set_volume(audio.dev, audio.want_percent);
-        if (err != ESP_OK) {
-            LOG_WRN("volume %u%% not set again: error 0x%x", audio.want_percent, (unsigned int) err);
-        }
+    if (audio.version == 2u) {
+        return uac2_volume_set(percent);
     }
-    if (audio.want_mute_set) {
-        err = uac_host_device_set_mute(audio.dev, audio.want_mute);
-        if (err != ESP_OK) {
-            LOG_WRN("mute %s not set again: error 0x%x", audio.want_mute ? "on" : "off",
-                    (unsigned int) err);
+    err = uac_host_device_set_volume(audio.dev, percent);
+    if (err != ESP_OK) {
+        LOG_ERR("uac_host_device_set_volume(%u): error 0x%x", percent, (unsigned int) err);
+    }
+    return err == ESP_ERR_NOT_SUPPORTED ? -ENOTSUP : errno_of(err);
+}
+
+static int mic_mute_set(bool mute)
+{
+    esp_err_t err;
+
+    if (audio.version == 2u) {
+        return uac2_mute_set(mute);
+    }
+    err = uac_host_device_set_mute(audio.dev, mute);
+    if (err != ESP_OK) {
+        LOG_ERR("uac_host_device_set_mute(%s): error 0x%x", mute ? "on" : "off", (unsigned int) err);
+    }
+    return err == ESP_ERR_NOT_SUPPORTED ? -ENOTSUP : errno_of(err);
+}
+
+/* What the device reports; the fields it cannot give stay invalid. */
+static void mic_volume_get(struct usbaudio_volume *v)
+{
+    if (audio.version == 2u) {
+        int16_t db;
+        uint8_t percent;
+        bool mute;
+
+        if (uac2_volume_get(&db, &percent) == 0) {
+            v->db_valid = true;
+            v->db = db;
+            v->percent_valid = audio.info.volume_range_valid;
+            v->percent = percent;
+        }
+        if (uac2_mute_get(&mute) == 0) {
+            v->mute_valid = true;
+            v->mute = mute;
+        }
+    } else {
+        uint8_t percent;
+        int16_t db;
+        bool mute;
+
+        if (uac_host_device_get_volume(audio.dev, &percent) == ESP_OK) {
+            v->percent_valid = true;
+            v->percent = percent;
+        }
+        if (uac_host_device_get_volume_db(audio.dev, &db) == ESP_OK) {
+            v->db_valid = true;
+            v->db = db;
+        }
+        if (uac_host_device_get_mute(audio.dev, &mute) == ESP_OK) {
+            v->mute_valid = true;
+            v->mute = mute;
         }
     }
 }
 
-/* -ENODEV, -ESRCH (not streaming: the driver refuses then), or 0. */
+/*
+ * Volume and mute are taken only while the stream runs, the same for both
+ * classes (usb_host_uac takes them only once its interface has started).
+ * The UAC 1.0 driver keeps the percentage only in the interface it opened,
+ * and a device that went and came back has its own default again, so what
+ * was set last is set again at every start.
+ */
+static void apply_settings(void)
+{
+    int ret;
+
+    if (audio.want_percent_set) {
+        ret = mic_volume_set(audio.want_percent);
+        if (ret != 0) {
+            LOG_WRN("volume %u%% not set again (%d)", audio.want_percent, ret);
+        }
+    }
+    if (audio.want_mute_set) {
+        ret = mic_mute_set(audio.want_mute);
+        if (ret != 0) {
+            LOG_WRN("mute %s not set again (%d)", audio.want_mute ? "on" : "off", ret);
+        }
+    }
+}
+
+/* -ENODEV, -ESRCH (not streaming), or 0. */
 static int controls_ready(void)
 {
-    if (audio.dev == NULL) {
+    if (audio.version == 0u) {
         return -ENODEV;
     }
     return audio.streaming ? 0 : -ESRCH;
@@ -632,82 +810,89 @@ static int serve_volume_get(void)
 {
     struct usbaudio_volume *v = audio.arg.volume;
     int ret = controls_ready();
-    uint8_t percent;
-    int16_t db;
-    bool mute;
 
     v->set = audio.want_percent_set;
     v->set_percent = audio.want_percent;
-    if (ret != 0) {
-        return ret;
+    if (ret == 0) {
+        mic_volume_get(v);
     }
-    if (uac_host_device_get_volume(audio.dev, &percent) == ESP_OK) {
-        v->percent_valid = true;
-        v->percent = percent;
-    }
-    if (uac_host_device_get_volume_db(audio.dev, &db) == ESP_OK) {
-        v->db_valid = true;
-        v->db = db;
-    }
-    if (uac_host_device_get_mute(audio.dev, &mute) == ESP_OK) {
-        v->mute_valid = true;
-        v->mute = mute;
-    }
-    return 0;
+    return ret;
 }
 
 static int serve_volume_set(void)
 {
     int ret = controls_ready();
-    esp_err_t err;
 
-    if (ret != 0) {
-        return ret;
+    if (ret == 0 && audio.arg.percent > 100u) {
+        ret = -EINVAL;
     }
-    if (audio.arg.percent > 100u) {
-        return -EINVAL;
+    if (ret == 0) {
+        ret = mic_volume_set(audio.arg.percent);
     }
-    err = uac_host_device_set_volume(audio.dev, audio.arg.percent);
-    if (err != ESP_OK) {
-        LOG_ERR("uac_host_device_set_volume(%u): error 0x%x", audio.arg.percent, (unsigned int) err);
-        return err == ESP_ERR_NOT_SUPPORTED ? -ENOTSUP : errno_of(err);
+    if (ret == 0) {
+        audio.want_percent_set = true;
+        audio.want_percent = audio.arg.percent;
     }
-    audio.want_percent_set = true;
-    audio.want_percent = audio.arg.percent;
-    return 0;
+    return ret;
 }
 
 static int serve_mute_set(void)
 {
     int ret = controls_ready();
+
+    if (ret == 0) {
+        ret = mic_mute_set(audio.arg.mute);
+    }
+    if (ret == 0) {
+        audio.want_mute_set = true;
+        audio.want_mute = audio.arg.mute;
+    }
+    return ret;
+}
+
+/* ---- Stream ------------------------------------------------------------ */
+
+static int mic_start(void)
+{
+    const uac_host_stream_config_t config = {
+        .channels = audio.channels,
+        .bit_resolution = 16,
+        .sample_freq = audio.rate,
+        .flags = 0,
+    };
     esp_err_t err;
 
-    if (ret != 0) {
-        return ret;
+    if (audio.version == 2u) {
+        return uac2_start(audio.rate, audio.channels, RX_BUFFER_BYTES, RX_THRESHOLD_BYTES);
     }
-    err = uac_host_device_set_mute(audio.dev, audio.arg.mute);
+    err = uac_host_device_start(audio.dev, &config);
     if (err != ESP_OK) {
-        LOG_ERR("uac_host_device_set_mute(%s): error 0x%x", audio.arg.mute ? "on" : "off",
-                (unsigned int) err);
-        return err == ESP_ERR_NOT_SUPPORTED ? -ENOTSUP : errno_of(err);
+        LOG_ERR("uac_host_device_start(%u Hz, %u channels): error 0x%x", (unsigned int) audio.rate,
+                audio.channels, (unsigned int) err);
     }
-    audio.want_mute_set = true;
-    audio.want_mute = audio.arg.mute;
-    return 0;
+    return errno_of(err);
+}
+
+static int mic_stop(void)
+{
+    esp_err_t err;
+
+    if (audio.version == 2u) {
+        return uac2_stop();
+    }
+    err = uac_host_device_stop(audio.dev);
+    if (err != ESP_OK) {
+        LOG_ERR("uac_host_device_stop: error 0x%x", (unsigned int) err);
+    }
+    return errno_of(err);
 }
 
 static int serve_start(void)
 {
-    const uac_host_stream_config_t config = {
-        .channels = audio.arg.channels,
-        .bit_resolution = 16,
-        .sample_freq = audio.arg.rate,
-        .flags = 0,
-    };
     uint32_t frame = (uint32_t) audio.arg.channels * 2u;
-    esp_err_t err;
+    int ret;
 
-    if (audio.dev == NULL) {
+    if (audio.version == 0u) {
         return -ENODEV;
     }
     if (audio.streaming) {
@@ -720,6 +905,8 @@ static int serve_start(void)
 
     audio.rate = audio.arg.rate;
     audio.channels = audio.arg.channels;
+    /* A 16 kHz stream is already at the output rate: only the DC blocker. */
+    audio.factor = audio.rate == 16000u ? 1u : 3u;
     audio.urb_bytes = (audio.rate / 1000u + 1u) * frame * CONFIG_UAC_NUM_PACKETS_PER_URB;
     audio.carry_len = 0;
     decimator_reset(&audio.dec);
@@ -727,14 +914,15 @@ static int serve_start(void)
     audio.dc_sum = 0;
     audio.dc_count = 0;
     memset(&audio.acc, 0, sizeof(audio.acc));
-    audio.acc.window = audio.rate / 30u;            /* 100 ms of the output */
+    audio.acc.window = audio.rate / audio.factor / 10u;    /* 100 ms of the output */
     if (audio.acc.window == 0u) {
         audio.acc.window = 1;
     }
     memset(&audio.work, 0, sizeof(audio.work));
+    audio.work.uac_version = audio.version;
     audio.work.rate = audio.rate;
     audio.work.channels = audio.channels;
-    audio.work.out_rate = audio.rate / 3u;
+    audio.work.out_rate = audio.rate / audio.factor;
     audio.work.buffer_bytes = RX_BUFFER_BYTES;
     audio.work.start_us = esp_timer_get_time();
     audio.wakeups = 0;
@@ -746,11 +934,9 @@ static int serve_start(void)
     audio.consumed = 0;
     (void) tx_mutex_put(&audio.data_lock);
 
-    err = uac_host_device_start(audio.dev, &config);
-    if (err != ESP_OK) {
-        LOG_ERR("uac_host_device_start(%u Hz, %u channels): error 0x%x", (unsigned int) audio.rate,
-                audio.channels, (unsigned int) err);
-        return errno_of(err);
+    ret = mic_start();
+    if (ret != 0) {
+        return ret;
     }
     audio.streaming = true;
     publish();
@@ -761,22 +947,20 @@ static int serve_start(void)
 
 static int serve_stop(void)
 {
-    esp_err_t err;
+    int ret;
 
-    if (audio.dev == NULL) {
+    if (audio.version == 0u) {
         return -ENODEV;
     }
     if (!audio.streaming) {
         return -ESRCH;
     }
-    err = uac_host_device_stop(audio.dev);
+    ret = mic_stop();
     stream_end();
-    if (err != ESP_OK) {
-        LOG_ERR("uac_host_device_stop: error 0x%x", (unsigned int) err);
-        return errno_of(err);
+    if (ret == 0) {
+        LOG_INF("stream stopped");
     }
-    LOG_INF("stream stopped");
-    return 0;
+    return ret;
 }
 
 static int serve_info(void)
@@ -785,40 +969,37 @@ static int serve_info(void)
 
     *info = audio.info;
     info->streaming = audio.streaming;
-    if (audio.dev != NULL && audio.streaming) {
-        int16_t volume;
-        bool mute;
+    if (audio.version != 0u && audio.streaming) {
+        struct usbaudio_volume v = {0};
 
-        if (uac_host_device_get_volume_db(audio.dev, &volume) == ESP_OK) {
-            info->volume_valid = true;
-            info->volume = volume;
-        }
-        if (uac_host_device_get_mute(audio.dev, &mute) == ESP_OK) {
-            info->mute_valid = true;
-            info->mute = mute;
-        }
+        mic_volume_get(&v);
+        info->volume_valid = v.db_valid;
+        info->volume = v.db;
+        info->mute_valid = v.mute_valid;
+        info->mute = v.mute;
     }
     return 0;
 }
 
-/* The stream stopped and the interface closed, before the driver is uninstalled. */
+/* The stream stopped and the microphone closed, before the drivers go. */
 static int serve_quit(void)
 {
     esp_err_t err;
+    int ret;
 
-    if (audio.dev != NULL) {
+    if (audio.version != 0u) {
         if (audio.streaming) {
             (void) serve_stop();
         }
-        err = uac_host_device_close(audio.dev);
-        if (err != ESP_OK) {
-            LOG_ERR("uac_host_device_close: error 0x%x", (unsigned int) err);
+        if (mic_close() != 0) {
             return -EIO;
         }
-        audio.dev = NULL;
-        memset(&audio.info, 0, sizeof(audio.info));
     }
     audio.pending = 0;
+    ret = uac2_uninstall();
+    if (ret != 0) {
+        return ret == -ETIMEDOUT ? -EIO : ret;
+    }
     err = uac_host_uninstall();
     if (err != ESP_OK) {
         LOG_ERR("uac_host_uninstall: error 0x%x", (unsigned int) err);
@@ -844,6 +1025,7 @@ static void audio_task(void *arg)
         .callback_arg = NULL,
     };
     esp_err_t err;
+    int ret;
 
     (void) arg;
 
@@ -851,6 +1033,13 @@ static void audio_task(void *arg)
     if (err != ESP_OK) {
         LOG_ERR("uac_host_install: error 0x%x", (unsigned int) err);
         answer(err == ESP_ERR_NO_MEM ? -ENOMEM : -EIO);
+        vTaskDelete(NULL);
+        return;
+    }
+    ret = uac2_install(&uac2_cb);
+    if (ret != 0) {
+        (void) uac_host_uninstall();
+        answer(ret);
         vTaskDelete(NULL);
         return;
     }
@@ -891,8 +1080,8 @@ static void audio_task(void *arg)
         case REQUEST_MUTE_SET:
             answer(serve_mute_set());
             break;
-        case REQUEST_QUIT: {
-            int ret = serve_quit();
+        case REQUEST_QUIT:
+            ret = serve_quit();
 
             if (ret == 0) {
                 answer(0);
@@ -901,7 +1090,6 @@ static void audio_task(void *arg)
             }
             answer(ret);
             break;
-        }
         default:
             break;
         }
@@ -1004,6 +1192,8 @@ int usbaudio_start(void)
     memset(&audio.level, 0, sizeof(audio.level));
     (void) tx_mutex_put(&audio.data_lock);
     audio.dev = NULL;
+    audio.version = 0;
+    audio.open_address = 0;
     audio.streaming = false;
     audio.pending = 0;
     audio.request = REQUEST_NONE;
@@ -1140,7 +1330,7 @@ int usbaudio_read_16k(int16_t *dst, size_t n, uint32_t timeout_ms)
             (void) tx_mutex_put(&audio.data_lock);
             return copied > 0u ? (int) copied : -ENODATA;
         }
-        if (audio.stats.rate != 48000u) {
+        if (audio.stats.out_rate != 16000u) {
             (void) tx_mutex_put(&audio.data_lock);
             return -ENOTSUP;
         }

@@ -297,6 +297,7 @@ add_executable(app
     "${PORT_DIR}/net/wlanif.c"
     "${PORT_DIR}/net/lwip_bridge.c"
     "${PORT_DIR}/usb/audio.c"
+    "${PORT_DIR}/usb/audio_uac2.c"
     "${PORT_DIR}/usb/host.c"
     "${PORT_DIR}/esp_compat/esp_sleep.c"
     "${PORT_DIR}/esp_compat/flash_mmap.c"
