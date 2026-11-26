@@ -348,6 +348,14 @@
  *   - the RX/TX path in RAM, CONFIG_LWIP_IRAM_OPTIMIZATION and its TCP
  *     part CONFIG_LWIP_EXTRA_IRAM_OPTIMIZATION (ESP-IDF: off), placed by
  *     the linker script (.iram0.fast); wifi_init.c logs the first;
+ *   - a TCP receive window of 2 segments (ESP-IDF: 4, 5760 bytes).  lwIP
+ *     hands a received frame to the socket in the Wi-Fi driver's receive
+ *     buffer, without a copy, and the driver has 32 of them: sockets that
+ *     nobody reads may hold a window each, and once they hold all 32 the
+ *     driver receives nothing at all.  With 2 segments the 10 sockets
+ *     hold 20 at most (segments queued out of order not counted).  The
+ *     board receives little; what it sends goes by the send buffer, 4
+ *     segments as in ESP-IDF;
  * and, as in ESP-IDF's defaults, no PPP, SLIP, NAPT, AutoIP, SNTP or core
  * locking.  The tcpip thread runs at FreeRTOS priority 18 (ThreadX 13)
  * with 3072 + 512 bytes of stack (esp_task.h).  The DHCP client checks an
@@ -393,7 +401,7 @@
 #define CONFIG_LWIP_TCP_MSL                     60000
 #define CONFIG_LWIP_TCP_FIN_WAIT_TIMEOUT        20000
 #define CONFIG_LWIP_TCP_SND_BUF_DEFAULT         5760
-#define CONFIG_LWIP_TCP_WND_DEFAULT             5760
+#define CONFIG_LWIP_TCP_WND_DEFAULT             2880
 #define CONFIG_LWIP_TCP_RECVMBOX_SIZE           6
 #define CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE         6
 #define CONFIG_LWIP_TCP_QUEUE_OOSEQ             1
