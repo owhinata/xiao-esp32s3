@@ -84,6 +84,17 @@ fetch_upstream(mbedtls
     tf-psa-crypto/extras
     tf-psa-crypto/platform
     tf-psa-crypto/utilities)
+# The USB Host Library, which ESP-IDF no longer carries: espressif/esp-usb
+# (host/usb, the component "espressif/usb"), at the commit of its release
+# 1.6.1, the last one before the ESP-IDF commit above (ESP-IDF's USB host
+# examples ask for ^1.3.0).  Its sources and headers only.
+fetch_upstream(esp-usb
+    https://github.com/espressif/esp-usb
+    9abfde7ac1723335430474f378976da2d1f68c01
+    SPARSE
+    host/usb/include
+    host/usb/private_include
+    host/usb/src)
 
 set(ESP_HAL  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-hal-3rdparty/components")
 set(ESP_IDF  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-idf/components")
@@ -277,6 +288,7 @@ add_executable(app
     "${PORT_DIR}/net/wifi.c"
     "${PORT_DIR}/net/wlanif.c"
     "${PORT_DIR}/net/lwip_bridge.c"
+    "${PORT_DIR}/usb/host.c"
     "${PORT_DIR}/esp_compat/esp_sleep.c"
     "${PORT_DIR}/esp_compat/flash_mmap.c"
     "${PORT_DIR}/esp_compat/lwip_vfs.c"
@@ -644,6 +656,42 @@ set_source_files_properties("${LWIP_PORT}/port/freertos/sys_arch.c"
     PROPERTIES COMPILE_OPTIONS "-Wno-incompatible-pointer-types")
 
 # ---------------------------------------------------------------------------
+# USB host: esp-usb's USB Host Library (lib/esp-usb) on the USB PHY driver
+# and the DWC2 HAL of esp-hal-3rdparty
+# ---------------------------------------------------------------------------
+# As esp-usb's host/usb/CMakeLists.txt builds it for ESP-IDF 6 on a chip
+# with USB OTG, with external hubs (CONFIG_USB_HOST_HUBS_SUPPORTED:
+# ext_hub.c, ext_port.c), and what it takes from ESP-IDF 6 in place of its
+# own: the PHY driver of esp_hw_support (usb_phy.c, which routes the
+# internal PHY to USB OTG or to USB Serial/JTAG) and esp_hal_usb's sources
+# for this chip (its CMakeLists.txt: the DWC2 HAL and the controller's
+# description, the USB Wrap HAL, the USB Serial/JTAG HAL, whose PHY switch
+# usb_phy.c calls).  Assertions on, as for the other Espressif sources.  A
+# static library: only what port/usb reaches is linked.
+set(ESP_USB_DIR "${CMAKE_CURRENT_LIST_DIR}/lib/esp-usb/host/usb")
+add_library(usb_host STATIC
+    "${ESP_USB_DIR}/src/hcd_dwc.c"
+    "${ESP_USB_DIR}/src/enum.c"
+    "${ESP_USB_DIR}/src/hub.c"
+    "${ESP_USB_DIR}/src/usb_helpers.c"
+    "${ESP_USB_DIR}/src/usb_host.c"
+    "${ESP_USB_DIR}/src/usb_private.c"
+    "${ESP_USB_DIR}/src/usbh.c"
+    "${ESP_USB_DIR}/src/ext_hub.c"
+    "${ESP_USB_DIR}/src/ext_port.c"
+    "${ESP_HAL}/esp_hw_support/usb_phy/usb_phy.c"
+    "${ESP_HAL}/esp_hal_usb/usb_dwc_hal.c"
+    "${ESP_HAL}/esp_hal_usb/esp32s3/usb_dwc_periph.c"
+    "${ESP_HAL}/esp_hal_usb/usb_wrap_hal.c"
+    "${ESP_HAL}/esp_hal_usb/usb_serial_jtag_hal.c")
+target_include_directories(usb_host PUBLIC "${ESP_USB_DIR}/include")
+target_include_directories(usb_host PRIVATE
+    "${ESP_USB_DIR}/private_include"
+    "${ESP_HAL}/esp_mm/include")
+target_link_libraries(usb_host PRIVATE freertos esp_hal)
+target_compile_options(usb_host PRIVATE -UNDEBUG)
+
+# ---------------------------------------------------------------------------
 # Espressif sources this image needs, compiled as they are
 # ---------------------------------------------------------------------------
 # From esp-hal-3rdparty, and from ESP-IDF and its TLSF (lib/esp-idf,
@@ -753,6 +801,8 @@ add_library(esp_idf OBJECT
     "${ESP_HAL}/esp_security/src/esp_crypto_periph_clk.c"
     "${ESP_HAL}/esp_security/src/esp32s3/esp_crypto_clk.c"
     "${ESP_HAL}/esp_hal_security/hmac_hal.c"
+    # The names of esp_err_t codes, which the USB Host Library logs.
+    "${ESP_HAL}/esp_common/src/esp_err_to_name.c"
     # esp_get_free_internal_heap_size() and friends (the OS adapter's table).
     "${ESP_HAL}/esp_system/port/esp_system_chip.c"
     # UART0: the console on D6/D7 (port/board.c), and the table of IO MUX
@@ -943,8 +993,8 @@ set_source_files_properties("${PORT_DIR}/board_flash.c"
     PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/bootloader_support/include")
 # xtensa_rtos is an object library: the vectors are reached only through the
 # linker script and VECBASE, so nothing would pull them out of an archive.
-target_link_libraries(app PRIVATE esp_wifi_headers shell esp_idf ${ESP_WIFI_GROUP} lwip freertos threadx
-                      xtensa_rtos esp_hal)
+target_link_libraries(app PRIVATE esp_wifi_headers shell esp_idf ${ESP_WIFI_GROUP} lwip usb_host
+                      freertos threadx xtensa_rtos esp_hal)
 add_dependencies(app wpa_supplicant mbedtls)
 # The sources that include lwIP's headers see them (and esp_libc's
 # platform_include with them); the rest of the application does not.
@@ -1086,6 +1136,7 @@ add_library(shell OBJECT
     "${SHELL_PORT}/fault_record.c"
     "${SHELL_PORT}/flash_kv_os.c"
     "${SHELL_PORT}/shell_port.c"
+    "${SHELL_PORT}/usb_shell.c"
     "${SHELL_PORT}/zephyr_net_socket.c"
     "${SHELL_PORT}/zephyr_net_wifi.c"
     "${SHELL_PORT}/zephyr_sys_clock.c")
@@ -1160,6 +1211,9 @@ set_source_files_properties(
     ${SHELL_ZPERF}
     ${SHELL_TIME_SYNC}
     PROPERTIES COMPILE_OPTIONS "-include;${SHELL_COMMON}/compat/port/generic/common_prelude.h")
+# "usb" decodes descriptors with the types of esp-usb's USB chapter 9 header.
+set_source_files_properties("${SHELL_PORT}/usb_shell.c"
+    PROPERTIES INCLUDE_DIRECTORIES "${ESP_USB_DIR}/include")
 # "wifi cred" as wifi.cmake builds it: with the prelude, and without
 # -Wformat, as it prints a uint32_t (long here) with %d; the values are
 # small, and long and int are both 32 bits and passed alike.

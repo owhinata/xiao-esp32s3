@@ -91,4 +91,18 @@
  */
 #define APP_STACK_TIME_SYNC     4096
 
+/*
+ * The USB host's FreeRTOS tasks (port/usb/host.c): "usb_host", which runs
+ * the USB Host Library's events (the hub driver, the enumeration), and
+ * "usb_client", which runs its client's.  The FreeRTOS layer's priority p
+ * is ThreadX priority 31 - p, the same as this layer's priority, so
+ * APP_PRIO_FROM_ZEPHYR() gives the FreeRTOS priority as well: Zephyr's 8,
+ * ThreadX 24, with the threads that take the Wi-Fi driver's events, below
+ * "net_mgmt".  4096 bytes each, as in ESP-IDF's USB host examples; both
+ * log with newlib's vsnprintf().  "ps" shows what is left.
+ */
+#define APP_PRIO_USB_HOST       APP_PRIO_FROM_ZEPHYR(8)
+#define APP_STACK_USB_HOST      4096
+#define APP_STACK_USB_CLIENT    4096
+
 #endif /* PRIORITIES_OS_H */

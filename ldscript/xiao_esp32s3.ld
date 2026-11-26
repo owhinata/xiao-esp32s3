@@ -458,7 +458,7 @@ SECTIONS
     {
         . = ALIGN(4);
         *(.entry.literal .entry.text)
-        *(.iram1.literal .iram1 .iram1.*)
+        EXCLUDE_FILE(*libusb_host.a:hcd_dwc.c.obj) *(.iram1.literal .iram1 .iram1.*)
         *startup.c.obj(.literal .literal.* .text .text.*)
         *panic.c.obj(.literal .literal.* .text .text.*)
         *watchdog.c.obj(.literal .literal.* .text .text.*)
@@ -598,6 +598,16 @@ SECTIONS
         *(.literal .text .literal.* .text.*)
         *(.wifi0iram .wifi0iram.* .wifirxiram .wifirxiram.* .wifislprxiram .wifislprxiram.*)
         *(.wifislpiram .wifislpiram.* .wifiorslpiram .wifiorslpiram.* .wifiextrairam .wifiextrairam.*)
+        /*
+         * The USB host's HCD functions that esp-usb marks IRAM_ATTR
+         * (hcd_dwc.c: filling a pipe's DMA descriptors and starting its
+         * channel), left out of .iram0.text: they call the DWC2 HAL in
+         * flash and run in the controller's interrupt handler, which is in
+         * flash too, and nothing of the USB host runs while the cache is
+         * off (its interrupt is masked then).  In RAM they would take
+         * 1.4 KiB.
+         */
+        *libusb_host.a:hcd_dwc.c.obj(.iram1.literal .iram1 .iram1.*)
         *(.stub .gnu.warning .gnu.linkonce.literal.* .gnu.linkonce.t.*)
         *(.fini.literal .fini .init.literal .init)
         . = ALIGN(4);
@@ -639,6 +649,17 @@ SECTIONS
         soc_reserved_memory_region_start = ABSOLUTE(.);
         KEEP(*(.reserved_memory_address))
         soc_reserved_memory_region_end = ABSOLUTE(.);
+        /*
+         * The names of the esp_err_t codes that esp_err_to_name() looks up,
+         * as esp_common/linker.lf lays them out.  ESP-IDF's build generates
+         * the entries from the components' headers; this build does not, so
+         * the table is empty and esp_err_to_name() answers "ERROR" for any
+         * code.
+         */
+        . = ALIGN(4);
+        _esp_err_msg_tbl_start = ABSOLUTE(.);
+        KEEP(*(SORT_BY_NAME(.esp_err_msg_tbl*)))
+        _esp_err_msg_tbl_end = ABSOLUTE(.);
         /*
          * ESP-IDF's start-up hooks (esp_system's esp_sys_event_list.inc:
          * ESP_SYSTEM_INIT_FN() and friends), one table per event, in the

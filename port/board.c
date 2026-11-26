@@ -174,11 +174,21 @@ bool board_reset_by_int_wdt(void)
 
 static uint8_t usb_host_stalled;
 
+/*
+ * Set while the internal USB PHY serves the USB OTG controller (the USB
+ * host, port/usb/host.c) and not this controller: nothing is written to or
+ * read from it then, and its receive interrupt is masked (console_usb_detach()).
+ */
+static volatile uint8_t usb_detached;
+
 static int usb_wait_writable(void)
 {
     uint32_t start;
     uint32_t limit;
 
+    if (usb_detached) {
+        return 0;
+    }
     if (usb_serial_jtag_ll_txfifo_writable()) {
         usb_host_stalled = 0;
         return 1;
@@ -190,6 +200,9 @@ static int usb_wait_writable(void)
     limit = esp_rom_get_cpu_ticks_per_us() * 1000u * CONSOLE_TX_TIMEOUT_MS;
     start = esp_cpu_get_cycle_count();
     while (!usb_serial_jtag_ll_txfifo_writable()) {
+        if (usb_detached) {
+            return 0;
+        }
         if ((uint32_t) (esp_cpu_get_cycle_count() - start) > limit) {
             usb_host_stalled = 1;
             return 0;
@@ -214,6 +227,9 @@ static void usb_write_noflush(const char *buf, uint32_t len)
 
 static void usb_write(const char *buf, uint32_t len)
 {
+    if (usb_detached) {
+        return;
+    }
     usb_write_noflush(buf, len);
     /* Hand a partly filled packet to the host. */
     usb_serial_jtag_ll_txfifo_flush();
@@ -228,6 +244,9 @@ static void usb_write(const char *buf, uint32_t len)
  */
 static int usb_host_present(void)
 {
+    if (usb_detached) {
+        return 0;
+    }
     if (usb_serial_jtag_ll_txfifo_writable()) {
         usb_host_stalled = 0;
     }
@@ -670,7 +689,7 @@ int console_read_nonblock(char *buf, uint32_t len)
 {
     uint32_t n = 0;
 
-    if (usb_serial_jtag_ll_rxfifo_data_available()) {
+    if (!usb_detached && usb_serial_jtag_ll_rxfifo_data_available()) {
         n = (uint32_t) usb_serial_jtag_ll_read_rxfifo((uint8_t *) buf, len);
     }
     if (n < len) {
@@ -742,6 +761,29 @@ void console_rx_notify(void (*callback)(void))
 
     uart_ll_clr_intsts_mask(console_uart.dev, UART_INTR_RXFIFO_FULL);
     uart_intr_enable(UART_INTR_RXFIFO_FULL, true);
+}
+
+/*
+ * The controller keeps running without the PHY, but no host takes a packet
+ * any more: a write would wait for room in its FIFO until the timeout, and
+ * nothing arrives.  Detached, the console leaves it alone; attached again,
+ * whatever the FIFO still holds goes out when the host polls.
+ */
+void console_usb_detach(void)
+{
+    usb_detached = 1;
+    usb_serial_jtag_ll_disable_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
+}
+
+void console_usb_attach(void)
+{
+    usb_host_stalled = 0;
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
+    if (console_rx_callback != NULL) {
+        usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
+    }
+    usb_detached = 0;
 }
 
 /*

@@ -146,6 +146,15 @@ int      console_host_present(void);
 void     console_rx_notify(void (*callback)(void));
 
 /*
+ * The USB Serial/JTAG transport off and on again, for the time the internal
+ * USB PHY serves the USB host (port/usb/host.c): detached, the console writes
+ * and reads only UART0, at no cost for USB, and console_host_present() is
+ * the UART's answer.  From a thread.
+ */
+void     console_usb_detach(void);
+void     console_usb_attach(void);
+
+/*
  * Where newlib's stdout and stderr go (port/syscalls.c).  NULL, the initial
  * state: straight to the console.  The sink gets the bytes as written (bare
  * "\n") and is called from threads and before the kernel runs them, never

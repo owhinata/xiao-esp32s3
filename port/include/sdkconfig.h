@@ -339,6 +339,31 @@
  */
 #define CONFIG_ESP_COEX_ENABLED                 1
 
+/* ---- USB Host Library (esp-usb host/usb, its Kconfig) ------------------- */
+
+/*
+ * The defaults of esp-usb's host/usb/Kconfig, with these differences:
+ * external hubs supported (CONFIG_USB_HOST_HUBS_SUPPORTED; Kconfig: off),
+ * one level of hubs only (CONFIG_USB_HOST_HUB_MULTI_LEVEL off; Kconfig: on
+ * once hubs are).  Off as in Kconfig, and so not defined: the enumeration
+ * filter callback, the custom power-on delay of a hub's ports, the root
+ * port's suspend before light sleep, DMA memory in PSRAM (not possible on
+ * this chip).  CONFIG_USB_HOST_EXT_PORT_RESET_ATTEMPTS needs ESP-IDF's
+ * experimental features and is not defined either (ext_port.c then tries
+ * once).  No name here is one that the shell's Zephyr-compat layer uses.
+ */
+#define CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE 1024
+#define CONFIG_USB_HOST_HW_BUFFER_BIAS_BALANCED 1
+#define CONFIG_USB_HOST_DEBOUNCE_DELAY_MS       250
+#define CONFIG_USB_HOST_RESET_HOLD_MS           30
+#define CONFIG_USB_HOST_RESET_RECOVERY_MS       30
+#define CONFIG_USB_HOST_SET_ADDR_RECOVERY_MS    10
+#define CONFIG_USB_HOST_RESUME_HOLD_MS          30
+#define CONFIG_USB_HOST_RESUME_RECOVERY_MS      20
+#define CONFIG_USB_HOST_SUSPEND_ENTRY_MS        20
+#define CONFIG_USB_HOST_HUBS_SUPPORTED          1
+#define CONFIG_USB_HOST_EXT_PORT_RESET_RECOVERY_DELAY_MS 30
+
 /* ---- lwIP (esp-lwip with ESP-IDF's port, lwipopts.h) ------------------- */
 
 /*

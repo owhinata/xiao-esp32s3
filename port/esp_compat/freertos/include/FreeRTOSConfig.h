@@ -65,12 +65,17 @@
  * (sys_arch_protect()), and one semaphore for each thread that calls the
  * driver (the OS adapter's wifi_thread_semphr_get): a few KiB, not
  * documented.  port/net/wifi.c logs how much the start took from the pool,
- * which is the measure to size it by.  The queues and semaphores the OS
+ * which is the measure to size it by: with Wi-Fi up, about 9 KiB of 36 KiB
+ * are free.  The other 12 KiB are for the USB host while it runs
+ * (port/usb/host.c): its two
+ * tasks, "usb_host" and "usb_client" (4096-byte stacks), and the USB Host
+ * Library's semaphores, mutexes, client queue and timer, about 11 KiB
+ * together, which go back when it stops.  The queues and semaphores the OS
  * adapter makes with xQueueCreateStatic() (its _queue_create), lwIP's
  * mailboxes and semaphores (static ones in ESP-IDF's heap) and all of
  * ESP-IDF's malloc() and heap_caps_malloc() use ESP-IDF's heap.
  */
-#define configTOTAL_HEAP_SIZE           (36u * 1024u)
+#define configTOTAL_HEAP_SIZE           (48u * 1024u)
 
 /*
  * vTaskDelete() and returning from a task: the layer's own thread

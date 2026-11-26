@@ -32,6 +32,7 @@ UART0.
 | Heap | ESP-IDF's heap (`heap_caps` on TLSF; `malloc()` is esp_libc's): about 220 KiB of internal RAM and the RTC FAST memory, usable from interrupt handlers |
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
 | Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect`, `wifi status`, `wifi disconnect`, and `wifi cred` for stored networks with automatic connection |
+| USB host | Espressif's USB Host Library (espressif/esp-usb) with external hubs, on the USB OTG controller (full speed) through the internal PHY of the USB-C connector; started by `usb host start`.  While it runs, the USB-C console is off |
 | TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23).  `zperf` runs iperf3 TCP tests in both directions, and `ntp` keeps the clock of `date` on the NTP server at the default gateway |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, a 28 KiB `settings` partition at 0x9000, the firmware as the factory application at 0x10000 |
 | Settings | rp2040-connect's key-value store (Zephyr settings on Zephyr NVS) in the `settings` partition, written through ESP-IDF's esp_flash driver; the `kv` command |
@@ -121,6 +122,7 @@ Available commands:
   reboot   : Restart the board
   sleep    : Sleep for <ms> milliseconds (Zephyr's kernel sleep)
   uptime   : Show the time since the start (SYSTIMER) and the ticks
+  usb      : USB host
   version  : Show the versions of the kernel, HAL and compiler
   wifi     : Wi-Fi commands
   zperf    : Zperf commands
@@ -159,6 +161,13 @@ to a minute; after that the address is dropped and the stored networks are
 tried every 32 s.  Telnet has no authentication.  The UART and USB console
 keeps working beside it, and each console gets the output of its own
 commands.
+
+`usb host start`, given on UART0 or Telnet, turns the USB-C connector into
+a full-speed USB host port: the console on that connector stops, and
+`usb host stop` gives it back.  `usb status` shows the port, `usb list` the
+devices, and `usb desc <address>` a device's descriptors, the
+class-specific ones in hexadecimal.  The connector does not supply power:
+5 V on the board's 5V pin feeds the board and the device.
 
 The orange LED toggles every 0.5 s.  The banner is printed at boot; a terminal
 opened later gets a prompt on Enter.  Output goes to both transports and input
@@ -294,6 +303,7 @@ shell/port/     this board's part of the shell
 lib/            upstream sources, fetched by CMake; read-only, not tracked
 port/           board and start-up code, and port/esp_compat: what the
                 Espressif sources expect from parts of ESP-IDF that are not built
+port/usb/       USB host: start, stop, the list of devices
 port/threadx/   ThreadX architecture port, and its FreeRTOS compatibility layer
                 (freertos/)
 src/            application
