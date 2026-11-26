@@ -29,7 +29,7 @@ UART0.
 | Run times | ThreadX execution profile kit on the CPU cycle counter |
 | LED | GPIO21, active low, toggled by an esp_timer periodic timer |
 | CPU clock | 240 MHz from the PLL (`esp_clk_init()`, `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ`) |
-| Heap | ESP-IDF's heap (`heap_caps` on TLSF; `malloc()` is esp_libc's): about 400 KiB of internal RAM and the RTC FAST memory, usable from interrupt handlers |
+| Heap | ESP-IDF's heap (`heap_caps` on TLSF; `malloc()` is esp_libc's): about 220 KiB of internal RAM and the RTC FAST memory, usable from interrupt handlers |
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
 | Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect`, `wifi status`, `wifi disconnect`, and `wifi cred` for stored networks with automatic connection |
 | TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23).  `zperf` runs iperf3 TCP tests in both directions, and `ntp` keeps the clock of `date` on the NTP server at the default gateway |
@@ -250,11 +250,18 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    start-up lines (`app_init`, `heap_init`) appear on the console before
    the banner.
 
-The memory layout and the list of code that has to run from RAM are in
-`ldscript/xiao_esp32s3.ld`, with the reasons.  Points that are easy to get
-wrong:
+The memory layout and the lists of code that runs from RAM are in
+`ldscript/xiao_esp32s3.ld`, with the reasons.  There are two lists: the code
+that has to run from RAM (before flash is mapped, while the cache is off,
+the fault report), and the code that is there for speed, 58 KiB: the path
+of a packet through the Wi-Fi libraries, lwIP and the heap, as ESP-IDF's
+IRAM options place it.  The rest of that path (the kernel, esp_timer, the
+sockets) runs from flash through a 32 KiB instruction cache, twice
+ESP-IDF's default.  With all of the path in flash and a 16 KiB cache, TCP
+gave 2.4 Mbit/s; now it gives about 10 Mbit/s (`zperf`, both directions)
+with three quarters of the CPU idle.  Points that are easy to get wrong:
 
-- The instruction cache uses the first 16 KiB of SRAM0 as its own memory.
+- The instruction cache uses SRAM0, all 32 KiB of it, as its own memory.
   Nothing may be linked there.
 - The bootloader runs from the top of internal SRAM while it loads the
   application and refuses an image whose loaded segments reach into it, so
@@ -279,8 +286,9 @@ bootloader/     build of ESP-IDF's second-stage bootloader
 cmake/          toolchain file (downloads the compiler), upstream fetch
 partitions.csv  partition table
 script/         flash tool
-ldscript/       linker script, and the check run after linking that code placed
-                in RAM does not reference flash
+ldscript/       linker script, and the check run after linking that the code
+                that has to run from RAM references neither flash nor the
+                code that is in RAM for speed
 shell/common/   shell engine and commands, copied from rp2040-connect
 shell/port/     this board's part of the shell
 lib/            upstream sources, fetched by CMake; read-only, not tracked

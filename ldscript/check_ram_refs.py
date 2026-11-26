@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
 Post-link check of the code and data that the linker script keeps in RAM
-(ldscript/xiao_esp32s3.ld): none of it may refer to the flash.
+because they must work without the flash (ldscript/xiao_esp32s3.ld): none
+of it may refer to the flash, nor to the code in RAM for speed only.
 
-What runs from RAM does so because it has to work while the cache is off
+That code runs from RAM because it has to work while the cache is off
 (the flash driver's windows, port/board_flash.c), before the flash mapping
 is set up, or while it may be broken (the fault path).  A reference from
 there into the flash is a call, a jump target or a data address that the
-CPU fetches through the cache; with the cache off it stalls or faults.  This
-check finds those references in the linked image.
+CPU fetches through the cache; with the cache off it stalls or faults.  The
+code in .iram0.fast is in RAM only for speed and calls into the flash
+freely, so a reference to it counts as one into the flash.  This check
+finds those references in the linked image.
 
 Checked, from the linker map:
   - every input section of .iram0.vectors (the exception and interrupt
@@ -19,16 +22,19 @@ Checked, from the linker map:
     just "*"), and of the objects in EXTRA_OBJECTS below.
 What lands in RAM only through the generic patterns (Espressif's
 IRAM_ATTR and DRAM_ATTR in objects that otherwise stay in flash, the Wi-Fi
-and PHY libraries' .iram1) is not checked: none of it runs while the cache
-is off here (every interrupt up to XCHAL_EXCM_LEVEL is masked then, and no
-thread switch happens) or on the fault path.  --all lists it too.
+and PHY libraries' .iram1), and .iram0.fast, are not checked: none of it
+runs while the cache is off here (every interrupt up to XCHAL_EXCM_LEVEL is
+masked then, and no thread switch happens) or on the fault path.  --all
+lists their references too.
 The image is linked with --emit-relocs, so every word and instruction that
 holds an address is known from its relocation: a literal (R_XTENSA_32, the
-word's final value) or an instruction operand (R_XTENSA_SLOTn_OP, the
-symbol's address plus the addend).  Plain constants that only look like
-flash addresses have no relocation and are not reported.  A reference
-counts as one into the flash when it lies in 0x42000000-0x44000000 (code)
-or 0x3C000000-0x3E000000 (data).
+word's final value) or an instruction operand (R_XTENSA_SLOTn_OP: for a
+call or a jump the target its encoding gives, else the symbol's address
+plus the addend, which for a section symbol is not adjusted to the output
+section).  Plain constants that only look like flash addresses have no
+relocation and are not reported.  A reference counts as one into the flash
+when it lies in 0x42000000-0x44000000 (code), 0x3C000000-0x3E000000 (data)
+or .iram0.fast.
 
 ALLOWED below lists the references that are known to be harmless, each
 with its reason.  Any other reference fails the build (exit status 1) with
@@ -87,6 +93,8 @@ ALLOWED = (
     ("tx_timer_interrupt.S.obj", r"\.literal", r".*",
      "the tick's C part: an interrupt handler in flash, masked while the "
      "cache is off (port/board_flash_os.c)"),
+    ("tx_timer_interrupt.S.obj", r"\.text", r"_tx_timer_expiration_process|_tx_thread_time_slice",
+     "the same, for the functions the tick calls directly"),
     ("rtc_init.c.obj", r"\.literal\.rtc_init", r"rtc_sleep_pu|sar_periph_ctrl_init",
      "called by rtc_init() at start-up with the cache on, not during the "
      "o-code calibration"),
@@ -99,6 +107,21 @@ ALLOWED = (
 
 CODE_SECTIONS = (".iram0.vectors", ".iram0.text")
 DATA_SECTION = ".dram0.data"
+FAST_SECTION = ".iram0.fast"
+
+
+def slot_target(elf, sec, addr, sym, addend):
+    """The address an instruction operand refers to (see the top)."""
+    insn = int.from_bytes(elf.data[sec["off"] + addr - sec["addr"]:][:3], "little")
+    op0 = insn & 0xF
+    if op0 == 5 or (op0 == 6 and (insn >> 4) & 3 == 0):     # CALLn, J
+        offset = (insn >> 6) & 0x3FFFF
+        if offset & 0x20000:
+            offset -= 0x40000
+        if op0 == 5:
+            return ((addr & ~3) + (offset << 2) + 4) & 0xFFFFFFFF
+        return (addr + offset + 4) & 0xFFFFFFFF
+    return (sym["value"] + addend) & 0xFFFFFFFF
 
 
 class Elf:
@@ -272,6 +295,10 @@ def main(argv):
               if pat is not None and pat != "*"}
     listed |= {obj for out_name in CODE_SECTIONS + (DATA_SECTION,) for _, _, _, obj, _ in maps[out_name]
                if object_name(obj) in EXTRA_OBJECTS}
+    fast = elf.by_name.get(FAST_SECTION)
+    ranges = FLASH_RANGES
+    if fast is not None and fast["size"]:
+        ranges += ((fast["addr"], fast["addr"] + fast["size"], "fast code"),)
     found = []
     for out_name in CODE_SECTIONS + (DATA_SECTION,):
         sec = elf.by_name.get(out_name)
@@ -291,10 +318,10 @@ def main(argv):
                 sym = elf.symbols[symi]
                 if sym["shndx"] == 0:
                     continue
-                target = (sym["value"] + addend) & 0xFFFFFFFF
+                target = slot_target(elf, sec, addr, sym, addend)
             else:
                 continue
-            kind = next((k for lo, hi, k in FLASH_RANGES if lo <= target < hi), None)
+            kind = next((k for lo, hi, k in ranges if lo <= target < hi), None)
             if kind is None:
                 continue
             target_name = elf.name_of(target)
@@ -309,8 +336,8 @@ def main(argv):
               f"at 0x{addr:08x}: {kind} 0x{target:08x} <{target_name}>",
               file=sys.stderr if status == "bad" else sys.stdout)
     if bad:
-        print(f"check_ram_refs: {len(bad)} reference(s) from RAM into the flash "
-              f"(ldscript/check_ram_refs.py)", file=sys.stderr)
+        print(f"check_ram_refs: {len(bad)} reference(s) from RAM into the flash or "
+              f"{FAST_SECTION} (ldscript/check_ram_refs.py)", file=sys.stderr)
         return 1
     return 0
 

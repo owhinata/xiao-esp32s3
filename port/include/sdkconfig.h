@@ -57,7 +57,7 @@
  * the same): the heap's memory layout leaves SRAM0's instruction cache part
  * out and takes the rest of SRAM0.
  */
-#define CONFIG_ESP32S3_INSTRUCTION_CACHE_16KB   1
+#define CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB   1
 #define CONFIG_ESP32S3_DATA_CACHE_32KB          1
 
 /*
@@ -177,10 +177,12 @@
 
 /*
  * esp_timer (ESP-IDF's defaults): on SYSTIMER, its interrupt at level 1 and
- * its task on core 0, 3584 bytes of task stack (esp_task.h adds 512).  Its
- * code stays in flash (CONFIG_ESP_TIMER_IN_IRAM off): while the flash
- * driver has the cache off, every interrupt up to XCHAL_EXCM_LEVEL is
- * masked (port/board_flash.c), so its handler never runs then.
+ * its task on core 0, 3584 bytes of task stack (esp_task.h adds 512).
+ * CONFIG_ESP_TIMER_IN_IRAM is off: it would also allocate the interrupt
+ * with ESP_INTR_FLAG_IRAM, for running while the cache is off; here every
+ * interrupt up to XCHAL_EXCM_LEVEL is masked then (port/board_flash.c), so
+ * its handler never runs then.  The functions it would mark
+ * ESP_TIMER_IRAM_ATTR are in flash.
  */
 #define CONFIG_ESP_TIMER_IMPL_SYSTIMER          1
 #define CONFIG_ESP_TIMER_TASK_STACK_SIZE        3584
@@ -194,13 +196,14 @@
 /*
  * TLSF compiled from source (the ESP32-S3's ROM has none), no poisoning and
  * no tracing (ESP-IDF's defaults, which no symbol here needs to say),
- * memory that can execute is allocatable (no memory protection), the
- * allocation functions in flash: no interrupt handler runs while the flash
- * driver has the cache off (port/board_flash.c masks them all), so the heap
- * is usable from interrupt handlers without being in RAM.
+ * memory that can execute is allocatable (no memory protection).  The
+ * allocation functions are in RAM, for speed only, as in ESP-IDF
+ * (CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH off: HEAP_IRAM_ATTR is IRAM_ATTR,
+ * and the linker script places them and heap/linker.lf's list in
+ * .iram0.fast).  No interrupt handler runs while the flash driver has the
+ * cache off (port/board_flash.c masks them all).
  */
 #define CONFIG_HEAP_HAS_EXEC_HEAP               1
-#define CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH   1
 
 /* ---- HAL and log in the application ----------------------------------- */
 
@@ -286,15 +289,21 @@
  *     supplicant's hostap part is not built; SAE for SoftAP, OWE for SoftAP
  *     and WPA3 compatibility mode go with it;
  *   - no enterprise (802.1X/EAP) and no SAE-PK, so no TLS for the
- *     supplicant;
- *   - CONFIG_ESP_WIFI_IRAM_OPT and CONFIG_ESP_WIFI_RX_IRAM_OPT off: the
- *     libraries' code stays in flash (see the linker script); their
- *     interrupt is masked while the flash driver has the cache off.
+ *     supplicant.
+ * CONFIG_ESP_WIFI_IRAM_OPT and CONFIG_ESP_WIFI_RX_IRAM_OPT (ESP-IDF's
+ * defaults): the linker script keeps the code they name out of flash, for
+ * speed only (.iram0.fast); wifi_init.c logs them.  The linker script does
+ * the same for the sections of CONFIG_ESP_WIFI_EXTRA_IRAM_OPT (off by
+ * default in ESP-IDF on this chip; only its linker fragment reads it, so
+ * it is not defined here).  The driver's interrupt stays masked while the
+ * flash driver has the cache off.
  * Buffers: 10 static and 32 dynamic receive buffers, 32 dynamic transmit
  * buffers, 5 static management receive buffers; A-MPDU both ways with a
  * block-ack window of 6.  The Wi-Fi task is not pinned (one core).
  */
 #define CONFIG_ESP_WIFI_ENABLED                 1
+#define CONFIG_ESP_WIFI_IRAM_OPT                1
+#define CONFIG_ESP_WIFI_RX_IRAM_OPT             1
 #define CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM    10
 #define CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM   32
 #define CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER       1
@@ -336,6 +345,9 @@
  * ESP-IDF's defaults (components/lwip/Kconfig), with these differences:
  *   - IPv4 only (CONFIG_LWIP_IPV6 off; ESP-IDF: on);
  *   - no DHCP server (CONFIG_LWIP_DHCPS off; ESP-IDF: on), no SoftAP here;
+ *   - the RX/TX path in RAM, CONFIG_LWIP_IRAM_OPTIMIZATION and its TCP
+ *     part CONFIG_LWIP_EXTRA_IRAM_OPTIMIZATION (ESP-IDF: off), placed by
+ *     the linker script (.iram0.fast); wifi_init.c logs the first;
  * and, as in ESP-IDF's defaults, no PPP, SLIP, NAPT, AutoIP, SNTP or core
  * locking.  The tcpip thread runs at FreeRTOS priority 18 (ThreadX 13)
  * with 3072 + 512 bytes of stack (esp_task.h).  The DHCP client checks an
@@ -346,6 +358,8 @@
  * built (port/net/wlanif.c is the network interface).
  */
 #define CONFIG_ESP_NETIF_TCPIP_LWIP             1
+#define CONFIG_LWIP_IRAM_OPTIMIZATION           1
+#define CONFIG_LWIP_EXTRA_IRAM_OPTIMIZATION     1
 #define CONFIG_LWIP_IPV4                        1
 #define CONFIG_LWIP_TCPIP_TASK_PRIO             18
 #define CONFIG_LWIP_TCPIP_TASK_STACK_SIZE       3072

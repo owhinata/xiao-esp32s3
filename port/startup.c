@@ -100,11 +100,12 @@ extern void rom_config_data_cache_mode(uint32_t cfg_cache_size, uint8_t cfg_cach
                                        uint8_t cfg_cache_line_size);
 
 /*
- * Cache geometry: ESP-IDF's defaults for the ESP32-S3
- * (CONFIG_ESP32S3_INSTRUCTION_CACHE_SIZE and friends).  The caches live in
- * internal SRAM: the instruction cache in the first bytes of SRAM0, which the
- * linker script therefore leaves empty (ICACHE_SIZE there is the single source
- * of the size), the data cache at the top of SRAM2.
+ * Cache geometry (CONFIG_ESP32S3_INSTRUCTION_CACHE_SIZE and friends):
+ * ESP-IDF's defaults for the ESP32-S3, but an instruction cache of 32 KiB
+ * (ESP-IDF: 16 KiB), which the code left in flash of the path of a packet
+ * needs.  The caches live in internal SRAM: the instruction cache in SRAM0,
+ * which the linker script therefore leaves empty (ICACHE_SIZE there is the
+ * single source of the size), the data cache at the top of SRAM2.
  */
 extern char _icache_size;       /* absolute symbol, value = size in bytes */
 #define BOARD_ICACHE_SIZE       ((uint32_t) &_icache_size)
