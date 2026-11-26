@@ -1039,18 +1039,23 @@ set_source_files_properties(
 set_source_files_properties("${ESP_HAL}/esp_system/port/soc/esp32s3/clk.c"
     PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/bootloader_support/include")
 # What ESP-IDF's esp_app_format component gives esp_app_desc.c: the project's
-# name and version (ESP-IDF takes the version from "git describe" of the
-# project, falling back to "1") and ESP-IDF's version.
-set(PROJECT_VER "1")
-execute_process(
-    COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_LIST_DIR}" describe --always --tags --dirty
-    RESULT_VARIABLE _rc OUTPUT_VARIABLE _ver ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
-if(_rc EQUAL 0 AND _ver)
-    string(SUBSTRING "${_ver}" 0 31 PROJECT_VER)
-endif()
+# name and version and ESP-IDF's version.  The version is "git describe" of
+# the project, as in ESP-IDF, but taken at every build, not at configure
+# time (cmake/app_version.cmake writes it to a header that is included
+# ahead of the source).
+set(APP_VERSION_H "${CMAKE_CURRENT_BINARY_DIR}/app_version.h")
+add_custom_target(app_version
+    COMMAND "${CMAKE_COMMAND}" "-DGIT=${GIT_EXECUTABLE}" "-DSOURCE_DIR=${CMAKE_CURRENT_LIST_DIR}"
+            "-DOUT=${APP_VERSION_H}" -P "${CMAKE_CURRENT_LIST_DIR}/cmake/app_version.cmake"
+    BYPRODUCTS "${APP_VERSION_H}"
+    COMMENT "Project version (git describe)"
+    VERBATIM)
+add_dependencies(esp_idf app_version)
 set_source_files_properties("${ESP_HAL}/esp_app_format/esp_app_desc.c" PROPERTIES
     INCLUDE_DIRECTORIES "${ESP_HAL}/esp_app_format/include"
-    COMPILE_DEFINITIONS "PROJECT_VER=\"${PROJECT_VER}\";PROJECT_NAME=\"${PROJECT_NAME}\";IDF_VER_DEF=\"${IDF_VER}\"")
+    COMPILE_OPTIONS "-include;${APP_VERSION_H}"
+    OBJECT_DEPENDS "${APP_VERSION_H}"
+    COMPILE_DEFINITIONS "PROJECT_NAME=\"${PROJECT_NAME}\";IDF_VER_DEF=\"${IDF_VER}\"")
 
 set_target_properties(app PROPERTIES
     OUTPUT_NAME xiao_esp32s3_threadx
