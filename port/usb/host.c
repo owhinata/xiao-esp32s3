@@ -13,7 +13,9 @@
  *
  *   "usb_host"    installs the library and runs usb_host_lib_handle_events():
  *                 the hub driver (root port and external hubs), the
- *                 enumeration, the device list.  At the stop it frees every
+ *                 enumeration, the device list.  It also watches the
+ *                 enumeration, which the library does not bound in time
+ *                 (see enum_watch()).  At the stop it frees every
  *                 device, uninstalls the library and gives the PHY back.
  *   "usb_client"  registers the one client and runs its events: it logs
  *                 the devices that come and go, and serves usbhost_list()
@@ -66,6 +68,21 @@ LOG_MODULE_REGISTER(usbhost, LOG_LEVEL_INF);
 
 /* How long a caller waits for a task's answer. */
 #define HOST_ANSWER_TIMEOUT_MS  5000u
+
+/* How often the library task looks at the enumeration and at a stop in progress. */
+#define HOST_POLL_MS            1000u
+
+/* A device that has not got its address and descriptors after this long is given up. */
+#define ENUM_TIMEOUT_MS         5000u
+
+/* How often in a row the root port is powered off and on for such a device. */
+#define ENUM_RETRIES            3u
+
+/* How long the root port stays off then. */
+#define ENUM_POWER_OFF_MS       500u
+
+/* At a stop, how long the devices get to be freed before the root port is powered off. */
+#define STOP_FREE_TIMEOUT_MS    2000u
 
 /* Event messages the client's queue holds (ESP-IDF's examples: 5). */
 #define CLIENT_EVENT_MSG_MAX    8
@@ -410,6 +427,74 @@ static void client_task(void *arg)
  * (the internal one, host mode), the root port powered at once, the FIFO
  * split of Kconfig (sdkconfig.h: balanced).
  */
+/*
+ * The library's enumeration has no timeout: a device that acknowledges the
+ * first request and then never delivers the data (a CX31993 plugged in
+ * again right after it went, seen on the board) keeps the control transfer
+ * in flight for ever.  No other device is enumerated behind it, and at a
+ * stop the library never reports that all devices are free.  The library
+ * counts such a device (usb_host_lib_info()) and does not list it
+ * (usb_host_device_addr_list_fill()); when that lasts ENUM_TIMEOUT_MS, the
+ * root port is powered off, which ends the transfer and frees the device,
+ * and on again ENUM_POWER_OFF_MS later, which starts the enumeration anew.
+ * After ENUM_RETRIES attempts in a row it is left alone until it is
+ * plugged in again or the host is restarted.  Called by the library task
+ * every HOST_POLL_MS at most.
+ */
+static struct {
+    TickType_t since;           /* when the pending device was first seen, or the power went off */
+    bool pending;
+    bool power_off;
+    unsigned int retries;
+} enum_state;                   /* cleared when the library task starts */
+
+static void enum_watch(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    usb_host_lib_info_t info;
+    uint8_t addrs[USBHOST_DEVICES_MAX];
+    int listed = 0;
+
+    if (enum_state.power_off) {
+        if (now - enum_state.since >= pdMS_TO_TICKS(ENUM_POWER_OFF_MS)) {
+            enum_state.power_off = false;
+            (void) usb_host_lib_set_root_port_power(true);
+        }
+        return;
+    }
+    if (usb_host_lib_info(&info) != ESP_OK
+        || usb_host_device_addr_list_fill(USBHOST_DEVICES_MAX, addrs, &listed) != ESP_OK) {
+        return;
+    }
+    if (info.num_devices <= listed) {
+        enum_state.pending = false;
+        if (listed > 0) {
+            enum_state.retries = 0;
+        }
+        return;
+    }
+    if (!enum_state.pending) {
+        enum_state.pending = true;
+        enum_state.since = now;
+        return;
+    }
+    if (now - enum_state.since < pdMS_TO_TICKS(ENUM_TIMEOUT_MS) || enum_state.retries > ENUM_RETRIES) {
+        return;
+    }
+    if (enum_state.retries == ENUM_RETRIES) {
+        enum_state.retries++;
+        LOG_ERR("a device does not answer the enumeration; plug it in again or restart the host");
+        return;
+    }
+    enum_state.retries++;
+    LOG_WRN("a device does not answer the enumeration: root port off and on, attempt %u of %u", enum_state.retries,
+            ENUM_RETRIES);
+    enum_state.pending = false;
+    enum_state.power_off = true;
+    enum_state.since = now;
+    (void) usb_host_lib_set_root_port_power(false);
+}
+
 static void lib_task(void *arg)
 {
     const usb_host_config_t config = {
@@ -418,6 +503,8 @@ static void lib_task(void *arg)
         .intr_flags = ESP_INTR_FLAG_LEVEL1,
     };
     bool freeing = false;
+    bool forced = false;
+    TickType_t freeing_since = 0;
     esp_err_t err;
 
     (void) arg;
@@ -430,22 +517,30 @@ static void lib_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+    memset(&enum_state, 0, sizeof(enum_state));
     answer(ESP_OK);
 
     /*
      * ESP-IDF's order for the end: once the client has deregistered, free
      * every device (hubs included); when that is not done at once, the
-     * library reports ALL_FREE when it is.
+     * library reports ALL_FREE when it is.  A device with a transfer in
+     * flight that never ends (see enum_watch()) is never freed: after
+     * STOP_FREE_TIMEOUT_MS the root port is powered off, which ends it.
      */
     for (;;) {
         uint32_t flags = 0;
 
-        (void) usb_host_lib_handle_events(portMAX_DELAY, &flags);
-        if (!host.stop || host.client_up) {
+        (void) usb_host_lib_handle_events(pdMS_TO_TICKS(HOST_POLL_MS), &flags);
+        if (!host.stop) {
+            enum_watch();
+            continue;
+        }
+        if (host.client_up) {
             continue;
         }
         if (!freeing) {
             freeing = true;
+            freeing_since = xTaskGetTickCount();
             err = usb_host_device_free_all();
             if (err == ESP_OK) {
                 break;
@@ -456,6 +551,10 @@ static void lib_task(void *arg)
             }
         } else if ((flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) != 0u) {
             break;
+        } else if (!forced && xTaskGetTickCount() - freeing_since >= pdMS_TO_TICKS(STOP_FREE_TIMEOUT_MS)) {
+            forced = true;
+            LOG_WRN("a device is not freed: root port off");
+            (void) usb_host_lib_set_root_port_power(false);
         }
     }
 
