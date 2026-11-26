@@ -25,7 +25,7 @@
  * 0x3FCF8000-0x3FD00000, and the heap its low half, heap/port/esp32s3/
  * memory_layout.c.)
  *
- * SRAM1 is one memory with two addresses.  This script gives its low 96 KiB
+ * SRAM1 is one memory with two addresses.  This script gives its low 104 KiB
  * to code and the rest to data; the split point below must name the same
  * physical byte on both buses (instruction address - 0x6F0000 = data address).
  *
@@ -95,8 +95,8 @@ ENTRY(_start)
 
 ICACHE_SIZE     = 0x8000;                       /* 32 KiB; port/startup.c programs the cache with it */
 IRAM_ORG        = 0x40370000 + ICACHE_SIZE;
-IRAM_END        = 0x40390000;                   /* split point, instruction bus */
-DRAM_ORG        = IRAM_END - 0x6F0000;          /* split point, data bus = 0x3FCA0000 */
+IRAM_END        = 0x40392000;                   /* split point, instruction bus */
+DRAM_ORG        = IRAM_END - 0x6F0000;          /* split point, data bus = 0x3FCA2000 */
 DRAM_END        = 0x3FCDB700;                   /* start of the bootloader's loader code */
 NOINIT_END      = 0x3FCD7E00;                   /* start of the ROM's download-mode buffers */
 MMU_PAGE        = 0x10000;
@@ -104,8 +104,8 @@ IMAGE_HEADERS   = 0x20;                         /* image header + first segment 
 
 MEMORY
 {
-    iram_seg (RX) : org = 0x40378000, len = 0x40390000 - 0x40378000
-    dram_seg (RW) : org = 0x3FCA0000, len = 0x3FCDB700 - 0x3FCA0000
+    iram_seg (RX) : org = 0x40378000, len = 0x40392000 - 0x40378000
+    dram_seg (RW) : org = 0x3FCA2000, len = 0x3FCDB700 - 0x3FCA2000
     irom_seg (RX) : org = 0x42000000, len = 0x800000
     drom_seg (R)  : org = 0x3C000000, len = 0x800000
     /*
