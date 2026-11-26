@@ -14,9 +14,9 @@
  * shell's "kv") with the stored Wi-Fi networks ("wifi cred"), then the
  * Wi-Fi driver and lwIP (port/net/wifi.c, port/net/wlanif.c), then the
  * shell on Telnet (port 23), on lwIP's sockets, the OTA service (port
- * 3232) and the network applications: the time synchronization ("ntp"),
- * the iperf3 server of "zperf" and the automatic connection to a stored
- * network.
+ * 3232), the audio stream service (port 3233) and the network
+ * applications: the time synchronization ("ntp"), the iperf3 server of
+ * "zperf" and the automatic connection to a stored network.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +26,7 @@
 #include "esp_timer.h"
 
 #include "app_log.h"
+#include "audio_service.h"
 #include "board.h"
 #include "esp_compat/pthread_local.h"
 #include "fault_record.h"
@@ -135,13 +136,16 @@ static void main_thread_entry(ULONG arg)
      * Once lwIP runs: the Telnet shell's listening socket and threads, as
      * rp2040-connect starts it after its network interface (a failure is
      * logged and leaves no Telnet), the OTA service (TCP port 3232,
-     * script/ota.py), then the time synchronization, the iperf3 server's
-     * thread and the automatic connection to a stored network (the Wi-Fi
-     * profile), as rp2040-connect's application start does them last.
+     * script/ota.py), the audio stream service (TCP port 3233,
+     * script/audio_rx.py), then the time synchronization, the iperf3
+     * server's thread and the automatic connection to a stored network
+     * (the Wi-Fi profile), as rp2040-connect's application start does them
+     * last.
      */
     if (net_wifi_start() == 0) {
         (void) shell_telnet_init(PROMPT);
         (void) ota_service_init();
+        (void) audio_service_init();
         (void) zephyr_net_app_start();
     }
 

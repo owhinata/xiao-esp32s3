@@ -102,6 +102,24 @@
 #define APP_STACK_OTA_SERVICE   4096
 
 /*
+ * The audio stream service's thread "audio_service" (shell/port/
+ * audio_service.c), at the priority of "ota_service" (Zephyr's 14, ThreadX
+ * 30), in 20 ms time slices with the shell's thread: it wakes about every
+ * 20 ms for a block, and the 16 kHz ring holds 256 ms, so only a thread at
+ * its priority or above that kept the CPU for longer would cost samples
+ * (counted as lost and sent as a jump of the index).  The block is static.
+ * Two paths are about as deep: the poll between the reads, through the
+ * socket layer's zvfs_poll() (an event array of 384 bytes), the binding's
+ * descriptor arrays and lwip_poll() (about 1.4 KiB of frames, from GCC's
+ * stack usage), and a log line, through the RAM log into newlib's
+ * vsnprintf() (about 1.1 KiB); 2.0 KiB at its deepest so far (a stream
+ * with a refused second client, without a log line of a dropped one).
+ * "ps" shows what is left.
+ */
+#define APP_PRIO_AUDIO_SERVICE  APP_PRIO_FROM_ZEPHYR(14)
+#define APP_STACK_AUDIO_SERVICE 4096
+
+/*
  * The time synchronization's thread "time_sync_tid" (shell/common/imu/
  * time_sync.c, the shared default 2048 bytes): a UDP send and receive
  * through the socket layer to lwIP (each lwIP call waits for "tcpip") and

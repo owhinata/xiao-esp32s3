@@ -19,15 +19,13 @@
  *   uac level [<seconds>]         the peak and RMS level of the decimated
  *                                 samples, in dBFS, four times a second for
  *                                 the time given (default 5 s)
- *   uac dump [<samples>]          that many consecutive 16 kHz samples
- *                                 (default 1600, at most 16000), read with
- *                                 usbaudio_read_16k() into a buffer first,
- *                                 then printed 16 per line and "END <count>"
  *   uac hum [50|60|off]           the mains hum filter (notches at the mains
  *                                 frequency and its harmonics up to 420 Hz),
  *                                 50 until set
  *   uac stats                     what the stream has delivered: counters,
- *                                 the measured rate against the nominal one
+ *                                 the measured rate against the nominal one;
+ *                                 and the audio stream service's client and
+ *                                 counters (shell/port/audio_service.h)
  *
  * dBFS: relative to a full-scale square wave (a full-scale sine is
  * -3.0 dBFS RMS).  The arithmetic is integer.
@@ -44,6 +42,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
 
+#include "audio_service.h"
 #include "usb/audio.h"
 
 #define LEVEL_PERIOD_MS 250
@@ -460,89 +459,6 @@ static int cmd_uac_level(const struct shell *sh, size_t argc, char **argv)
     return 0;
 }
 
-/* ---- uac dump ------------------------------------------------------------ */
-
-#define DUMP_DEFAULT    1600u
-#define DUMP_MAX        16000u
-#define DUMP_CHUNK      1600u
-#define DUMP_WAIT_MS    1000u
-
-/*
- * The capture goes into the buffer first and is printed after, so that the
- * output's pace cannot make it fall behind the ring.  It reads with its
- * own position (struct usbaudio_reader), from the newest sample on, so it
- * takes nothing from another reader; a skip is a gap in the capture,
- * which the END line reports.  One "uac dump" at a time (a temporary
- * tool): a second console's is refused while one runs.
- */
-static K_MUTEX_DEFINE(dump_lock);
-
-static int cmd_uac_dump(const struct shell *sh, size_t argc, char **argv)
-{
-    uint32_t want = DUMP_DEFAULT;
-    uint32_t got = 0;
-    struct usbaudio_reader reader;
-    const char *why = "";
-    int16_t *buf;
-    char line[16 * 7 + 1];
-
-    if (argc > 1 && (!parse_u32(argv[1], &want) || want < 1u || want > DUMP_MAX)) {
-        shell_error(sh, "Not a number of samples (1 .. %u): %s", DUMP_MAX, argv[1]);
-        return -EINVAL;
-    }
-    buf = malloc(want * sizeof(*buf));
-    if (buf == NULL) {
-        return report(sh, -ENOMEM);
-    }
-    if (k_mutex_lock(&dump_lock, K_NO_WAIT) != 0) {
-        free(buf);
-        shell_error(sh, "Busy: \"uac dump\" runs on another console");
-        return -EBUSY;
-    }
-    usbaudio_reader_init(&reader);
-    while (got < want) {
-        uint32_t n = want - got < DUMP_CHUNK ? want - got : DUMP_CHUNK;
-        int ret = usbaudio_read_16k(&reader, &buf[got], n, DUMP_WAIT_MS);
-
-        if (ret < 0) {
-            if (got == 0u) {
-                k_mutex_unlock(&dump_lock);
-                free(buf);
-                if (ret == -ENOTSUP) {
-                    shell_error(sh, "The stream does not give 16 kHz samples (it runs at neither 16 nor 48 kHz)");
-                    return ret;
-                }
-                return report(sh, -ESRCH);
-            }
-            why = ", the stream stopped";
-            break;
-        }
-        got += (uint32_t) ret;
-        if ((uint32_t) ret < n) {
-            why = ", timed out waiting for samples";
-            break;
-        }
-    }
-    k_mutex_unlock(&dump_lock);
-
-    for (uint32_t i = 0; i < got; i += 16u) {
-        size_t len = 0;
-
-        for (uint32_t j = i; j < got && j < i + 16u; j++) {
-            len += (size_t) snprintf(line + len, sizeof(line) - len, "%s%d", j == i ? "" : " ", buf[j]);
-        }
-        shell_print(sh, "%s", line);
-    }
-    free(buf);
-    if (reader.lost != 0u) {
-        shell_print(sh, "END %u (gap: %u samples overwritten during the capture%s)", (unsigned int) got,
-                    (unsigned int) reader.lost, why);
-    } else {
-        shell_print(sh, "END %u%s", (unsigned int) got, why);
-    }
-    return 0;
-}
-
 /* ---- uac stats ----------------------------------------------------------- */
 
 static void print_seconds(char *buf, size_t size, int64_t us)
@@ -552,6 +468,20 @@ static void print_seconds(char *buf, size_t size, int64_t us)
     }
     (void) snprintf(buf, size, "%u.%03u", (unsigned int) (us / 1000000),
                     (unsigned int) ((us / 1000) % 1000));
+}
+
+/* The audio stream service's line, the last of "uac stats". */
+static void print_service(const struct shell *sh)
+{
+    struct audio_service_stats sv;
+
+    audio_service_stats(&sv);
+    shell_print(sh, "TCP stream (port %u): %s; %s: %u blocks, %u samples sent, %u lost; "
+                "%u client%s dropped", AUDIO_SERVICE_PORT,
+                sv.connected ? "client connected" : sv.listening ? "no client" : "not listening",
+                sv.connected ? "this client" : "last client", (unsigned int) sv.blocks,
+                (unsigned int) sv.samples, (unsigned int) sv.lost, (unsigned int) sv.dropped,
+                sv.dropped == 1u ? "" : "s");
 }
 
 static int cmd_uac_stats(const struct shell *sh, size_t argc, char **argv)
@@ -566,6 +496,7 @@ static int cmd_uac_stats(const struct shell *sh, size_t argc, char **argv)
     (void) usbaudio_stats(&st);
     if (st.rate == 0u) {
         shell_print(sh, "No stream since the USB host started");
+        print_service(sh);
         return 0;
     }
     shell_print(sh, "stream: %s, %u Hz, %u channel%s, decimated to %u Hz",
@@ -611,12 +542,11 @@ static int cmd_uac_stats(const struct shell *sh, size_t argc, char **argv)
     }
     shell_print(sh, "16 kHz ring: %u samples (each reader counts what it lost)",
                 (unsigned int) USBAUDIO_RING_SAMPLES);
+    print_service(sh);
     return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_uac,
-    SHELL_CMD_ARG(dump, NULL, "Print consecutive 16 kHz samples: dump [<samples>] (default 1600)",
-                  cmd_uac_dump, 1, 1),
     SHELL_CMD_ARG(hum, NULL, "Show or set the mains hum filter: hum [50|60|off] (default 50)",
                   cmd_uac_hum, 1, 1),
     SHELL_CMD(info, NULL, "Show the microphone and its formats", cmd_uac_info),

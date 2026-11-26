@@ -1220,6 +1220,7 @@ add_library(shell OBJECT
     ${SHELL_KV_ZEPHYR_COPIES}
     "${SHELL_KV_NVS}"
     # This board's part
+    "${SHELL_PORT}/audio_service.c"
     "${SHELL_PORT}/commands.c"
     "${SHELL_PORT}/fault_record.c"
     "${SHELL_PORT}/flash_kv_os.c"

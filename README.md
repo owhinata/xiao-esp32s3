@@ -183,8 +183,9 @@ has one; `uac info` shows the choice; a 16000 Hz stream skips the
 decimation), `uac stop`
 stops it, `uac level [<seconds>]` prints the peak and RMS level in dBFS
 four times a second, and `uac stats` the counters, the measured sample
-rate, the DC offset of the input and the number of samples at full scale.
-`uac dump [<samples>]` prints consecutive 16 kHz samples as numbers.
+rate, the DC offset of the input and the number of samples at full scale.  Its last line is the audio stream
+service's: whether a client is connected, the blocks and samples sent to it
+and the samples it lost, and the clients dropped.
 `uac hum [50|60|off]` sets the mains frequency of the hum filter (50 by
 default).
 `uac volume [<0..100>]` shows the microphone's volume (percent of its
@@ -234,6 +235,26 @@ and for each slot its otadata entry (sequence number and state) and its
 image's version, build time and ELF SHA-256.  `ota rollback` marks the
 running image invalid and restarts into the other slot, when that holds an
 image that may be booted.
+
+### Audio stream over Wi-Fi
+
+```sh
+python3 script/audio_rx.py --host <the board's IP address> --wav out.wav --seconds 60
+```
+
+The board's audio stream service (TCP port 3233) sends the 16 kHz samples of
+the USB audio input to one client at a time; a second connection is closed at
+once.  The stream is started and stopped with the shell (`usb host start`,
+`uac start`, `uac stop`); while none runs the board sends a keep-alive once a
+second.  `script/audio_rx.py` checks every block, prints a line per second
+(samples per second, gaps, whether the board streams) and with `--wav` writes
+the samples to a WAV file, with the samples the board lost (it fell behind,
+e.g. the link was slow) as zeros.  The board drops a client that takes nothing
+for 3 s.  The protocol is described in `shell/port/audio_service.c`.
+
+**The service has no authentication**, like the Telnet shell and the OTA
+service: anyone who reaches the board on the network can listen to the
+microphone.
 
 `flash` and `app-flash` over USB or UART keep working whatever the slots
 hold: they write `ota_0` and a blank `otadata`.
@@ -357,7 +378,7 @@ What ESP-IDF's application start-up does and this firmware does not:
 bootloader/     build of ESP-IDF's second-stage bootloader
 cmake/          toolchain file (downloads the compiler), upstream fetch
 partitions.csv  partition table
-script/         flash tool (USB, UART) and the Wi-Fi update tool
+script/         flash tool (USB, UART), the Wi-Fi update tool and the audio stream receiver
 patches/        this repository's patches of the upstream sources in lib/, applied
                 at configure time (each says what it fixes and why)
 ldscript/       linker script, and the check run after linking that the code
