@@ -20,7 +20,8 @@ Paths are relative to `port/threadx/`.  "upstream" is
 
 | File | Origin | State |
 |---|---|---|
-| `src/tx_thread_context_save.S`, `tx_thread_context_restore.S`, `tx_thread_schedule.S`, `tx_thread_stack_build.S`, `tx_thread_system_return.S` | upstream | Verbatim copies |
+| `src/tx_thread_context_save.S`, `tx_thread_context_restore.S`, `tx_thread_schedule.S`, `tx_thread_stack_build.S` | upstream | Verbatim copies |
+| `src/tx_thread_system_return.S` | upstream | Interrupts are disabled before the call of `_tx_execution_thread_exit()`, not after it (windowed ABI, XEA2).  Upstream calls the execution profile kit with interrupts enabled: an interrupt between the kit's reading of the time and of the thread's start time leaves a start time later than the time read, and the kit, taking that for a wrap of the 32-bit source, adds a full turn (17.9 s) to the thread's total. |
 | `inc/tx_api_asm.h` | upstream | Verbatim copy |
 | `src/tx_timer_interrupt.S` | upstream | One symbol renamed (`_xt_tick_divisor`) |
 | `inc/tx_port.h` | upstream | Interrupt lockout and `_xt_coproc_release()` adapted; see the note at the top of the file |

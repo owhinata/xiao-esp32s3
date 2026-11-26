@@ -81,6 +81,18 @@ _tx_thread_system_return:
 #endif
 
 #if (defined(TX_ENABLE_EXECUTION_CHANGE_NOTIFY) || defined(TX_EXECUTION_PROFILE_ENABLE))
+#if !XCHAL_HAVE_XEA3 && !defined(__XTENSA_CALL0_ABI__)
+    /* The thread exit function reads the time and then the thread's start
+     * time.  An interrupt between the two leaves a start time later than
+     * the time read (the interrupt exit, or the scheduler when the thread
+     * was preempted, sets it), which the function takes for a wrap of the
+     * time source: it would add a full turn to the thread's total.  So
+     * interrupts are disabled before the call, not after it.  a2 (the PS
+     * to save) and a3 survive the windowed call.
+     */
+    rsr     a2,  PS
+    XT_INTS_DISABLE(a3)
+#endif
     /* Call the thread exit function to indicate the thread is no longer executing. */
 #ifdef __XTENSA_CALL0_ABI__
     /* Preserve a0 across the call. */
@@ -190,8 +202,11 @@ _tx_thread_system_return:
      * overrun a task stack of TX_MINIMUM_STACK bytes.
      * Read PS so it can be saved off after stack adjustment.
      */
+    #if !((defined(TX_ENABLE_EXECUTION_CHANGE_NOTIFY) || defined(TX_EXECUTION_PROFILE_ENABLE)) \
+          && !defined(__XTENSA_CALL0_ABI__))
     rsr     a2,  PS
     XT_INTS_DISABLE(a3)
+    #endif
 
     /* Allocate the remainder of the frame here; we already allocated
      * 16 bytes for call0 or 48 bytes for windowed upon entry.
