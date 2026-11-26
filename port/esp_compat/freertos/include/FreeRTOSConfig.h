@@ -56,7 +56,7 @@
  * allocator.  Each block costs 8 bytes of the pool's bookkeeping on top; a
  * task is its stack and a task block of about 880 bytes, a semaphore or
  * mutex 96 bytes, a queue 96 bytes and its items, an event group 44 bytes.
- * The tasks: esp_timer (4096-byte stack), the Wi-Fi driver's (6656,
+ * The tasks: esp_timer (2560-byte stack), the Wi-Fi driver's (6656,
  * WIFI_TASK_STACK_SIZE), the default event loop's "sys_evt" (2816), lwIP's
  * "tcpip" (3584), which stay, and "main" (src/main.c, 4096), whose stack
  * and task block go back to the pool when it ends after the start-up.
@@ -65,23 +65,24 @@
  * (sys_arch_protect()), and one semaphore for each thread that calls the
  * driver (the OS adapter's wifi_thread_semphr_get): a few KiB, not
  * documented.  port/net/wifi.c logs how much the start took from the pool,
- * which is the measure to size it by: with Wi-Fi up, about 9 KiB of 36 KiB
- * are free.  The other 32 KiB are for the USB host while it runs
+ * which is the measure to size it by: with Wi-Fi up, about 24 KiB of the pool
+ * are in use.  The rest is for the USB host while it runs
  * (port/usb/host.c): its two
- * tasks, "usb_host" and "usb_client" (4096-byte stacks), and the USB Host
- * Library's semaphores, mutexes, client queue and timer, about 11 KiB
- * together; the USB audio input's three tasks (port/usb/audio.c,
+ * tasks, "usb_host" and "usb_client" (2560- and 4096-byte stacks), and the
+ * USB Host Library's semaphores, mutexes, client queue and timer, about
+ * 10 KiB together; the USB audio input's three tasks (port/usb/audio.c,
  * port/usb/audio_uac2.c), "uac" (5120-byte stack), the UAC 1.0 driver's
  * "USB UAC Host" and the UAC 2.0 client's "uac2" (4096), the two clients'
  * queues (16 and 8 messages), semaphores and mutexes (two for the UAC 1.0
  * driver, two for its device, two for its open interface, one for the
  * UAC 2.0 control transfers), about 18 KiB; all of it goes back when the
- * host stops.  The queues and semaphores the OS
+ * host stops.  With a UAC 2.0 microphone streaming, about 17 KiB are
+ * free.  The queues and semaphores the OS
  * adapter makes with xQueueCreateStatic() (its _queue_create), lwIP's
  * mailboxes and semaphores (static ones in ESP-IDF's heap) and all of
  * ESP-IDF's malloc() and heap_caps_malloc() use ESP-IDF's heap.
  */
-#define configTOTAL_HEAP_SIZE           (68u * 1024u)
+#define configTOTAL_HEAP_SIZE           (64u * 1024u)
 
 /*
  * vTaskDelete() and returning from a task: the layer's own thread

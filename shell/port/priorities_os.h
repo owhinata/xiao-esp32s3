@@ -30,25 +30,28 @@
  * the Pico SDK's small printf.  Here every command prints through newlib's
  * printf, which on an unbuffered stream formats into a BUFSIZ (1024-byte)
  * buffer on the stack, and the windowed ABI adds a register save area to
- * every call frame.  "ps" shows what is left.
+ * every call frame.  The deepest so far, over the commands on both
+ * consoles and a "zperf tcp upload", is 2.9 KiB.  "ps" shows what is left.
  */
-#define APP_STACK_SHELL         8192
+#define APP_STACK_SHELL         5120
 
 /*
  * The network event thread "net_mgmt" (shell/common/compat/
  * zephyr_net_mgmt.c, the shared default 2048 bytes, Zephyr's
  * CONFIG_NET_MGMT_EVENT_STACK_SIZE): its callbacks print the "wifi"
- * command's results with newlib's printf, as the shell's thread does.
+ * command's results with newlib's printf, as the shell's thread does
+ * (2.0 KiB at its deepest so far, a scan's results).
  */
-#define APP_STACK_NET_MGMT      6144
+#define APP_STACK_NET_MGMT      4096
 
 /*
  * The thread that raises the Wi-Fi events of the network layer, "wifi_evt"
  * (zephyr_net_wifi.c), at the priority of rp2040-connect's NINA Wi-Fi
  * thread (APP_PRIO_NINA_WIFI): it takes a scan's records from the driver
- * (its OS adapter's calls) and logs with newlib's printf.
+ * (its OS adapter's calls) and logs with newlib's printf (1.0 KiB at its
+ * deepest so far).
  */
-#define APP_STACK_WIFI_EVENTS   4096
+#define APP_STACK_WIFI_EVENTS   2560
 
 /*
  * The Wi-Fi profile's reconnection thread "wifi_reconnect_tid"
@@ -60,7 +63,7 @@
  * vsnprintf() (about 1.1 KiB), which 2048 bytes do not hold.  "ps" shows
  * what is left.
  */
-#define APP_STACK_WIFI_RECONNECT 4096
+#define APP_STACK_WIFI_RECONNECT 3072
 
 /*
  * The Telnet shell's service thread "telnet_service" (shell/common/compat/
@@ -78,9 +81,10 @@
  * same poll path as "telnet_service", and after it the server's JSON
  * (snprintf()) and the command's report of each test, which it prints to
  * the session that started the server with newlib's printf, as "net_mgmt"
- * prints the "wifi" command's results.  "ps" shows what is left.
+ * prints the "wifi" command's results (2.1 KiB at its deepest so far, a
+ * test and one the client gave up).  "ps" shows what is left.
  */
-#define APP_STACK_ZPERF_SERVER  6144
+#define APP_STACK_ZPERF_SERVER  4096
 
 /*
  * The OTA service's thread "ota_service" (shell/port/ota_service.c), at
@@ -101,10 +105,10 @@
  * The time synchronization's thread "time_sync_tid" (shell/common/imu/
  * time_sync.c, the shared default 2048 bytes): a UDP send and receive
  * through the socket layer to lwIP (each lwIP call waits for "tcpip") and
- * the 64-bit arithmetic of the estimate; it prints nothing.  "ps" shows
- * what is left.
+ * the 64-bit arithmetic of the estimate; it prints nothing (1.4 KiB at its
+ * deepest so far).  "ps" shows what is left.
  */
-#define APP_STACK_TIME_SYNC     4096
+#define APP_STACK_TIME_SYNC     3072
 
 /*
  * The USB host's FreeRTOS tasks (port/usb/host.c): "usb_host", which runs
@@ -113,11 +117,13 @@
  * is ThreadX priority 31 - p, the same as this layer's priority, so
  * APP_PRIO_FROM_ZEPHYR() gives the FreeRTOS priority as well: Zephyr's 8,
  * ThreadX 24, with the threads that take the Wi-Fi driver's events, below
- * "net_mgmt".  4096 bytes each, as in ESP-IDF's USB host examples; both
- * log with newlib's vsnprintf().  "ps" shows what is left.
+ * "net_mgmt".  ESP-IDF's USB host examples give each 4096 bytes;
+ * "usb_client" has used 1.9 KiB of them (a device's descriptors for "usb
+ * desc") and keeps them, "usb_host" 0.9 KiB.  Both log with newlib's
+ * vsnprintf().  "ps" shows what is left.
  */
 #define APP_PRIO_USB_HOST       APP_PRIO_FROM_ZEPHYR(8)
-#define APP_STACK_USB_HOST      4096
+#define APP_STACK_USB_HOST      2560
 #define APP_STACK_USB_CLIENT    4096
 
 /*

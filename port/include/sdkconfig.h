@@ -205,8 +205,10 @@
 #define CONFIG_ESP_INT_WDT_TIMEOUT_MS           300
 
 /*
- * esp_timer (ESP-IDF's defaults): on SYSTIMER, its interrupt at level 1 and
- * its task on core 0, 3584 bytes of task stack (esp_task.h adds 512).
+ * esp_timer (ESP-IDF's defaults but for the stack): on SYSTIMER, its
+ * interrupt at level 1 and its task on core 0.  2048 bytes of task stack
+ * (esp_task.h adds 512) instead of ESP-IDF's 3584: the callbacks here (the
+ * Wi-Fi driver's and lwIP's timers) have used 0.8 KiB at their deepest.
  * CONFIG_ESP_TIMER_IN_IRAM is off: it would also allocate the interrupt
  * with ESP_INTR_FLAG_IRAM, for running while the cache is off; here every
  * interrupt up to XCHAL_EXCM_LEVEL is masked then (port/board_flash.c), so
@@ -214,7 +216,7 @@
  * ESP_TIMER_IRAM_ATTR are in flash.
  */
 #define CONFIG_ESP_TIMER_IMPL_SYSTIMER          1
-#define CONFIG_ESP_TIMER_TASK_STACK_SIZE        3584
+#define CONFIG_ESP_TIMER_TASK_STACK_SIZE        2048
 #define CONFIG_ESP_TIMER_INTERRUPT_LEVEL        1
 #define CONFIG_ESP_TIMER_TASK_AFFINITY          0x0
 #define CONFIG_ESP_TIMER_TASK_AFFINITY_CPU0     1
