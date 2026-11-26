@@ -86,6 +86,9 @@ LOG_MODULE_REGISTER(usbaudio, LOG_LEVEL_INF);
 /* How long a caller waits for the task: a start sends two control transfers of up to 5 s each. */
 #define AUDIO_ANSWER_TIMEOUT_MS 15000u
 
+/* Microphone interfaces kept as candidates: as many as the host lists devices. */
+#define CANDIDATES_MAX          8
+
 /* Events of the task. */
 #define EV_CONNECTED            0x1u    /* the driver found a microphone interface */
 #define EV_DISCONNECTED         0x2u    /* the open interface's device went */
@@ -122,8 +125,7 @@ struct request_args {
     uint8_t percent;
     bool mute;
     uint8_t hum_hz;
-    struct usbaudio_info *info;
-    struct usbaudio_volume *volume;
+    void *result;               /* this file's storage for the result (request()) */
 };
 
 enum audio_state {
@@ -267,8 +269,17 @@ static struct {
     int result;
 
     /* Written by the drivers' callbacks (their tasks), read by "uac". */
-    volatile uint32_t pending;          /* a microphone interface to open: 0x10000 | address << 8
-                                           | interface, 0: none */
+    /*
+     * Microphone interfaces offered and not open, in the order they came
+     * (one per device address and interface), changed only in a critical
+     * section: a device that is not opened because another one is (or
+     * whose open failed) is still here when the open one goes.
+     */
+    uint8_t candidate_count;
+    struct {
+        uint8_t address;
+        uint8_t interface;
+    } candidates[CANDIDATES_MAX];
     volatile uint8_t open_address;      /* of the open microphone, 0: none */
     volatile uint32_t wakeups;
     volatile uint32_t transfer_errors;
@@ -297,8 +308,9 @@ static struct {
     struct usbaudio_stats stats;
     struct usbaudio_level level;
     int16_t *ring;
-    uint32_t written;                   /* samples written since the start */
-    uint32_t consumed;                  /* by the consumer */
+    uint32_t written;                   /* samples written since the host started */
+    uint32_t stream_first;              /* written at the start of the stream */
+    uint32_t stream;                    /* counts the streams started */
 } audio;
 
 /* Read buffer of the task, with room for a carried part of a frame in front. */
@@ -524,7 +536,6 @@ static void publish(void)
     }
     audio.work.streaming = audio.streaming;
     (void) tx_mutex_get(&audio.data_lock, TX_WAIT_FOREVER);
-    audio.work.ring_lost = audio.stats.ring_lost;   /* the consumer's count */
     audio.stats = audio.work;
     (void) tx_mutex_put(&audio.data_lock);
 }
@@ -617,22 +628,71 @@ static void device_event(uac_host_device_handle_t handle, const uac_host_device_
 /*
  * A microphone interface found in a device that enumerated, by either
  * driver (a UAC 2.0 device is reported by both: usb_host_uac reports every
- * streaming interface).  The first one that is not open yet is taken; it
- * is opened when no other is open.
+ * streaming interface): kept as a candidate unless its device is the open
+ * one.  The first candidate is opened when no microphone is open; the
+ * others wait (in the drivers' tasks: no blocking, the list in a critical
+ * section).
  */
 static void offer(uint8_t addr, uint8_t iface)
 {
-    bool take;
+    bool added = false;
+    bool full = false;
 
     portENTER_CRITICAL();
-    take = audio.pending == 0u && addr != audio.open_address;
-    if (take) {
-        audio.pending = 0x10000u | ((uint32_t) addr << 8) | iface;
+    if (addr != audio.open_address) {
+        bool known = false;
+
+        for (uint8_t i = 0; i < audio.candidate_count; i++) {
+            known = known || (audio.candidates[i].address == addr && audio.candidates[i].interface == iface);
+        }
+        full = !known && audio.candidate_count >= CANDIDATES_MAX;
+        if (!known && !full) {
+            audio.candidates[audio.candidate_count].address = addr;
+            audio.candidates[audio.candidate_count].interface = iface;
+            audio.candidate_count++;
+            added = true;
+        }
     }
     portEXIT_CRITICAL();
-    if (take) {
+    if (full) {
+        LOG_WRN("device %u interface %u: too many microphones waiting, not kept", addr, iface);
+    }
+    if (added) {
         (void) tx_event_flags_set(&audio.events, EV_CONNECTED, TX_OR);
     }
+}
+
+/* The oldest candidate, taken off the list; false: none. */
+static bool candidate_take(uint8_t *addr, uint8_t *iface)
+{
+    bool found;
+
+    portENTER_CRITICAL();
+    found = audio.candidate_count > 0u;
+    if (found) {
+        *addr = audio.candidates[0].address;
+        *iface = audio.candidates[0].interface;
+        audio.candidate_count--;
+        memmove(&audio.candidates[0], &audio.candidates[1],
+                audio.candidate_count * sizeof(audio.candidates[0]));
+    }
+    portEXIT_CRITICAL();
+    return found;
+}
+
+/* The candidates of a device that was opened or went (0: all). */
+static void candidates_forget(uint8_t addr)
+{
+    uint8_t kept = 0;
+
+    portENTER_CRITICAL();
+    for (uint8_t i = 0; i < audio.candidate_count; i++) {
+        if (addr != 0u && audio.candidates[i].address != addr) {
+            audio.candidates[kept++] = audio.candidates[i];
+        }
+    }
+    audio.candidate_count = kept;
+    portEXIT_CRITICAL();
 }
 
 static void driver_event(uint8_t addr, uint8_t iface_num, const uac_host_driver_event_t event, void *arg)
@@ -705,72 +765,176 @@ static bool offers(const struct usbaudio_info *info, const struct usbaudio_alt *
     return false;
 }
 
-/* The highest rate up to limit that alternate setting a or the clock offers, 0: none. */
-static uint32_t highest(const struct usbaudio_info *info, const struct usbaudio_alt *a, uint32_t limit)
+/*
+ * The alternate setting (index into info->alts) that usb_host_uac's start
+ * takes for channels channels of 16 bits at rate, by its own search
+ * (uac_host_device_start()): the last one with that channel count and bit
+ * resolution that lists the rate, unless one with a continuous range that
+ * holds it comes first.  It does not look at the subframe size.  -1: none.
+ */
+static int uac1_driver_alt(const struct usbaudio_info *info, uint8_t channels, uint32_t rate)
 {
-    uint32_t best = 0;
+    int pick = -1;
 
-    if (info->uac_version == 2u) {
-        for (uint8_t i = 0; i < info->clock_range_count; i++) {
-            const struct usbaudio_rate_range *r = &info->clock_ranges[i];
-            uint32_t top = r->max < limit ? r->max : limit;
-
-            if (top >= r->min) {
-                top = r->res == 0u ? top : r->min + (top - r->min) / r->res * r->res;
-                best = top > best ? top : best;
-            }
-        }
-        if (info->clock_range_count == 0u && info->clock_rate <= limit) {
-            best = info->clock_rate;
-        }
-        return best;
-    }
-    if (a->rate_count == 0u) {
-        return a->rate_min <= limit ? (a->rate_max < limit ? a->rate_max : limit) : 0u;
-    }
-    for (uint8_t i = 0; i < a->rate_count; i++) {
-        if (a->rates[i] <= limit && a->rates[i] > best) {
-            best = a->rates[i];
-        }
-    }
-    return best;
-}
-
-/* The defaults of "start" for the open microphone (usbaudio_info). */
-static void default_format(struct usbaudio_info *info)
-{
-    const struct usbaudio_alt *pick = NULL;
-
-    info->default_rate = 0;
-    info->default_channels = 0;
     for (uint8_t i = 0; i < info->alt_count; i++) {
         const struct usbaudio_alt *a = &info->alts[i];
 
-        if (a->bits != 16u || a->subframe != 2u || a->channels < 1u || a->channels > 2u) {
+        if (a->channels != channels || a->bits != 16u) {
             continue;
         }
-        if (pick == NULL || (a->channels == 1u && pick->channels != 1u)) {
-            pick = a;
+        if (a->rate_count == 0u) {
+            if (rate >= a->rate_min && rate <= a->rate_max) {
+                return i;
+            }
+        } else if (offers(info, a, rate)) {
+            pick = i;
         }
     }
-    if (pick == NULL) {
+    return pick;
+}
+
+/*
+ * Whether a stream of channels channels of 16 bits at rate gives what the
+ * pipeline takes, 16-bit samples in 2 bytes, on the alternate setting that
+ * will be selected.  UAC 1.0: the driver's choice above, from a complete
+ * list of alternate settings, none of the format listing more rates than
+ * the driver keeps (uac_host_device_start() would read past them).
+ * UAC 2.0: audio_uac2.c takes the first alternate setting with that
+ * channel count, 16 bits, a 2-byte subslot and a packet large enough for
+ * the rate (uac2_packet_need()), at a rate of the clock.
+ * why, when not NULL, says why not.
+ */
+static bool format_usable(const struct usbaudio_info *info, uint8_t channels, uint32_t rate, const char **why)
+{
+    const char *dummy;
+    int alt;
+
+    why = why != NULL ? why : &dummy;
+    if (info->uac_version == 2u) {
+        *why = "no alternate setting has that channel count with 16 bits in 2 bytes";
+        for (uint8_t i = 0; i < info->alt_count; i++) {
+            const struct usbaudio_alt *a = &info->alts[i];
+
+            if (a->channels == channels && a->bits == 16u && a->subframe == 2u) {
+                *why = "no alternate setting of that format has a packet large enough for the rate";
+                if (a->max_packet >= uac2_packet_need(rate, channels, a->subframe, a->sync)) {
+                    *why = "the clock does not offer the rate";
+                    return offers(info, a, rate);
+                }
+            }
+        }
+        return false;
+    }
+    if (!info->alts_complete) {
+        *why = "not every alternate setting could be read, so the driver's choice is not known";
+        return false;
+    }
+    for (uint8_t i = 0; i < info->alt_count; i++) {
+        const struct usbaudio_alt *a = &info->alts[i];
+
+        if (a->channels == channels && a->bits == 16u && a->rate_declared > UAC_FREQ_NUM_MAX) {
+            *why = "an alternate setting of that format lists more rates than usb_host_uac keeps";
+            return false;
+        }
+    }
+    alt = uac1_driver_alt(info, channels, rate);
+    if (alt < 0) {
+        *why = "no alternate setting has that channel count with 16 bits at that rate";
+        return false;
+    }
+    if (info->alts[alt].subframe != 2u) {
+        *why = "the alternate setting the driver takes has 16 bits in more than 2 bytes";
+        return false;
+    }
+    return true;
+}
+
+/* Candidate rates: every listed one of every alternate setting, or two per range, and one more. */
+#define RATES_MAX               (USBAUDIO_ALTS_MAX * USBAUDIO_RATES_MAX + 1)
+
+/* Adds rate to the descending, duplicate-free list r of *n (at most max). */
+static void rate_add(uint32_t *r, uint8_t *n, uint8_t max, uint32_t rate)
+{
+    uint8_t i = 0;
+
+    if (rate == 0u || rate > 48000u) {
         return;
     }
-    info->default_channels = pick->channels;
-    if (offers(info, pick, 48000u)) {
-        info->default_rate = 48000u;
-    } else if (offers(info, pick, 16000u)) {
-        info->default_rate = 16000u;
-    } else {
-        info->default_rate = highest(info, pick, 48000u);
+    while (i < *n && r[i] > rate) {
+        i++;
+    }
+    if ((i < *n && r[i] == rate) || *n >= max) {
+        return;
+    }
+    memmove(&r[i + 1], &r[i], (size_t) (*n - i) * sizeof(r[0]));
+    r[i] = rate;
+    (*n)++;
+}
+
+/*
+ * The defaults of "start" for the open microphone (usbaudio_info): one
+ * channel if a usable format has one, else two; 48000 Hz, else 16000,
+ * else the highest rate up to 48000 that gives a usable format, trying
+ * every offered rate (the top and bottom of a range) in descending order.
+ */
+static void default_format(struct usbaudio_info *info)
+{
+    info->default_rate = 0;
+    info->default_channels = 0;
+    for (uint8_t channels = 1; channels <= 2u; channels++) {
+        uint32_t rates[RATES_MAX];
+        uint8_t n = 0;
+
+        if (format_usable(info, channels, 48000u, NULL)) {
+            info->default_rate = 48000u;
+        } else if (format_usable(info, channels, 16000u, NULL)) {
+            info->default_rate = 16000u;
+        } else if (info->uac_version == 2u) {
+            for (uint8_t i = 0; i < info->clock_range_count; i++) {
+                const struct usbaudio_rate_range *rr = &info->clock_ranges[i];
+
+                uint32_t top = rr->max < 48000u ? rr->max : 48000u;
+
+                if (top >= rr->min && rr->res != 0u) {
+                    top = rr->min + (top - rr->min) / rr->res * rr->res;
+                }
+                rate_add(rates, &n, RATES_MAX, top >= rr->min ? top : 0u);
+                rate_add(rates, &n, RATES_MAX, rr->min);
+            }
+            rate_add(rates, &n, RATES_MAX, info->clock_rate);
+        } else {
+            for (uint8_t i = 0; i < info->alt_count; i++) {
+                const struct usbaudio_alt *a = &info->alts[i];
+
+                if (a->channels != channels || a->bits != 16u) {
+                    continue;
+                }
+                if (a->rate_count == 0u) {
+                    rate_add(rates, &n, RATES_MAX,
+                             a->rate_max < 48000u ? a->rate_max : (a->rate_min <= 48000u ? 48000u : 0u));
+                    rate_add(rates, &n, RATES_MAX, a->rate_min);
+                } else {
+                    for (uint8_t j = 0; j < a->rate_count; j++) {
+                        rate_add(rates, &n, RATES_MAX, a->rates[j]);
+                    }
+                }
+            }
+        }
+        for (uint8_t i = 0; info->default_rate == 0u && i < n; i++) {
+            if (format_usable(info, channels, rates[i], NULL)) {
+                info->default_rate = rates[i];
+            }
+        }
+        if (info->default_rate != 0u) {
+            info->default_channels = channels;
+            return;
+        }
     }
 }
 
-static void interface_open(void)
+/* One candidate: true when it is open now. */
+static bool open_one(uint8_t addr, uint8_t iface)
 {
-    uint32_t c = audio.pending;
-    uint8_t addr = (uint8_t) (c >> 8);
-    uint8_t iface = (uint8_t) c;
     const uac_host_device_config_t config = {
         .addr = addr,
         .iface_num = iface,
@@ -782,33 +946,31 @@ static void interface_open(void)
     uac_host_dev_info_t dev_info;
     struct usbaudio_info *info = &audio.info;
     esp_err_t err;
-
     int ret;
 
-    if (c == 0u || audio.version != 0u) {
-        return;                 /* none, or it waits until the open one goes */
-    }
-    audio.pending = 0;
     /* A UAC 2.0 device goes to audio_uac2.c; usb_host_uac would refuse it. */
-    ret = uac2_open(addr, info);
+    ret = uac2_open(addr, iface, info);
     if (ret == 0) {
         audio.version = 2;
         audio.open_address = addr;
         default_format(info);
         LOG_INF("microphone: device %u interface %u, %04x:%04x \"%s\", UAC 2.0", addr, info->interface,
                 info->vid, info->pid, info->product);
-        return;
+        return true;
+    }
+    if (ret == -EINVAL) {
+        return false;           /* logged: not safe for usb_host_uac */
     }
     if (ret != -ENOTSUP) {
         LOG_ERR("device %u: UAC 2.0 microphone not usable (%d)", addr, ret);
-        return;
+        return false;
     }
     err = uac_host_device_open(&config, &audio.dev);
     if (err != ESP_OK) {
         LOG_ERR("device %u interface %u: uac_host_device_open: error 0x%x", addr, iface,
                 (unsigned int) err);
         audio.dev = NULL;
-        return;
+        return false;
     }
     audio.version = 1;
     audio.open_address = addr;
@@ -822,11 +984,13 @@ static void interface_open(void)
         info->pid = dev_info.PID;
         ascii_of(dev_info.iManufacturer, info->manufacturer, sizeof(info->manufacturer));
         ascii_of(dev_info.iProduct, info->product, sizeof(info->product));
+        info->alts_complete = dev_info.iface_alt_num <= USBAUDIO_ALTS_MAX;
         for (uint8_t i = 1; i <= dev_info.iface_alt_num && info->alt_count < USBAUDIO_ALTS_MAX; i++) {
             uac_host_dev_alt_param_t p;
             struct usbaudio_alt *a = &info->alts[info->alt_count];
 
             if (uac_host_get_device_alt_param(audio.dev, i, &p) != ESP_OK) {
+                info->alts_complete = false;
                 continue;
             }
             a->channels = p.channels;
@@ -838,6 +1002,7 @@ static void interface_open(void)
             } else {
                 a->rate_count = p.sample_freq_type < USBAUDIO_RATES_MAX ? p.sample_freq_type
                                                                          : USBAUDIO_RATES_MAX;
+                a->rate_declared = p.sample_freq_type;
                 memcpy(a->rates, p.sample_freq, a->rate_count * sizeof(a->rates[0]));
             }
             info->alt_count++;
@@ -846,6 +1011,23 @@ static void interface_open(void)
     default_format(info);
     LOG_INF("microphone: device %u interface %u, %04x:%04x \"%s\", %u alternate settings", addr,
             iface, info->vid, info->pid, info->product, info->alt_count);
+    return true;
+}
+
+/*
+ * Opens a candidate when no microphone is open: the oldest one, and when
+ * its open fails the next, until one opens or none is left.
+ */
+static void interface_open(void)
+{
+    uint8_t addr;
+    uint8_t iface;
+
+    while (audio.version == 0u && candidate_take(&addr, &iface)) {
+        if (open_one(addr, iface)) {
+            candidates_forget(addr);        /* its other interfaces */
+        }
+    }
 }
 
 static void stream_end(void)
@@ -860,14 +1042,21 @@ static void stream_end(void)
 /*
  * Stops the stream if it runs (the UAC 1.0 driver has done that itself
  * when the device went) and closes the microphone.  0, or -EIO when the
- * UAC 1.0 driver kept it open.
+ * UAC 1.0 driver kept it open.  A UAC 2.0 microphone that cannot be
+ * closed yet stays open (audio_uac2.c says why), and its close is tried
+ * again when it goes and at usbaudio_stop().
  */
 static int mic_close(void)
 {
     esp_err_t err = ESP_OK;
 
     if (audio.version == 2u) {
-        uac2_close();
+        int ret = uac2_close();
+
+        if (ret != 0) {
+            LOG_WRN("UAC 2.0 microphone not closed yet (%d)", ret);
+            return ret;
+        }
     } else if (audio.version == 1u) {
         err = uac_host_device_close(audio.dev);
         if (err != ESP_OK) {
@@ -884,11 +1073,15 @@ static int mic_close(void)
 /* After DISCONNECTED: the driver has stopped a UAC 1.0 stream; the microphone is closed here. */
 static void interface_gone(void)
 {
+    uint8_t addr;
+
     if (audio.version == 0u) {
         return;
     }
     stream_end();
+    addr = audio.open_address;
     (void) mic_close();
+    candidates_forget(addr);
     LOG_INF("microphone disconnected");
 }
 
@@ -1013,7 +1206,7 @@ static int controls_ready(void)
 
 static int serve_volume_get(void)
 {
-    struct usbaudio_volume *v = audio.arg.volume;
+    struct usbaudio_volume *v = audio.arg.result;
     int ret = controls_ready();
 
     v->set = audio.want_percent_set;
@@ -1065,10 +1258,15 @@ static int mic_start(void)
         .sample_freq = audio.rate,
         .flags = 0,
     };
+    const char *why;
     esp_err_t err;
 
     if (audio.version == 2u) {
         return uac2_start(audio.rate, audio.channels, RX_BUFFER_BYTES, RX_THRESHOLD_BYTES);
+    }
+    if (!format_usable(&audio.info, audio.channels, audio.rate, &why)) {
+        LOG_ERR("%u Hz, %u channels, 16 bits: %s", (unsigned int) audio.rate, audio.channels, why);
+        return -ENOTSUP;
     }
     err = uac_host_device_start(audio.dev, &config);
     if (err != ESP_OK) {
@@ -1146,8 +1344,8 @@ static int serve_start(void)
     (void) tx_mutex_get(&audio.data_lock, TX_WAIT_FOREVER);
     memset(&audio.level, 0, sizeof(audio.level));
     audio.stats = audio.work;
-    audio.written = 0;
-    audio.consumed = 0;
+    audio.stream++;
+    audio.stream_first = audio.written;
     (void) tx_mutex_put(&audio.data_lock);
 
     ret = mic_start();
@@ -1181,10 +1379,11 @@ static int serve_stop(void)
 
 static int serve_info(void)
 {
-    struct usbaudio_info *info = audio.arg.info;
+    struct usbaudio_info *info = audio.arg.result;
 
     *info = audio.info;
     info->streaming = audio.streaming;
+    info->failed = audio.version == 2u && uac2_failed();
     if (audio.version != 0u && audio.streaming) {
         struct usbaudio_volume v = {0};
 
@@ -1206,15 +1405,22 @@ static int serve_quit(void)
     if (audio.version != 0u) {
         if (audio.streaming) {
             (void) serve_stop();
+            stream_end();
         }
-        if (mic_close() != 0) {
+        /* A UAC 2.0 one that does not close now is closed by uac2_uninstall(). */
+        if (mic_close() != 0 && audio.version == 1u) {
             return -EIO;
         }
     }
-    audio.pending = 0;
+    candidates_forget(0);
     ret = uac2_uninstall();
     if (ret != 0) {
         return ret == -ETIMEDOUT ? -EIO : ret;
+    }
+    if (audio.version == 2u) {
+        audio.version = 0;
+        audio.open_address = 0;
+        memset(&audio.info, 0, sizeof(audio.info));
     }
     err = uac_host_uninstall();
     if (err != ESP_OK) {
@@ -1222,6 +1428,20 @@ static int serve_quit(void)
         return -EIO;
     }
     return 0;
+}
+
+/*
+ * A UAC 2.0 microphone that did not answer a request takes none any more:
+ * its stream is stopped (the transfers taken back, the interface
+ * released), and "uac info" shows it failed until it is unplugged.
+ */
+static void failed_check(void)
+{
+    if (audio.version == 2u && uac2_failed() && audio.streaming) {
+        LOG_WRN("stream stopped: the microphone does not answer");
+        (void) mic_stop();
+        stream_end();
+    }
 }
 
 static void answer(int result)
@@ -1240,6 +1460,7 @@ static void audio_task(void *arg)
         .callback = driver_event,
         .callback_arg = NULL,
     };
+    enum audio_request req;
     esp_err_t err;
     int ret;
 
@@ -1277,7 +1498,10 @@ static void audio_task(void *arg)
         if ((events & EV_REQUEST) == 0u) {
             continue;
         }
-        switch (audio.request) {
+        /* Cleared before the answer: the caller may post its next request at once. */
+        req = audio.request;
+        audio.request = REQUEST_NONE;
+        switch (req) {
         case REQUEST_INFO:
             answer(serve_info());
             break;
@@ -1317,7 +1541,7 @@ static void audio_task(void *arg)
         default:
             break;
         }
-        audio.request = REQUEST_NONE;
+        failed_check();
     }
 }
 
@@ -1334,8 +1558,48 @@ static int wait_answer(void)
     return audio.result;
 }
 
-/* A request to the task, with its arguments; its answer. */
-static int request(enum audio_request what, const struct request_args *args)
+/*
+ * A request to the task: its arguments are copied into audio.arg, and a
+ * result of out_size bytes is written by the task into storage of this
+ * file, allocated for the request, never into the caller's out: the
+ * caller gets a copy once the answer has come (whatever it says).  When
+ * the answer does not come in time, the task may still write later, so
+ * that storage is left allocated (the input is BROKEN from then on and
+ * takes no more requests).  The answer, or -ENOMEM, -EALREADY, -EIO,
+ * -ETIMEDOUT.
+ */
+/* With request_lock held (see request()). */
+static int request_locked(enum audio_request what, const struct request_args *args, void *out,
+                          size_t out_size)
+{
+    void *result = NULL;
+    int ret;
+
+    if (out_size > 0u) {
+        result = calloc(1, out_size);
+        if (result == NULL) {
+            return -ENOMEM;
+        }
+    }
+    if (audio.state != AUDIO_RUNNING) {
+        ret = audio.state == AUDIO_BROKEN ? -EIO : -EALREADY;
+    } else {
+        audio.arg = *args;
+        audio.arg.result = result;
+        audio.request = what;
+        (void) tx_event_flags_set(&audio.events, EV_REQUEST, TX_OR);
+        ret = wait_answer();
+        if (ret == -ETIMEDOUT) {
+            result = NULL;              /* stays allocated: see above */
+        } else if (result != NULL) {
+            memcpy(out, result, out_size);
+        }
+    }
+    free(result);
+    return ret;
+}
+
+static int request(enum audio_request what, const struct request_args *args, void *out, size_t out_size)
 {
     int ret;
 
@@ -1343,23 +1607,46 @@ static int request(enum audio_request what, const struct request_args *args)
         return -EALREADY;
     }
     (void) tx_mutex_get(&audio.request_lock, TX_WAIT_FOREVER);
-    if (audio.state != AUDIO_RUNNING) {
-        ret = audio.state == AUDIO_BROKEN ? -EIO : -EALREADY;
-    } else {
-        audio.arg = *args;
-        audio.request = what;
-        (void) tx_event_flags_set(&audio.events, EV_REQUEST, TX_OR);
-        ret = wait_answer();
-    }
+    ret = request_locked(what, args, out, out_size);
     (void) tx_mutex_put(&audio.request_lock);
     return ret;
 }
 
+static int objects_create_once(void);
+
+/*
+ * Once, by the first caller (usbaudio_start() from "usb host start", or
+ * usbaudio_hum_set(), from either console): a second caller meanwhile
+ * waits until the first is done.
+ */
 static int objects_create(void)
 {
+    static volatile uint8_t creating;   /* 0: not yet, 1: being created, 2: done or failed */
+    bool mine;
+    int ret;
+
     if (audio.created) {
         return 0;
     }
+    portENTER_CRITICAL();
+    mine = creating == 0u;
+    if (mine) {
+        creating = 1;
+    }
+    portEXIT_CRITICAL();
+    if (!mine) {
+        while (creating == 1u) {
+            tx_thread_sleep(1);
+        }
+        return audio.created ? 0 : -ENOMEM;
+    }
+    ret = objects_create_once();
+    creating = ret == 0 ? 2u : 0u;
+    return ret;
+}
+
+static int objects_create_once(void)
+{
     audio.hum_hz = 50;
     if (tx_mutex_create(&audio.request_lock, "uac_req", TX_INHERIT) != TX_SUCCESS) {
         return -ENOMEM;
@@ -1411,8 +1698,8 @@ int usbaudio_start(void)
     }
     (void) tx_mutex_get(&audio.data_lock, TX_WAIT_FOREVER);
     audio.ring = ring;
-    audio.written = 0;
-    audio.consumed = 0;
+    audio.stream++;
+    audio.stream_first = audio.written;
     memset(&audio.stats, 0, sizeof(audio.stats));
     memset(&audio.level, 0, sizeof(audio.level));
     (void) tx_mutex_put(&audio.data_lock);
@@ -1420,7 +1707,7 @@ int usbaudio_start(void)
     audio.version = 0;
     audio.open_address = 0;
     audio.streaming = false;
-    audio.pending = 0;
+    audio.candidate_count = 0;
     audio.request = REQUEST_NONE;
     memset(&audio.info, 0, sizeof(audio.info));
     (void) tx_event_flags_get(&audio.events, EV_ALL, TX_OR_CLEAR, &stale, TX_NO_WAIT);
@@ -1446,15 +1733,25 @@ out:
     return ret;
 }
 
+/*
+ * The quit request and the change to STOPPED under one hold of
+ * request_lock: a request from another thread waits for the lock and then
+ * finds STOPPED (-EALREADY), never a RUNNING state whose task has gone.
+ */
 int usbaudio_stop(void)
 {
     int16_t *ring;
-    int ret = request(REQUEST_QUIT, &(const struct request_args) { 0 });
+    int ret;
 
-    if (ret != 0) {
-        return ret;
+    if (!audio.created) {
+        return -EALREADY;
     }
     (void) tx_mutex_get(&audio.request_lock, TX_WAIT_FOREVER);
+    ret = request_locked(REQUEST_QUIT, &(const struct request_args) { 0 }, NULL, 0);
+    if (ret != 0) {
+        (void) tx_mutex_put(&audio.request_lock);
+        return ret;
+    }
     audio.state = AUDIO_STOPPED;
     (void) tx_mutex_get(&audio.data_lock, TX_WAIT_FOREVER);
     ring = audio.ring;
@@ -1471,17 +1768,17 @@ int usbaudio_stop(void)
 int usbaudio_info(struct usbaudio_info *info)
 {
     memset(info, 0, sizeof(*info));
-    return request(REQUEST_INFO, &(const struct request_args) { .info = info });
+    return request(REQUEST_INFO, &(const struct request_args) { 0 }, info, sizeof(*info));
 }
 
 int usbaudio_stream_start(uint32_t rate, uint8_t channels)
 {
-    return request(REQUEST_START, &(const struct request_args) { .rate = rate, .channels = channels });
+    return request(REQUEST_START, &(const struct request_args) { .rate = rate, .channels = channels }, NULL, 0);
 }
 
 int usbaudio_stream_stop(void)
 {
-    int ret = request(REQUEST_STOP, &(const struct request_args) { 0 });
+    int ret = request(REQUEST_STOP, &(const struct request_args) { 0 }, NULL, 0);
 
     /* A consumer waiting for samples sees that the stream stopped. */
     if (audio.created) {
@@ -1492,24 +1789,22 @@ int usbaudio_stream_stop(void)
 
 int usbaudio_volume_get(struct usbaudio_volume *volume)
 {
-    const struct request_args args = { .volume = volume };
-
     memset(volume, 0, sizeof(*volume));
-    return request(REQUEST_VOLUME_GET, &args);
+    return request(REQUEST_VOLUME_GET, &(const struct request_args) { 0 }, volume, sizeof(*volume));
 }
 
 int usbaudio_volume_set(uint8_t percent)
 {
     const struct request_args args = { .percent = percent };
 
-    return request(REQUEST_VOLUME_SET, &args);
+    return request(REQUEST_VOLUME_SET, &args, NULL, 0);
 }
 
 int usbaudio_mute_set(bool mute)
 {
     const struct request_args args = { .mute = mute };
 
-    return request(REQUEST_MUTE_SET, &args);
+    return request(REQUEST_MUTE_SET, &args, NULL, 0);
 }
 
 int usbaudio_hum_set(unsigned int hz)
@@ -1524,7 +1819,7 @@ int usbaudio_hum_set(unsigned int hz)
     if (ret != 0) {
         return ret;
     }
-    ret = request(REQUEST_HUM_SET, &args);
+    ret = request(REQUEST_HUM_SET, &args, NULL, 0);
     if (ret == -EALREADY) {
         /* No task: taken at the next stream start. */
         (void) tx_mutex_get(&audio.request_lock, TX_WAIT_FOREVER);
@@ -1564,7 +1859,19 @@ int usbaudio_level(struct usbaudio_level *level)
     return 0;
 }
 
-int usbaudio_read_16k(int16_t *dst, size_t n, uint32_t timeout_ms)
+void usbaudio_reader_init(struct usbaudio_reader *reader)
+{
+    memset(reader, 0, sizeof(*reader));
+    if (!audio.created) {
+        return;
+    }
+    (void) tx_mutex_get(&audio.data_lock, TX_WAIT_FOREVER);
+    reader->position = audio.written;
+    reader->stream = audio.stream;
+    (void) tx_mutex_put(&audio.data_lock);
+}
+
+int usbaudio_read_16k(struct usbaudio_reader *reader, int16_t *dst, size_t n, uint32_t timeout_ms)
 {
     ULONG start = tx_time_get();
     ULONG timeout = ms_to_ticks(timeout_ms);
@@ -1587,19 +1894,27 @@ int usbaudio_read_16k(int16_t *dst, size_t n, uint32_t timeout_ms)
             (void) tx_mutex_put(&audio.data_lock);
             return -ENOTSUP;
         }
-        avail = audio.written - audio.consumed;
+        if (reader->stream != audio.stream) {
+            reader->stream = audio.stream;          /* a new stream: from its start */
+            reader->position = audio.stream_first;
+        }
+        avail = audio.written - reader->position;
         if (avail > USBAUDIO_RING_SAMPLES) {
-            audio.stats.ring_lost += avail - USBAUDIO_RING_SAMPLES;
-            audio.consumed = audio.written - USBAUDIO_RING_SAMPLES;
+            reader->lost += avail - USBAUDIO_RING_SAMPLES;
+            reader->position = audio.written - USBAUDIO_RING_SAMPLES;
             avail = USBAUDIO_RING_SAMPLES;
         }
         while (avail > 0u && copied < n) {
-            dst[copied++] = audio.ring[audio.consumed & RING_MASK];
-            audio.consumed++;
+            dst[copied++] = audio.ring[reader->position & RING_MASK];
+            reader->position++;
             avail--;
         }
         if (copied < n) {
-            /* Cleared under the lock: a sample written after this sets it again. */
+            /*
+             * Cleared under the lock, only by a reader that found nothing
+             * more: a sample written after this sets it again, and it
+             * wakes every reader waiting.
+             */
             (void) tx_event_flags_set(&audio.ring_events, ~RING_EV_DATA, TX_AND);
         }
         (void) tx_mutex_put(&audio.data_lock);

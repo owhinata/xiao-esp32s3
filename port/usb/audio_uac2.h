@@ -30,20 +30,39 @@ struct uac2_callbacks {
 /* Registers the client and starts its task.  0, -ENOMEM, -EIO. */
 int uac2_install(const struct uac2_callbacks *callbacks);
 
-/* Ends the task and deregisters the client; no device may be open.  0, -EIO, -ETIMEDOUT. */
+/*
+ * Closes the device (a failed one by powering the root port off, which
+ * makes the library end its last request), ends the task and deregisters
+ * the client.  0, -EIO, -ETIMEDOUT; on an error the client and its task
+ * stay, and a later call tries again.
+ */
 int uac2_uninstall(void);
 
 /*
  * Opens the device at address when it is a UAC 2.0 one with a capture
  * interface that this file can stream, reads its clock's rates and its
- * volume range, and fills info.  0, -ENOTSUP when it is not a UAC 2.0
- * device (closed again), -EIO (logged: what in the descriptors or the
- * requests failed), -ENOMEM.
+ * volume range, and fills info.  0; -ENOTSUP when it is not a UAC 2.0
+ * device, and its configuration is safe for usb_host_uac to open
+ * streaming interface interface; -EINVAL when it is not (logged); -EIO
+ * (logged: what in the descriptors or the requests failed); -ENOMEM.  The
+ * device is closed again on every error.
  */
-int uac2_open(uint8_t address, struct usbaudio_info *info);
+int uac2_open(uint8_t address, uint8_t interface, struct usbaudio_info *info);
 
-/* Stops the stream if it runs and closes the device. */
-void uac2_close(void);
+/*
+ * Stops the stream if it runs and closes the device.  0, -EBUSY or -EIO
+ * when something could not be released yet (the device stays open; a
+ * later call, when the device has gone or from uac2_uninstall(), goes on
+ * from there).
+ */
+int uac2_close(void);
+
+/*
+ * The open device did not answer a control request in time: no request is
+ * sent to it any more (every call that would send one returns -EIO at
+ * once) until it is closed.
+ */
+bool uac2_failed(void);
 
 /*
  * Sets the clock to rate, selects the alternate setting with channels
@@ -52,6 +71,14 @@ void uac2_close(void);
  * 0, -ENOTSUP (no such alternate setting or rate), -ENOMEM, -EIO.
  */
 int uac2_start(uint32_t rate, uint8_t channels, uint32_t buffer_bytes, uint32_t threshold);
+
+/*
+ * The packet a 1 ms frame of the stream needs: exact for a synchronous or
+ * adaptive endpoint at a rate of whole frames per millisecond, one frame
+ * more otherwise.  uac2_start() takes the first alternate setting of the
+ * format whose wMaxPacketSize holds it.
+ */
+uint32_t uac2_packet_need(uint32_t rate, uint8_t channels, uint8_t subslot, uint8_t sync);
 
 /* Stops the transfers, selects alternate setting 0, frees the ring buffer.  0, -EIO. */
 int uac2_stop(void);

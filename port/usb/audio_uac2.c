@@ -80,7 +80,8 @@ LOG_MODULE_REGISTER(uac2, LOG_LEVEL_INF);
 
 #define ENTITIES_MAX            24
 #define CTRL_DATA_MAX           256u
-#define CTRL_TIMEOUT_MS         1000u
+#define CTRL_TIMEOUT_MS         1000u   /* the library has no timeout of its own */
+#define GONE_WAIT_MS            2000u
 #define FREQ_RANGES_READ        8u      /* subranges asked for */
 #define STOP_WAIT_MS            200u
 
@@ -90,7 +91,21 @@ struct uac2_alt {
     uint8_t subslot;
     uint8_t bits;
     uint8_t ep;
+    uint8_t sync;               /* the endpoint's synchronization type, USBAUDIO_SYNC_* */
     uint16_t mps;
+};
+
+/* What the descriptors say about the capture interface. */
+struct uac2_desc {
+    uint8_t ac_iface;
+    uint8_t as_iface;
+    uint8_t clock_id;
+    bool clock_settable;
+    uint8_t fu_id;
+    uint16_t vol_map;           /* channels (0: master) with a programmable control */
+    uint16_t mute_map;
+    uint8_t alt_count;
+    struct uac2_alt alts[USBAUDIO_ALTS_MAX];
 };
 
 static struct {
@@ -105,23 +120,18 @@ static struct {
     TX_MUTEX open_lock;         /* the client's opens: the task's look and uac2_open() */
     SemaphoreHandle_t ctrl_done;
     usb_transfer_t *ctrl;
+    volatile bool ctrl_busy;    /* the control transfer is in flight */
 
     /* The open device ("uac", but gone, which the client task sets). */
     usb_device_handle_t dev;
     volatile bool gone;
-    uint8_t ac_iface;
-    uint8_t as_iface;
-    uint8_t clock_id;
-    bool clock_settable;
-    uint8_t fu_id;
-    uint16_t vol_map;           /* channels (0: master) with a programmable control */
-    uint16_t mute_map;
+    bool failed;                /* a request got no answer: nothing more is sent to it */
+    bool claimed;               /* the capture interface is claimed */
+    struct uac2_desc d;
     bool vol_range_valid;
     int16_t vol_min;
     int16_t vol_max;
     int16_t vol_res;
-    uint8_t alt_count;
-    struct uac2_alt alts[USBAUDIO_ALTS_MAX];
     uint8_t range_count;
     struct usbaudio_rate_range ranges[USBAUDIO_RATES_MAX];
 
@@ -131,7 +141,7 @@ static struct {
     RingbufHandle_t ring;
     uint32_t threshold;
     volatile bool running;
-    volatile int inflight;
+    volatile int inflight;      /* changed only in inflight_add(): "uac" and the callback both do */
     volatile uint32_t overruns;
     volatile uint32_t packet_errors;
     volatile uint32_t transfer_errors;
@@ -151,8 +161,32 @@ static uint32_t le32(const uint8_t *p)
 /* ---- Descriptors ---------------------------------------------------------- */
 
 /*
- * Whether a configuration has a UAC 2.0 AudioControl interface; the first
- * AudioStreaming interface of it with an isochronous IN endpoint in *as.
+ * Every walk below stops at a descriptor whose bLength is below 2 or runs
+ * past wTotalLength (which the library checked against the bytes the
+ * device sent), and reads a field only when bLength covers it.
+ */
+#define FOR_EACH_DESC(p, total, off) \
+    for (size_t off = 0; off + 2u <= (total) && (p)[off] >= 2u && off + (p)[off] <= (total); off += (p)[off])
+
+/* A data endpoint (not explicit or implicit feedback) for isochronous IN. */
+static bool is_data_in_iso(const uint8_t *d)
+{
+    const usb_ep_desc_t *e = (const usb_ep_desc_t *) d;
+
+    return d[0] >= USB_EP_DESC_SIZE && USB_EP_DESC_GET_EP_DIR(e)
+           && USB_EP_DESC_GET_XFERTYPE(e) == USB_TRANSFER_TYPE_ISOCHRONOUS && USB_EP_DESC_GET_USAGETYPE(e) == 0u;
+}
+
+static bool is_audio_if(const uint8_t *d, uint8_t subclass)
+{
+    return d[1] == USB_B_DESCRIPTOR_TYPE_INTERFACE && d[0] >= USB_INTF_DESC_SIZE && d[5] == USB_CLASS_AUDIO
+           && d[6] == subclass && d[7] == UAC2_PROTOCOL;
+}
+
+/*
+ * Whether a configuration has a UAC 2.0 AudioControl interface and an
+ * AudioStreaming one with an isochronous IN data endpoint; that
+ * interface's number in *as (the first one; uac2_open() looks at all).
  */
 static bool is_uac2_capture(const usb_config_desc_t *cd, uint8_t *as)
 {
@@ -160,32 +194,22 @@ static bool is_uac2_capture(const usb_config_desc_t *cd, uint8_t *as)
     size_t total = cd->wTotalLength;
     bool uac2 = false;
     bool streaming = false;
+    bool found = false;
     uint8_t iface = 0;
 
-    for (size_t off = 0; off + 2u <= total && p[off] >= 2u && off + p[off] <= total; off += p[off]) {
+    FOR_EACH_DESC(p, total, off) {
         const uint8_t *d = &p[off];
 
         if (d[1] == USB_B_DESCRIPTOR_TYPE_INTERFACE && d[0] >= USB_INTF_DESC_SIZE) {
-            const usb_intf_desc_t *i = (const usb_intf_desc_t *) d;
-
-            streaming = i->bInterfaceClass == USB_CLASS_AUDIO
-                        && i->bInterfaceSubClass == AUDIO_SUBCLASS_STREAMING
-                        && i->bInterfaceProtocol == UAC2_PROTOCOL;
-            iface = i->bInterfaceNumber;
-            if (i->bInterfaceClass == USB_CLASS_AUDIO && i->bInterfaceSubClass == AUDIO_SUBCLASS_CONTROL
-                && i->bInterfaceProtocol == UAC2_PROTOCOL) {
-                uac2 = true;
-            }
-        } else if (d[1] == USB_B_DESCRIPTOR_TYPE_ENDPOINT && d[0] >= USB_EP_DESC_SIZE && streaming && uac2) {
-            const usb_ep_desc_t *e = (const usb_ep_desc_t *) d;
-
-            if (USB_EP_DESC_GET_EP_DIR(e) && USB_EP_DESC_GET_XFERTYPE(e) == USB_TRANSFER_TYPE_ISOCHRONOUS) {
-                *as = iface;
-                return true;
-            }
+            streaming = is_audio_if(d, AUDIO_SUBCLASS_STREAMING);
+            iface = d[2];
+            uac2 = uac2 || is_audio_if(d, AUDIO_SUBCLASS_CONTROL);
+        } else if (d[1] == USB_B_DESCRIPTOR_TYPE_ENDPOINT && streaming && !found && is_data_in_iso(d)) {
+            *as = iface;
+            found = true;
         }
     }
-    return false;
+    return uac2 && found;
 }
 
 /* The AudioControl interface's entities, by ID. */
@@ -205,10 +229,13 @@ static const uint8_t *entity(const struct entities *en, uint8_t id)
 }
 
 /*
- * The capture interface's alternates, the AudioControl entities and from
- * them the clock and the feature unit.  0 or -EIO (logged).
+ * One AudioStreaming interface as a capture interface: its alternates with
+ * PCM and an isochronous IN data endpoint, its terminal link to an output
+ * terminal of type USB streaming (0x0101: toward the host), that
+ * terminal's clock and the first feature unit on its source chain.  0, or
+ * -EIO (logged: why this interface does not qualify).
  */
-static int parse(const usb_config_desc_t *cd, uint8_t as_iface)
+static int parse(const usb_config_desc_t *cd, uint8_t as_iface, struct uac2_desc *out)
 {
     const uint8_t *p = (const uint8_t *) cd;
     size_t total = cd->wTotalLength;
@@ -219,99 +246,274 @@ static int parse(const usb_config_desc_t *cd, uint8_t as_iface)
     uint8_t link = 0;
     const uint8_t *e;
 
-    u2.alt_count = 0;
-    for (size_t off = 0; off + 2u <= total && p[off] >= 2u && off + p[off] <= total; off += p[off]) {
+    memset(out, 0, sizeof(*out));
+    out->as_iface = as_iface;
+    FOR_EACH_DESC(p, total, off) {
         const uint8_t *d = &p[off];
 
         if (d[1] == USB_B_DESCRIPTOR_TYPE_INTERFACE && d[0] >= USB_INTF_DESC_SIZE) {
-            const usb_intf_desc_t *i = (const usb_intf_desc_t *) d;
-
-            in_ac = i->bInterfaceClass == USB_CLASS_AUDIO && i->bInterfaceSubClass == AUDIO_SUBCLASS_CONTROL
-                    && i->bInterfaceProtocol == UAC2_PROTOCOL;
+            in_ac = is_audio_if(d, AUDIO_SUBCLASS_CONTROL) && en.count == 0u;
             if (in_ac) {
-                u2.ac_iface = i->bInterfaceNumber;
+                out->ac_iface = d[2];
             }
-            in_as = i->bInterfaceNumber == as_iface && i->bAlternateSetting != 0u;
+            in_as = d[2] == as_iface && d[3] != 0u && is_audio_if(d, AUDIO_SUBCLASS_STREAMING);
             memset(&alt, 0, sizeof(alt));
-            alt.alt = i->bAlternateSetting;
+            alt.alt = d[3];
         } else if (d[1] == CS_INTERFACE && d[0] >= 4u && in_ac) {
             if (d[2] != 0x01u && en.count < ENTITIES_MAX) {      /* not the header */
                 en.desc[en.count++] = d;
             }
-        } else if (d[1] == CS_INTERFACE && in_as) {
+        } else if (d[1] == CS_INTERFACE && d[0] >= 3u && in_as) {
             if (d[2] == AS_GENERAL && d[0] >= 16u) {
-                if ((d[6] & 0x01u) == 0u || d[5] != FORMAT_TYPE_I) {
-                    in_as = false;                              /* not PCM: skipped */
+                if ((d[6] & 0x01u) == 0u || d[5] != FORMAT_TYPE_I || (link != 0u && d[3] != link)) {
+                    in_as = false;                              /* not PCM, or another terminal: skipped */
                     continue;
                 }
-                link = link != 0u ? link : d[3];
+                link = d[3];
                 alt.channels = d[10];
             } else if (d[2] == AS_FORMAT_TYPE && d[0] >= 6u && d[3] == FORMAT_TYPE_I) {
                 alt.subslot = d[4];
                 alt.bits = d[5];
             }
-        } else if (d[1] == USB_B_DESCRIPTOR_TYPE_ENDPOINT && d[0] >= USB_EP_DESC_SIZE && in_as) {
+        } else if (d[1] == USB_B_DESCRIPTOR_TYPE_ENDPOINT && in_as && is_data_in_iso(d)) {
             const usb_ep_desc_t *ep = (const usb_ep_desc_t *) d;
 
-            if (USB_EP_DESC_GET_EP_DIR(ep) && USB_EP_DESC_GET_XFERTYPE(ep) == USB_TRANSFER_TYPE_ISOCHRONOUS
-                && alt.channels != 0u && alt.subslot != 0u && u2.alt_count < USBAUDIO_ALTS_MAX) {
+            if (alt.channels != 0u && alt.subslot != 0u && out->alt_count < USBAUDIO_ALTS_MAX) {
                 alt.ep = ep->bEndpointAddress;
                 alt.mps = (uint16_t) USB_EP_DESC_GET_MPS(ep);
-                u2.alts[u2.alt_count++] = alt;
+                alt.sync = (uint8_t) USB_EP_DESC_GET_SYNCTYPE(ep);
+                out->alts[out->alt_count++] = alt;
             }
             in_as = false;
         }
     }
-    if (u2.alt_count == 0u || link == 0u) {
-        LOG_ERR("interface %u: no PCM alternate setting with an isochronous IN endpoint", as_iface);
+    if (out->alt_count == 0u || link == 0u) {
+        LOG_ERR("interface %u: no PCM alternate setting with an isochronous IN data endpoint", as_iface);
         return -EIO;
     }
 
-    /* The output terminal the stream is linked to, its clock, its source chain. */
     e = entity(&en, link);
-    if (e == NULL || e[2] != AC_OUTPUT_TERMINAL || e[0] < 12u) {
-        LOG_ERR("terminal link %u: not an output terminal", link);
+    if (e == NULL || e[2] != AC_OUTPUT_TERMINAL || e[0] < 12u || le16(&e[4]) != 0x0101u) {
+        LOG_ERR("interface %u: terminal link %u is not a USB streaming output terminal", as_iface, link);
         return -EIO;
     }
-    u2.clock_id = e[8];
+    out->clock_id = e[8];
     for (uint8_t id = e[7], hops = 0; id != 0u && hops < 8u; hops++) {
         const uint8_t *s = entity(&en, id);
 
         if (s == NULL || s[2] != AC_FEATURE_UNIT || s[0] < 10u) {
             break;                                              /* the input terminal, or a unit with more sources */
         }
-        if (u2.fu_id == 0u) {
+        if (out->fu_id == 0u) {
             size_t channels = ((size_t) s[0] - 6u) / 4u;        /* master and the logical channels */
 
-            u2.fu_id = s[3];
+            out->fu_id = s[3];
             for (size_t ch = 0; ch < channels && ch < 16u; ch++) {
                 uint32_t controls = le32(&s[5 + 4 * ch]);
 
                 if ((controls & 0x3u) == 0x3u) {
-                    u2.mute_map |= (uint16_t) (1u << ch);
+                    out->mute_map |= (uint16_t) (1u << ch);
                 }
                 if (((controls >> 2) & 0x3u) == 0x3u) {
-                    u2.vol_map |= (uint16_t) (1u << ch);
+                    out->vol_map |= (uint16_t) (1u << ch);
                 }
             }
         }
         id = s[4];
     }
     for (uint8_t hops = 0; hops < 4u; hops++) {
-        e = entity(&en, u2.clock_id);
+        e = entity(&en, out->clock_id);
         if (e != NULL && e[2] == AC_CLOCK_SOURCE && e[0] >= 8u) {
-            u2.clock_settable = (e[5] & 0x3u) == 0x3u;
+            out->clock_settable = (e[5] & 0x3u) == 0x3u;
             return 0;
         }
         if (e != NULL && e[2] == AC_CLOCK_SELECTOR && e[0] >= 7u && e[4] == 1u) {
-            u2.clock_id = e[5];                                 /* one input: nothing to select */
+            out->clock_id = e[5];                               /* one input: nothing to select */
             continue;
         }
         break;
     }
-    LOG_ERR("clock %u: not a clock source (a clock multiplier, or a selector of several, is not supported)",
-            u2.clock_id);
+    LOG_ERR("interface %u: clock %u is not a clock source (a clock multiplier, or a selector of several, "
+            "is not supported)", as_iface, out->clock_id);
     return -EIO;
+}
+
+/*
+ * The capture interface: every UAC 2.0 AudioStreaming interface with an
+ * isochronous IN data endpoint, in the configuration's order, until one
+ * parses (a playback interface's feedback endpoint is not data, so it is
+ * not tried).  0, or -EIO.
+ */
+static int find_capture(const usb_config_desc_t *cd, struct uac2_desc *out)
+{
+    const uint8_t *p = (const uint8_t *) cd;
+    size_t total = cd->wTotalLength;
+    uint32_t tried[8] = {0};    /* interface numbers, a bit each */
+    bool streaming = false;
+    uint8_t iface = 0;
+
+    FOR_EACH_DESC(p, total, off) {
+        const uint8_t *d = &p[off];
+
+        if (d[1] == USB_B_DESCRIPTOR_TYPE_INTERFACE && d[0] >= USB_INTF_DESC_SIZE) {
+            streaming = is_audio_if(d, AUDIO_SUBCLASS_STREAMING);
+            iface = d[2];
+        } else if (d[1] == USB_B_DESCRIPTOR_TYPE_ENDPOINT && streaming && is_data_in_iso(d)
+                   && (tried[iface >> 5] & (1u << (iface & 31u))) == 0u) {
+            tried[iface >> 5] |= 1u << (iface & 31u);
+            if (parse(cd, iface, out) == 0) {
+                return 0;
+            }
+        }
+    }
+    return -EIO;
+}
+
+/*
+ * A UAC 1.0 device's configuration, checked for what esp-usb's
+ * usb_host_uac reads when uac_host_device_open() opens streaming
+ * interface iface (_uac_host_device_add(), uac_host_interface_add() and the
+ * feature unit search): it walks with the library's helpers, which keep
+ * the next descriptor's first 2 bytes inside wTotalLength but read its
+ * other fields without looking at its bLength, and it reads class-specific
+ * fields without length checks.  So the device is refused unless:
+ *   - every descriptor has a bLength of 2 or more and ends within
+ *     wTotalLength, interface descriptors 9 bytes or more (at most
+ *     USB_MAX_ENDPOINTS_PER_INTERFACE endpoints), endpoints 7 or more;
+ *   - the first AudioControl interface's header (8 bytes or more) has a
+ *     wTotalLength within the configuration, a descriptor follows that
+ *     interface's class-specific descriptors (the driver reads the next
+ *     one's type), and inside the header's span every descriptor ends
+ *     within the span and holds what is read for its subtype: an output
+ *     terminal 8 bytes, a feature unit 7, a mixer or selector unit 5 plus
+ *     its input pins;
+ *   - interface iface has an alternate setting 0, and from it on every
+ *     class-specific interface descriptor holds what the driver reads: a
+ *     general one 7 bytes, a format type one 4, and for type I 8 plus its
+ *     sampling frequencies (6 bytes for a range, 3 for each of up to
+ *     UAC_FREQ_NUM_MAX discrete ones), every class-specific endpoint
+ *     descriptor 4.
+ * 0, or -EINVAL with *why set.
+ */
+#define UAC1_FREQ_KEPT          CONFIG_UAC_FREQ_NUM_MAX /* usb_host_uac keeps this many */
+
+static int uac1_config_check(const usb_config_desc_t *cd, uint8_t iface, const char **why)
+{
+    const uint8_t *p = (const uint8_t *) cd;
+    size_t total = cd->wTotalLength;
+    size_t end = 0;
+    size_t span_end = 0;            /* of the AudioControl header's wTotalLength */
+    bool in_ac = false;             /* among the first AudioControl interface's descriptors */
+    bool ac_seen = false;
+    bool ac_needs_next = false;     /* its class-specific block ended the configuration so far */
+    bool from_iface = false;        /* at or after interface iface alternate 0 */
+
+    FOR_EACH_DESC(p, total, off) {
+        const uint8_t *d = &p[off];
+        uint8_t len = d[0];
+
+        end = off + len;
+        ac_needs_next = false;
+        if (d[1] == USB_B_DESCRIPTOR_TYPE_INTERFACE) {
+            if (len < USB_INTF_DESC_SIZE || d[4] > USB_MAX_ENDPOINTS_PER_INTERFACE) {
+                *why = "a short interface descriptor";
+                return -EINVAL;
+            }
+            in_ac = !ac_seen && d[5] == USB_CLASS_AUDIO && d[6] == AUDIO_SUBCLASS_CONTROL;
+            ac_seen = ac_seen || in_ac;
+            if (d[2] == iface && d[3] == 0u) {
+                from_iface = true;
+            }
+            continue;
+        }
+        if (d[1] == USB_B_DESCRIPTOR_TYPE_ENDPOINT) {
+            if (len < USB_EP_DESC_SIZE) {
+                *why = "a short endpoint descriptor";
+                return -EINVAL;
+            }
+            in_ac = false;
+            continue;
+        }
+        if (d[1] == CS_INTERFACE && in_ac) {
+            ac_needs_next = true;
+            if (len < 3u) {
+                *why = "a short AudioControl descriptor";
+                return -EINVAL;
+            }
+            if (d[2] == 0x01u && span_end == 0u) {
+                size_t span;
+
+                if (len < 8u || (span = le16(&d[5])) < len || off + span > total) {
+                    *why = "an AudioControl header that is short or runs past the configuration";
+                    return -EINVAL;
+                }
+                span_end = off + span;
+            }
+        } else if (d[1] != CS_INTERFACE) {
+            in_ac = false;
+        }
+        if (off < span_end) {
+            size_t need = 3;
+
+            if (end > span_end) {
+                *why = "an AudioControl descriptor that runs past the header's wTotalLength";
+                return -EINVAL;
+            }
+            switch (d[2]) {
+            case 0x03:                  /* output terminal: bSourceID */
+                need = 8;
+                break;
+            case 0x06:                  /* feature unit */
+                need = 7;
+                break;
+            case 0x04:                  /* mixer unit */
+            case 0x05:                  /* selector unit */
+                need = len >= 5u ? 5u + d[4] : 5u;
+                break;
+            default:
+                break;
+            }
+            if (len < need) {
+                *why = "a short AudioControl unit or terminal";
+                return -EINVAL;
+            }
+            continue;
+        }
+        if (from_iface && d[1] == CS_INTERFACE) {
+            size_t need = 3;
+
+            if (len >= 3u && d[2] == 0x01u) {               /* AS general */
+                need = 7;
+            } else if (len >= 3u && d[2] == 0x02u) {        /* format type */
+                need = 4;
+                if (len >= 4u && d[3] == 0x01u) {
+                    uint8_t n = len >= 8u ? d[7] : 0u;
+
+                    need = 8u + (n == 0u ? 6u : 3u * (n < UAC1_FREQ_KEPT ? n : UAC1_FREQ_KEPT));
+                }
+            }
+            if (len < need) {
+                *why = "a short AudioStreaming descriptor (general or format type)";
+                return -EINVAL;
+            }
+        } else if (from_iface && d[1] == 0x25u && len < 4u) {
+            *why = "a short class-specific endpoint descriptor";
+            return -EINVAL;
+        }
+    }
+    if (end != total) {
+        *why = "a descriptor shorter than 2 bytes, or one that runs past wTotalLength";
+        return -EINVAL;
+    }
+    if (ac_needs_next) {
+        *why = "the AudioControl descriptors end the configuration";
+        return -EINVAL;
+    }
+    if (!from_iface) {
+        *why = "no alternate setting 0 of the streaming interface";
+        return -EINVAL;
+    }
+    return 0;
 }
 
 /* ---- Control requests ------------------------------------------------------ */
@@ -319,12 +521,23 @@ static int parse(const usb_config_desc_t *cd, uint8_t as_iface)
 static void ctrl_done(usb_transfer_t *transfer)
 {
     (void) transfer;
+    u2.ctrl_busy = false;
     (void) xSemaphoreGive(u2.ctrl_done);
 }
 
 /*
  * One control transfer to the open device, len bytes of data (IN or OUT
  * by type); *actual the bytes received.  0, or -EIO (logged).
+ *
+ * The library has no timeout for a control transfer and no way to take
+ * one back from endpoint 0: one that the device never answers (it NAKs)
+ * stays in flight until the device goes (unplugged, or the root port
+ * powered off: the library then flushes endpoint 0 and completes it).  So
+ * after CTRL_TIMEOUT_MS the device is marked failed: no request is sent
+ * to it any more, the transfer and its semaphore stay as they are, and the
+ * device is not closed while the transfer is in flight (the library
+ * asserts on that).  Every call therefore waits at most CTRL_TIMEOUT_MS,
+ * and after a timeout returns at once.
  */
 static int control(uint8_t type, uint8_t request, uint16_t value, uint16_t index, uint8_t *data,
                    uint16_t len, size_t *actual)
@@ -336,6 +549,9 @@ static int control(uint8_t type, uint8_t request, uint16_t value, uint16_t index
 
     if (len > CTRL_DATA_MAX) {
         return -EINVAL;
+    }
+    if (u2.failed || u2.ctrl_busy || u2.gone) {
+        return -EIO;
     }
     setup->bmRequestType = type;
     setup->bRequest = request;
@@ -352,18 +568,18 @@ static int control(uint8_t type, uint8_t request, uint16_t value, uint16_t index
     x->timeout_ms = CTRL_TIMEOUT_MS;
     x->num_bytes = (int) (sizeof(usb_setup_packet_t) + len);
     (void) xSemaphoreTake(u2.ctrl_done, 0);
+    u2.ctrl_busy = true;
     err = usb_host_transfer_submit_control(u2.client, x);
     if (err != ESP_OK) {
+        u2.ctrl_busy = false;
         LOG_ERR("request %02x %02x %04x %04x: submit error 0x%x", type, request, value, index,
                 (unsigned int) err);
         return -EIO;
     }
-    if (xSemaphoreTake(u2.ctrl_done, pdMS_TO_TICKS(CTRL_TIMEOUT_MS + 500u)) != pdTRUE) {
-        LOG_ERR("request %02x %02x %04x %04x: no answer", type, request, value, index);
-        (void) usb_host_endpoint_halt(u2.dev, 0);
-        (void) usb_host_endpoint_flush(u2.dev, 0);
-        (void) usb_host_endpoint_clear(u2.dev, 0);
-        (void) xSemaphoreTake(u2.ctrl_done, pdMS_TO_TICKS(CTRL_TIMEOUT_MS));
+    if (xSemaphoreTake(u2.ctrl_done, pdMS_TO_TICKS(CTRL_TIMEOUT_MS)) != pdTRUE) {
+        u2.failed = true;
+        LOG_ERR("request %02x %02x %04x %04x: no answer in %u ms; the device is not used any more "
+                "(unplug it)", type, request, value, index, (unsigned int) CTRL_TIMEOUT_MS);
         return -EIO;
     }
     if (x->status != USB_TRANSFER_STATUS_COMPLETED) {
@@ -387,14 +603,14 @@ static int control(uint8_t type, uint8_t request, uint16_t value, uint16_t index
 
 static uint16_t ac_index(uint8_t entity_id)
 {
-    return (uint16_t) ((entity_id << 8) | u2.ac_iface);
+    return (uint16_t) ((entity_id << 8) | u2.d.ac_iface);
 }
 
 static int freq_get(uint32_t *rate)
 {
     uint8_t b[4];
     size_t n = 0;
-    int ret = control(REQ_CLASS_IF_IN, REQUEST_CUR, CS_SAM_FREQ_CONTROL << 8, ac_index(u2.clock_id), b,
+    int ret = control(REQ_CLASS_IF_IN, REQUEST_CUR, CS_SAM_FREQ_CONTROL << 8, ac_index(u2.d.clock_id), b,
                       sizeof(b), &n);
 
     if (ret == 0 && n != sizeof(b)) {
@@ -414,7 +630,7 @@ static void freq_ranges_read(void)
     uint16_t count;
 
     u2.range_count = 0;
-    if (control(REQ_CLASS_IF_IN, REQUEST_RANGE, CS_SAM_FREQ_CONTROL << 8, ac_index(u2.clock_id), b, 2, &n)
+    if (control(REQ_CLASS_IF_IN, REQUEST_RANGE, CS_SAM_FREQ_CONTROL << 8, ac_index(u2.d.clock_id), b, 2, &n)
             != 0 || n != 2u) {
         return;
     }
@@ -423,7 +639,7 @@ static void freq_ranges_read(void)
         count = FREQ_RANGES_READ;
     }
     if (count == 0u || control(REQ_CLASS_IF_IN, REQUEST_RANGE, CS_SAM_FREQ_CONTROL << 8,
-                               ac_index(u2.clock_id), b, (uint16_t) (2u + 12u * count), &n) != 0) {
+                               ac_index(u2.d.clock_id), b, (uint16_t) (2u + 12u * count), &n) != 0) {
         return;
     }
     for (uint16_t i = 0; i < count && 2u + 12u * (i + 1u) <= n && u2.range_count < USBAUDIO_RATES_MAX; i++) {
@@ -464,14 +680,14 @@ static void volume_range_read(void)
 {
     uint8_t b[8];
     size_t n = 0;
-    int ch = first_channel(u2.vol_map);
+    int ch = first_channel(u2.d.vol_map);
 
     u2.vol_range_valid = false;
-    if (u2.fu_id == 0u || ch < 0) {
+    if (u2.d.fu_id == 0u || ch < 0) {
         return;
     }
     if (control(REQ_CLASS_IF_IN, REQUEST_RANGE, (uint16_t) ((FU_VOLUME_CONTROL << 8) | ch),
-                ac_index(u2.fu_id), b, sizeof(b), &n) == 0 && n >= 8u) {
+                ac_index(u2.d.fu_id), b, sizeof(b), &n) == 0 && n >= 8u) {
         u2.vol_min = (int16_t) le16(&b[2]);
         u2.vol_max = (int16_t) le16(&b[4]);
         u2.vol_res = (int16_t) le16(&b[6]);
@@ -521,6 +737,11 @@ static void client_event(const usb_host_client_event_msg_t *msg, void *arg)
     }
 }
 
+/*
+ * Runs the client's events until uac2_uninstall() asks it to end; ends
+ * only once the client is deregistered, so a failed deregistration leaves
+ * the task there for the next attempt.
+ */
 static void client_task(void *arg)
 {
     const usb_host_client_config_t config = {
@@ -542,15 +763,34 @@ static void client_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    while (!u2.quit) {
-        (void) usb_host_client_handle_events(u2.client, portMAX_DELAY);
+    for (;;) {
+        while (!u2.quit) {
+            (void) usb_host_client_handle_events(u2.client, portMAX_DELAY);
+        }
+        err = usb_host_client_deregister(u2.client);
+        u2.quit = false;
+        u2.result = err;
+        (void) tx_semaphore_put(&u2.done);
+        if (err == ESP_OK) {
+            break;
+        }
     }
-    u2.result = usb_host_client_deregister(u2.client);
-    (void) tx_semaphore_put(&u2.done);
     vTaskDelete(NULL);
 }
 
 /* ---- Isochronous IN ------------------------------------------------------------ */
+
+/*
+ * The transfers in flight: counted up by "uac" when it submits, down by
+ * "uac2" (which preempts it) when one comes back for good, so the update
+ * is made in a critical section.
+ */
+static void inflight_add(int n)
+{
+    portENTER_CRITICAL();
+    u2.inflight += n;
+    portEXIT_CRITICAL();
+}
 
 static void iso_done(usb_transfer_t *x)
 {
@@ -558,7 +798,7 @@ static void iso_done(usb_transfer_t *x)
 
     if (!u2.running || x->status == USB_TRANSFER_STATUS_NO_DEVICE
         || x->status == USB_TRANSFER_STATUS_CANCELED) {
-        u2.inflight--;
+        inflight_add(-1);
         return;
     }
     if (x->status == USB_TRANSFER_STATUS_COMPLETED) {
@@ -586,7 +826,7 @@ static void iso_done(usb_transfer_t *x)
     /* Last: once it is not in flight, uac2_stop() may free the ring buffer. */
     if (usb_host_transfer_submit(x) != ESP_OK) {
         u2.transfer_errors++;
-        u2.inflight--;
+        inflight_add(-1);
     }
 }
 
@@ -631,13 +871,32 @@ int uac2_install(const struct uac2_callbacks *callbacks)
     return 0;
 }
 
+/*
+ * Closes the device first.  A device with a control transfer still in
+ * flight (failed) cannot be closed until it goes: the root port is
+ * powered off (the library then reports every device gone and completes
+ * the transfer) and that is waited for up to GONE_WAIT_MS.  The client's
+ * task answers within 5 s.  -EIO when the device stays open (unplugging it
+ * and stopping again ends it) or the deregistration fails (the task stays
+ * for the next attempt).
+ */
 int uac2_uninstall(void)
 {
     if (!u2.installed) {
         return 0;
     }
-    if (u2.dev != NULL) {
-        return -EIO;
+    if (u2.dev != NULL && uac2_close() != 0) {
+        if (u2.ctrl_busy && !u2.gone) {
+            LOG_WRN("a request is still in flight: the root port is powered off to end it");
+            (void) usb_host_lib_set_root_port_power(false);
+            for (uint32_t ms = 0; (u2.ctrl_busy || !u2.gone) && ms < GONE_WAIT_MS; ms += 10u) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+        }
+        if (uac2_close() != 0) {
+            LOG_ERR("the UAC 2.0 device stays open; unplug it, then stop again");
+            return -EIO;
+        }
     }
     u2.quit = true;
     (void) usb_host_client_unblock(u2.client);
@@ -669,7 +928,7 @@ static void string_of(const usb_str_desc_t *desc, char *out, size_t size)
     out[n] = '\0';
 }
 
-int uac2_open(uint8_t address, struct usbaudio_info *info)
+int uac2_open(uint8_t address, uint8_t interface, struct usbaudio_info *info)
 {
     const usb_config_desc_t *cd;
     const usb_device_desc_t *dd;
@@ -677,7 +936,7 @@ int uac2_open(uint8_t address, struct usbaudio_info *info)
     uint8_t as = 0;
     uint32_t rate = 0;
 
-    if (!u2.installed || u2.dev != NULL) {
+    if (!u2.installed || u2.dev != NULL || u2.ctrl_busy) {
         return -EIO;
     }
     (void) tx_mutex_get(&u2.open_lock, TX_WAIT_FOREVER);
@@ -688,19 +947,29 @@ int uac2_open(uint8_t address, struct usbaudio_info *info)
     }
     (void) tx_mutex_put(&u2.open_lock);
     u2.gone = false;
-    if (usb_host_get_active_config_descriptor(u2.dev, &cd) != ESP_OK || cd == NULL || !is_uac2_capture(cd, &as)) {
-        uac2_close();
-        return -ENOTSUP;
-    }
-    u2.fu_id = 0;
-    u2.vol_map = 0;
-    u2.mute_map = 0;
+    u2.failed = false;
+    u2.claimed = false;
     u2.range_count = 0;
-    if (parse(cd, as) != 0) {
-        uac2_close();
+    if (usb_host_get_active_config_descriptor(u2.dev, &cd) != ESP_OK || cd == NULL) {
+        (void) uac2_close();
         return -EIO;
     }
-    u2.as_iface = as;
+    if (!is_uac2_capture(cd, &as)) {
+        /* For usb_host_uac: its parser is only safe on what this lets through. */
+        const char *why = "";
+        int ret = uac1_config_check(cd, interface, &why);
+
+        if (ret != 0) {
+            LOG_ERR("device %u interface %u refused: %s", address, interface, why);
+        }
+        (void) uac2_close();
+        return ret != 0 ? ret : -ENOTSUP;
+    }
+    if (find_capture(cd, &u2.d) != 0) {
+        (void) uac2_close();
+        return -EIO;
+    }
+    as = u2.d.as_iface;
     freq_ranges_read();
     (void) freq_get(&rate);
     volume_range_read();
@@ -718,39 +987,70 @@ int uac2_open(uint8_t address, struct usbaudio_info *info)
         string_of(dev_info.str_desc_manufacturer, info->manufacturer, sizeof(info->manufacturer));
         string_of(dev_info.str_desc_product, info->product, sizeof(info->product));
     }
-    for (uint8_t i = 0; i < u2.alt_count; i++) {
-        info->alts[i].channels = u2.alts[i].channels;
-        info->alts[i].bits = u2.alts[i].bits;
-        info->alts[i].subframe = u2.alts[i].subslot;
+    for (uint8_t i = 0; i < u2.d.alt_count; i++) {
+        info->alts[i].channels = u2.d.alts[i].channels;
+        info->alts[i].bits = u2.d.alts[i].bits;
+        info->alts[i].subframe = u2.d.alts[i].subslot;
+        info->alts[i].max_packet = u2.d.alts[i].mps;
+        info->alts[i].sync = u2.d.alts[i].sync;
     }
-    info->alt_count = u2.alt_count;
-    info->clock_id = u2.clock_id;
+    info->alt_count = u2.d.alt_count;
+    info->clock_id = u2.d.clock_id;
     info->clock_range_count = u2.range_count;
     memcpy(info->clock_ranges, u2.ranges, sizeof(info->clock_ranges));
     info->clock_rate = rate;
-    info->feature_unit = u2.fu_id;
+    info->feature_unit = u2.d.fu_id;
     info->volume_range_valid = u2.vol_range_valid;
     info->volume_min = u2.vol_min;
     info->volume_max = u2.vol_max;
     info->volume_res = u2.vol_res;
     LOG_INF("UAC 2.0: interface %u, %u alternate settings, clock %u%s at %u Hz (%u ranges), "
-            "feature unit %u", as, u2.alt_count, u2.clock_id, u2.clock_settable ? "" : " (fixed)",
-            (unsigned int) rate, u2.range_count, u2.fu_id);
+            "feature unit %u", as, u2.d.alt_count, u2.d.clock_id, u2.d.clock_settable ? "" : " (fixed)",
+            (unsigned int) rate, u2.range_count, u2.d.fu_id);
     return 0;
 }
 
-void uac2_close(void)
+/*
+ * What cannot be released now stays as it is, for the next call (when the
+ * device goes, or at uac2_uninstall()): a stream whose transfers did not
+ * come back, a claim that was not released, a control transfer in flight.
+ */
+int uac2_close(void)
 {
+    esp_err_t err;
+
     if (u2.dev == NULL) {
-        return;
+        return 0;
     }
-    if (u2.ring != NULL) {
-        (void) uac2_stop();
+    if (u2.ring != NULL && uac2_stop() != 0 && u2.ring != NULL) {
+        return -EBUSY;
+    }
+    if (u2.claimed) {
+        if (usb_host_interface_release(u2.client, u2.dev, u2.d.as_iface) != ESP_OK) {
+            return -EBUSY;
+        }
+        u2.claimed = false;
+    }
+    if (u2.ctrl_busy) {
+        return -EBUSY;
     }
     (void) tx_mutex_get(&u2.open_lock, TX_WAIT_FOREVER);
-    (void) usb_host_device_close(u2.client, u2.dev);
-    u2.dev = NULL;
+    err = usb_host_device_close(u2.client, u2.dev);
+    if (err == ESP_OK) {
+        u2.dev = NULL;
+    }
     (void) tx_mutex_put(&u2.open_lock);
+    if (err != ESP_OK) {
+        LOG_ERR("usb_host_device_close: error 0x%x", (unsigned int) err);
+        return -EIO;
+    }
+    u2.failed = false;
+    return 0;
+}
+
+bool uac2_failed(void)
+{
+    return u2.dev != NULL && u2.failed;
 }
 
 static void transfers_free(void)
@@ -766,8 +1066,26 @@ static void transfers_free(void)
 static int set_interface(uint8_t alt)
 {
     return control(USB_BM_REQUEST_TYPE_DIR_OUT | USB_BM_REQUEST_TYPE_TYPE_STANDARD
-                   | USB_BM_REQUEST_TYPE_RECIP_INTERFACE, USB_B_REQUEST_SET_INTERFACE, alt, u2.as_iface,
+                   | USB_BM_REQUEST_TYPE_RECIP_INTERFACE, USB_B_REQUEST_SET_INTERFACE, alt, u2.d.as_iface,
                    NULL, 0, NULL);
+}
+
+/*
+ * The largest packet a stream can bring in a 1 ms frame: rate / 1000
+ * frames of channels subslots, exactly when the endpoint is synchronous
+ * or adaptive (locked to the host's frames) and the rate is a whole number
+ * of frames per millisecond; one frame more when it is asynchronous (its
+ * own clock, a frame more or less now and then) or the rate is not (44.1 kHz:
+ * 44 or 45 frames).
+ */
+uint32_t uac2_packet_need(uint32_t rate, uint8_t channels, uint8_t subslot, uint8_t sync)
+{
+    uint32_t frames = rate / 1000u;
+
+    if (rate % 1000u != 0u || sync == USBAUDIO_SYNC_ASYNC) {
+        frames++;
+    }
+    return frames * channels * subslot;
 }
 
 int uac2_start(uint32_t rate, uint8_t channels, uint32_t buffer_bytes, uint32_t threshold)
@@ -777,33 +1095,35 @@ int uac2_start(uint32_t rate, uint8_t channels, uint32_t buffer_bytes, uint32_t 
     uint8_t b[4];
     esp_err_t err;
 
-    if (u2.dev == NULL || u2.gone || u2.ring != NULL) {
+    if (u2.dev == NULL || u2.gone || u2.failed || u2.ring != NULL || u2.claimed) {
         return -EIO;
     }
-    for (uint8_t i = 0; i < u2.alt_count; i++) {
-        if (u2.alts[i].channels == channels && u2.alts[i].bits == 16u && u2.alts[i].subslot == 2u) {
-            a = &u2.alts[i];
+    for (uint8_t i = 0; i < u2.d.alt_count; i++) {
+        const struct uac2_alt *c = &u2.d.alts[i];
+
+        if (c->channels == channels && c->bits == 16u && c->subslot == 2u
+            && c->mps >= uac2_packet_need(rate, channels, c->subslot, c->sync)) {
+            a = c;
             break;
         }
     }
-    if (a == NULL || !rate_offered(rate)
-        || (uint32_t) a->mps < (rate / 1000u + 1u) * channels * 2u) {
+    if (a == NULL || !rate_offered(rate)) {
         return -ENOTSUP;
     }
 
     /* The clock first (it is not part of the alternate setting), verified. */
-    if (u2.clock_settable) {
+    if (u2.d.clock_settable) {
         b[0] = (uint8_t) rate;
         b[1] = (uint8_t) (rate >> 8);
         b[2] = (uint8_t) (rate >> 16);
         b[3] = (uint8_t) (rate >> 24);
-        if (control(REQ_CLASS_IF_OUT, REQUEST_CUR, CS_SAM_FREQ_CONTROL << 8, ac_index(u2.clock_id), b,
+        if (control(REQ_CLASS_IF_OUT, REQUEST_CUR, CS_SAM_FREQ_CONTROL << 8, ac_index(u2.d.clock_id), b,
                     sizeof(b), NULL) != 0) {
             return -EIO;
         }
     }
     if (freq_get(&cur) != 0 || cur != rate) {
-        LOG_ERR("clock %u runs at %u Hz, not %u", u2.clock_id, (unsigned int) cur, (unsigned int) rate);
+        LOG_ERR("clock %u runs at %u Hz, not %u", u2.d.clock_id, (unsigned int) cur, (unsigned int) rate);
         return -EIO;
     }
 
@@ -838,16 +1158,19 @@ int uac2_start(uint32_t rate, uint8_t channels, uint32_t buffer_bytes, uint32_t 
             x->isoc_packet_desc[j].num_bytes = a->mps;
         }
     }
-    err = usb_host_interface_claim(u2.client, u2.dev, u2.as_iface, a->alt);
+    err = usb_host_interface_claim(u2.client, u2.dev, u2.d.as_iface, a->alt);
     if (err != ESP_OK) {
-        LOG_ERR("interface %u alternate %u: claim error 0x%x", u2.as_iface, a->alt, (unsigned int) err);
+        LOG_ERR("interface %u alternate %u: claim error 0x%x", u2.d.as_iface, a->alt, (unsigned int) err);
         transfers_free();
         vRingbufferDelete(u2.ring);
         u2.ring = NULL;
         return -EIO;
     }
+    u2.claimed = true;
     if (set_interface(a->alt) != 0) {
-        (void) usb_host_interface_release(u2.client, u2.dev, u2.as_iface);
+        if (usb_host_interface_release(u2.client, u2.dev, u2.d.as_iface) == ESP_OK) {
+            u2.claimed = false;         /* else uac2_close() tries again */
+        }
         transfers_free();
         vRingbufferDelete(u2.ring);
         u2.ring = NULL;
@@ -855,16 +1178,16 @@ int uac2_start(uint32_t rate, uint8_t channels, uint32_t buffer_bytes, uint32_t 
     }
     u2.running = true;
     for (int i = 0; i < CONFIG_UAC_NUM_ISOC_URBS; i++) {
-        u2.inflight++;
+        inflight_add(1);
         err = usb_host_transfer_submit(u2.xfers[i]);
         if (err != ESP_OK) {
-            u2.inflight--;
+            inflight_add(-1);
             LOG_ERR("endpoint 0x%02x: submit error 0x%x", a->ep, (unsigned int) err);
             (void) uac2_stop();
             return -EIO;
         }
     }
-    LOG_INF("interface %u alternate %u: endpoint 0x%02x, %u bytes per packet", u2.as_iface, a->alt, a->ep,
+    LOG_INF("interface %u alternate %u: endpoint 0x%02x, %u bytes per packet", u2.d.as_iface, a->alt, a->ep,
             a->mps);
     return 0;
 }
@@ -877,8 +1200,9 @@ int uac2_stop(void)
         return 0;
     }
     u2.running = false;
-    if (!u2.gone && set_interface(0) != 0) {
-        ret = -EIO;                     /* the transfers are taken back all the same */
+    /* Alternate setting 0 for a device that is there and answers; the transfers are taken back all the same. */
+    if (!u2.gone && !u2.failed && set_interface(0) != 0) {
+        ret = -EIO;
     }
     (void) usb_host_endpoint_halt(u2.dev, u2.cur->ep);
     (void) usb_host_endpoint_flush(u2.dev, u2.cur->ep);
@@ -891,9 +1215,11 @@ int uac2_stop(void)
         LOG_ERR("%d transfers still in flight", u2.inflight);
         return -EIO;
     }
-    if (usb_host_interface_release(u2.client, u2.dev, u2.as_iface) != ESP_OK) {
-        LOG_ERR("interface %u: release failed", u2.as_iface);
+    if (usb_host_interface_release(u2.client, u2.dev, u2.d.as_iface) != ESP_OK) {
+        LOG_ERR("interface %u: release failed; tried again at the close", u2.d.as_iface);
         ret = -EIO;
+    } else {
+        u2.claimed = false;
     }
     transfers_free();
     vRingbufferDelete(u2.ring);
@@ -924,14 +1250,14 @@ int uac2_volume_get(int16_t *volume, uint8_t *percent)
 {
     uint8_t b[2];
     size_t n = 0;
-    int ch = first_channel(u2.vol_map);
+    int ch = first_channel(u2.d.vol_map);
     int16_t v;
 
     if (u2.dev == NULL || ch < 0) {
         return -ENOTSUP;
     }
     if (control(REQ_CLASS_IF_IN, REQUEST_CUR, (uint16_t) ((FU_VOLUME_CONTROL << 8) | ch),
-                ac_index(u2.fu_id), b, sizeof(b), &n) != 0 || n != 2u) {
+                ac_index(u2.d.fu_id), b, sizeof(b), &n) != 0 || n != 2u) {
         return -EIO;
     }
     v = (int16_t) le16(b);
@@ -955,7 +1281,7 @@ int uac2_volume_set(uint8_t percent)
     int32_t v;
     uint8_t b[2];
 
-    if (u2.dev == NULL || u2.vol_map == 0u || !u2.vol_range_valid) {
+    if (u2.dev == NULL || u2.d.vol_map == 0u || !u2.vol_range_valid) {
         return -ENOTSUP;
     }
     v = u2.vol_min + ((u2.vol_max - u2.vol_min) * (int32_t) percent + 50) / 100;
@@ -966,9 +1292,9 @@ int uac2_volume_set(uint8_t percent)
     b[0] = (uint8_t) v;
     b[1] = (uint8_t) ((uint16_t) v >> 8);
     for (int ch = 0; ch < 16; ch++) {
-        if ((u2.vol_map & (1u << ch)) != 0u
+        if ((u2.d.vol_map & (1u << ch)) != 0u
             && control(REQ_CLASS_IF_OUT, REQUEST_CUR, (uint16_t) ((FU_VOLUME_CONTROL << 8) | ch),
-                       ac_index(u2.fu_id), b, sizeof(b), NULL) != 0) {
+                       ac_index(u2.d.fu_id), b, sizeof(b), NULL) != 0) {
             return -EIO;
         }
     }
@@ -980,12 +1306,12 @@ int uac2_mute_get(bool *mute)
 {
     uint8_t b[1];
     size_t n = 0;
-    int ch = first_channel(u2.mute_map);
+    int ch = first_channel(u2.d.mute_map);
 
     if (u2.dev == NULL || ch < 0) {
         return -ENOTSUP;
     }
-    if (control(REQ_CLASS_IF_IN, REQUEST_CUR, (uint16_t) ((FU_MUTE_CONTROL << 8) | ch), ac_index(u2.fu_id),
+    if (control(REQ_CLASS_IF_IN, REQUEST_CUR, (uint16_t) ((FU_MUTE_CONTROL << 8) | ch), ac_index(u2.d.fu_id),
                 b, sizeof(b), &n) != 0 || n != 1u) {
         return -EIO;
     }
@@ -997,13 +1323,13 @@ int uac2_mute_set(bool mute)
 {
     uint8_t b[1] = { mute ? 1u : 0u };
 
-    if (u2.dev == NULL || u2.mute_map == 0u) {
+    if (u2.dev == NULL || u2.d.mute_map == 0u) {
         return -ENOTSUP;
     }
     for (int ch = 0; ch < 16; ch++) {
-        if ((u2.mute_map & (1u << ch)) != 0u
+        if ((u2.d.mute_map & (1u << ch)) != 0u
             && control(REQ_CLASS_IF_OUT, REQUEST_CUR, (uint16_t) ((FU_MUTE_CONTROL << 8) | ch),
-                       ac_index(u2.fu_id), b, sizeof(b), NULL) != 0) {
+                       ac_index(u2.d.fu_id), b, sizeof(b), NULL) != 0) {
             return -EIO;
         }
     }

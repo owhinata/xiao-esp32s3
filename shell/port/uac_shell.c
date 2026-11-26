@@ -188,7 +188,11 @@ static int cmd_uac_info(const struct shell *sh, size_t argc, char **argv)
                               (unsigned int) a->rates[j]);
             }
             if (n >= 0 && (size_t) n < sizeof(rates)) {
-                (void) snprintf(rates + n, sizeof(rates) - (size_t) n, " Hz");
+                n += snprintf(rates + n, sizeof(rates) - (size_t) n, " Hz");
+            }
+            if (a->rate_declared > a->rate_count && n >= 0 && (size_t) n < sizeof(rates)) {
+                (void) snprintf(rates + n, sizeof(rates) - (size_t) n, " (of %u listed: not usable)",
+                                a->rate_declared);
             }
         }
         shell_print(sh, "alternate %u: %u channel%s, %u bits in %u bytes, %s", i + 1u, a->channels,
@@ -218,6 +222,9 @@ static int cmd_uac_info(const struct shell *sh, size_t argc, char **argv)
             shell_print(sh, "feature unit %u: no volume range%s", info->feature_unit,
                         info->feature_unit == 0u ? " (no feature unit)" : "");
         }
+    }
+    if (info->failed) {
+        shell_print(sh, "state: failed (a request got no answer); unplug the microphone");
     }
     if (info->default_rate != 0u) {
         shell_print(sh, "default for \"uac start\": %u Hz, %u channel%s", (unsigned int) info->default_rate,
@@ -462,17 +469,19 @@ static int cmd_uac_level(const struct shell *sh, size_t argc, char **argv)
 
 /*
  * The capture goes into the buffer first and is printed after, so that the
- * output's pace cannot make the reader fall behind the ring.  The first
- * read may skip what the ring no longer holds (a reader that has not read
- * for a while); a skip after it is a gap in the capture, which the END
- * line reports.
+ * output's pace cannot make it fall behind the ring.  It reads with its
+ * own position (struct usbaudio_reader), from the newest sample on, so it
+ * takes nothing from another reader; a skip is a gap in the capture,
+ * which the END line reports.  One "uac dump" at a time (a temporary
+ * tool): a second console's is refused while one runs.
  */
+static K_MUTEX_DEFINE(dump_lock);
+
 static int cmd_uac_dump(const struct shell *sh, size_t argc, char **argv)
 {
     uint32_t want = DUMP_DEFAULT;
     uint32_t got = 0;
-    uint32_t lost_after_first = 0;
-    struct usbaudio_stats st;
+    struct usbaudio_reader reader;
     const char *why = "";
     int16_t *buf;
     char line[16 * 7 + 1];
@@ -485,12 +494,19 @@ static int cmd_uac_dump(const struct shell *sh, size_t argc, char **argv)
     if (buf == NULL) {
         return report(sh, -ENOMEM);
     }
+    if (k_mutex_lock(&dump_lock, K_NO_WAIT) != 0) {
+        free(buf);
+        shell_error(sh, "Busy: \"uac dump\" runs on another console");
+        return -EBUSY;
+    }
+    usbaudio_reader_init(&reader);
     while (got < want) {
         uint32_t n = want - got < DUMP_CHUNK ? want - got : DUMP_CHUNK;
-        int ret = usbaudio_read_16k(&buf[got], n, DUMP_WAIT_MS);
+        int ret = usbaudio_read_16k(&reader, &buf[got], n, DUMP_WAIT_MS);
 
         if (ret < 0) {
             if (got == 0u) {
+                k_mutex_unlock(&dump_lock);
                 free(buf);
                 if (ret == -ENOTSUP) {
                     shell_error(sh, "The stream does not give 16 kHz samples (it runs at neither 16 nor 48 kHz)");
@@ -501,17 +517,13 @@ static int cmd_uac_dump(const struct shell *sh, size_t argc, char **argv)
             why = ", the stream stopped";
             break;
         }
-        if (got == 0u) {
-            (void) usbaudio_stats(&st);
-            lost_after_first = st.ring_lost;
-        }
         got += (uint32_t) ret;
         if ((uint32_t) ret < n) {
             why = ", timed out waiting for samples";
             break;
         }
     }
-    (void) usbaudio_stats(&st);
+    k_mutex_unlock(&dump_lock);
 
     for (uint32_t i = 0; i < got; i += 16u) {
         size_t len = 0;
@@ -522,9 +534,9 @@ static int cmd_uac_dump(const struct shell *sh, size_t argc, char **argv)
         shell_print(sh, "%s", line);
     }
     free(buf);
-    if (st.ring_lost != lost_after_first) {
+    if (reader.lost != 0u) {
         shell_print(sh, "END %u (gap: %u samples overwritten during the capture%s)", (unsigned int) got,
-                    (unsigned int) (st.ring_lost - lost_after_first), why);
+                    (unsigned int) reader.lost, why);
     } else {
         shell_print(sh, "END %u%s", (unsigned int) got, why);
     }
@@ -597,8 +609,8 @@ static int cmd_uac_stats(const struct shell *sh, size_t argc, char **argv)
         shell_print(sh, "UAC 2.0: packets dropped (buffer full) %u, packets with errors %u",
                     (unsigned int) st.overruns, (unsigned int) st.packet_errors);
     }
-    shell_print(sh, "16 kHz ring: %u samples, %u lost by the consumer",
-                (unsigned int) USBAUDIO_RING_SAMPLES, (unsigned int) st.ring_lost);
+    shell_print(sh, "16 kHz ring: %u samples (each reader counts what it lost)",
+                (unsigned int) USBAUDIO_RING_SAMPLES);
     return 0;
 }
 

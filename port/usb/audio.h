@@ -39,9 +39,15 @@ int usbaudio_start(void);
  */
 int usbaudio_stop(void);
 
-#define USBAUDIO_ALTS_MAX       4
+#define USBAUDIO_ALTS_MAX       8
 #define USBAUDIO_RATES_MAX      4
 #define USBAUDIO_STRING_MAX     32
+
+/* An isochronous endpoint's synchronization type (bmAttributes bits 3..2). */
+#define USBAUDIO_SYNC_NONE      0u
+#define USBAUDIO_SYNC_ASYNC     1u
+#define USBAUDIO_SYNC_ADAPTIVE  2u
+#define USBAUDIO_SYNC_SYNC      3u
 
 /* An alternate setting of the microphone's streaming interface. */
 struct usbaudio_alt {
@@ -49,9 +55,13 @@ struct usbaudio_alt {
     uint8_t bits;               /* bBitResolution */
     uint8_t subframe;           /* bSubframeSize, bytes per sample */
     uint8_t rate_count;         /* discrete rates in rates[], 0: the range */
+    uint8_t rate_declared;      /* discrete rates the descriptor lists (more than
+                                   rate_count when it lists more than USBAUDIO_RATES_MAX) */
     uint32_t rates[USBAUDIO_RATES_MAX];
     uint32_t rate_min;          /* the continuous range, when rate_count is 0 (UAC 1.0) */
     uint32_t rate_max;
+    uint16_t max_packet;        /* UAC 2.0: the endpoint's wMaxPacketSize */
+    uint8_t sync;               /* UAC 2.0: its synchronization type, USBAUDIO_SYNC_* */
 };
 
 /* A range of a UAC 2.0 clock's sampling rates (GET RANGE). */
@@ -71,6 +81,7 @@ struct usbaudio_info {
     char manufacturer[USBAUDIO_STRING_MAX]; /* ASCII, '?' for other characters */
     char product[USBAUDIO_STRING_MAX];
     uint8_t alt_count;          /* alternate settings with an endpoint (1 ..) */
+    bool alts_complete;         /* UAC 1.0: alts[i] is alternate setting i + 1, all of them */
     struct usbaudio_alt alts[USBAUDIO_ALTS_MAX];
     /*
      * UAC 2.0: the rates come from the stream's clock source, not from the
@@ -94,6 +105,7 @@ struct usbaudio_info {
     uint32_t default_rate;
     uint8_t default_channels;
     bool streaming;
+    bool failed;                /* UAC 2.0: a request got no answer; nothing more is sent to it */
     /* While streaming, from the device (GET_CUR of its feature unit). */
     bool volume_valid;
     int16_t volume;             /* 1/256 dB */
@@ -183,7 +195,6 @@ struct usbaudio_stats {
     uint8_t uac_version;        /* of the microphone */
     uint32_t overruns;          /* UAC 2.0: packets dropped, the buffer was full */
     uint32_t packet_errors;     /* UAC 2.0: isochronous packets with an error status */
-    uint32_t ring_lost;         /* decimated samples overwritten before the consumer read them */
     int64_t start_us;           /* esp_timer_get_time() of the start */
     int64_t first_us;           /* of the first and the last read that returned data, 0: none */
     int64_t last_us;
@@ -208,16 +219,32 @@ struct usbaudio_level {
 int usbaudio_level(struct usbaudio_level *level);
 
 /*
- * The next n samples of a 48 kHz stream decimated, or of a 16 kHz one
- * (16 kHz, one channel, the mix of the stream's channels), waiting up to timeout_ms for them.
- * For one consumer: the ring keeps the latest USBAUDIO_RING_SAMPLES; a
- * consumer that falls further behind loses the oldest (counted in
- * ring_lost) and goes on from the oldest kept.  A stream start empties the
- * ring.  The number of samples copied (fewer than n on the timeout), or
- * -ENODATA when no stream runs, -ENOTSUP when it runs at another rate.
+ * The 16 kHz samples (of a 48 kHz stream decimated, or of a 16 kHz one;
+ * one channel, the mix of the stream's channels) for any number of
+ * independent readers: the ring keeps the latest USBAUDIO_RING_SAMPLES,
+ * and each reader keeps its own position in a struct usbaudio_reader of
+ * its own, so no reader takes samples from another.
+ *
+ * usbaudio_reader_init() starts a reader at the newest sample (what came
+ * before is not read).  usbaudio_read_16k() copies the reader's next n
+ * samples, waiting up to timeout_ms for them.  A reader that falls further
+ * behind than the ring holds loses the oldest (added to its lost) and goes
+ * on from the oldest kept; when a new stream starts, a reader goes on from
+ * that stream's first sample.  The number of samples copied (fewer than n
+ * on the timeout), or -ENODATA when no stream runs, -ENOTSUP when it runs
+ * at another rate.  One struct usbaudio_reader per thread (it is not
+ * locked).
  */
+struct usbaudio_reader {
+    uint32_t position;          /* samples written before the next one it reads */
+    uint32_t stream;            /* the stream it follows */
+    uint32_t lost;              /* samples it missed, in total */
+};
+
+void usbaudio_reader_init(struct usbaudio_reader *reader);
+
 #define USBAUDIO_RING_SAMPLES   4096u
 
-int usbaudio_read_16k(int16_t *dst, size_t n, uint32_t timeout_ms);
+int usbaudio_read_16k(struct usbaudio_reader *reader, int16_t *dst, size_t n, uint32_t timeout_ms);
 
 #endif

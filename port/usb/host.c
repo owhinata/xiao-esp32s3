@@ -43,6 +43,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "tx_api.h"
@@ -664,35 +665,87 @@ static int request(enum host_request what)
     return host.result == ESP_OK ? 0 : host.result == ESP_ERR_NOT_FOUND ? -ENOENT : -EIO;
 }
 
+/*
+ * The client task writes a request's results into storage of this file,
+ * allocated for the request, never into the caller's buffers: the caller
+ * gets a copy once the answer has come.  When the answer does not come in
+ * time, the task may still write later, so the storage is left allocated
+ * (it is not freed again; the host is BROKEN from then on and takes no
+ * more requests).  The arguments the task reads are in host, written
+ * before the request.
+ */
 int usbhost_list(struct usbhost_device *devices, int max)
 {
+    struct usbhost_device *result;
     int ret = ready();
 
     if (ret != 0) {
         return ret;
     }
-    host.devices = devices;
+    if (max <= 0) {
+        return 0;
+    }
+    if (max > USBHOST_DEVICES_MAX) {
+        max = USBHOST_DEVICES_MAX;
+    }
+    result = calloc((size_t) max, sizeof(*result));
+    if (result == NULL) {
+        return -ENOMEM;
+    }
+    host.devices = result;
     host.max = max;
+    host.count = 0;
     ret = request(REQUEST_LIST);
-    return ret != 0 ? ret : host.count;
+    if (ret == -ETIMEDOUT) {
+        return ret;                     /* result stays: see above */
+    }
+    if (ret == 0) {
+        memcpy(devices, result, (size_t) host.count * sizeof(*result));
+        ret = host.count;
+    }
+    free(result);
+    return ret;
 }
+
+struct descriptors_result {
+    struct usbhost_device device;
+    uint8_t device_desc[USBHOST_DEVICE_DESC_LEN];
+    uint8_t config[];
+};
 
 int usbhost_descriptors(uint8_t address, struct usbhost_device *device,
                         uint8_t device_desc[USBHOST_DEVICE_DESC_LEN],
                         uint8_t *config, size_t size, size_t *config_len)
 {
+    struct descriptors_result *result;
     int ret = ready();
 
+    *config_len = 0;
     if (ret != 0) {
         return ret;
     }
+    result = calloc(1, sizeof(*result) + size);
+    if (result == NULL) {
+        return -ENOMEM;
+    }
     host.address = address;
-    host.devices = device;
-    host.device_desc = device_desc;
-    host.config = config;
+    host.devices = &result->device;
+    host.device_desc = result->device_desc;
+    host.config = result->config;
     host.size = size;
     host.config_len = 0;
     ret = request(REQUEST_DESCRIPTORS);
-    *config_len = host.config_len;
+    if (ret == -ETIMEDOUT) {
+        return ret;                     /* result stays: see usbhost_list() */
+    }
+    if (ret == 0) {
+        *device = result->device;
+        memcpy(device_desc, result->device_desc, USBHOST_DEVICE_DESC_LEN);
+        if (size > 0u) {
+            memcpy(config, result->config, host.config_len < size ? host.config_len : size);
+        }
+        *config_len = host.config_len;
+    }
+    free(result);
     return ret;
 }
