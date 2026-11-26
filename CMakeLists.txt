@@ -99,7 +99,9 @@ fetch_upstream(esp-usb
     host/usb/include
     host/usb/private_include
     host/usb/src
-    host/class/uac/usb_host_uac)
+    host/class/uac/usb_host_uac
+    PATCHES
+    "${CMAKE_CURRENT_LIST_DIR}/patches/esp-usb/0001-uac-host-notify-disconnect-after-failed-close.patch")
 
 set(ESP_HAL  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-hal-3rdparty/components")
 set(ESP_IDF  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-idf/components")

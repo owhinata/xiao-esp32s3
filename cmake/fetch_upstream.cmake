@@ -10,6 +10,14 @@
 # never overwritten: the upstream sources are meant to be used unmodified, and
 # silently discarding an experiment would be worse than stopping.
 #
+# PATCHES: this repository's patches of that tree (files under patches/, in
+# the order to apply them; paths from the repository root, as "git diff"
+# writes them).  They are applied after the checkout, a patch that is already
+# applied is left alone, and they are taken back before the tree moves to
+# another commit.  A patch that neither applies nor is applied stops the
+# configuration: the patch or the commit has changed, and lib/<name> has to
+# be removed to start again.
+#
 # SPARSE: only the listed directories (paths from the repository root) are
 # checked out, and only their files are downloaded (a partial clone without
 # blobs; git fetches the blobs of the sparse paths when it checks them out).
@@ -30,7 +38,48 @@ function(_fetch_upstream_git dir)
 endfunction()
 
 function(fetch_upstream name url commit)
-    cmake_parse_arguments(PARSE_ARGV 3 _arg "" "" "SPARSE")
+    cmake_parse_arguments(PARSE_ARGV 3 _arg "" "" "SPARSE;PATCHES")
+    set(dir "${CMAKE_SOURCE_DIR}/lib/${name}")
+
+    # Take the patches back when the tree is to move to another commit.
+    if(_arg_PATCHES AND EXISTS "${dir}/.git")
+        _fetch_upstream_git("${dir}" rev-parse HEAD)
+        if(NOT (_git_rc EQUAL 0 AND _git_out STREQUAL "${commit}"))
+            set(_reversed ${_arg_PATCHES})
+            list(REVERSE _reversed)
+            foreach(_patch IN LISTS _reversed)
+                _fetch_upstream_git("${dir}" apply --reverse --check "${_patch}")
+                if(_git_rc EQUAL 0)
+                    _fetch_upstream_git("${dir}" apply --reverse "${_patch}")
+                endif()
+            endforeach()
+        endif()
+    endif()
+
+    _fetch_upstream_checkout("${name}" "${url}" "${commit}" "${_arg_SPARSE}")
+
+    foreach(_patch IN LISTS _arg_PATCHES)
+        _fetch_upstream_git("${dir}" apply --reverse --check "${_patch}")
+        if(_git_rc EQUAL 0)
+            continue()
+        endif()
+        _fetch_upstream_git("${dir}" apply --check "${_patch}")
+        if(NOT _git_rc EQUAL 0)
+            message(FATAL_ERROR
+                "${_patch} neither applies to lib/${name} nor is applied: ${_git_err}\n"
+                "Remove lib/${name} and configure again.")
+        endif()
+        message(STATUS "Applying ${_patch} to ${name} ...")
+        _fetch_upstream_git("${dir}" apply "${_patch}")
+        if(NOT _git_rc EQUAL 0)
+            message(FATAL_ERROR "Applying ${_patch} to lib/${name} failed: ${_git_err}")
+        endif()
+    endforeach()
+endfunction()
+
+# Makes lib/<name> a checkout of <commit>; sparse is the list of SPARSE paths.
+function(_fetch_upstream_checkout name url commit sparse)
+    set(_arg_SPARSE ${sparse})
     set(dir "${CMAKE_SOURCE_DIR}/lib/${name}")
 
     # Sparse patterns: each directory and everything below it.

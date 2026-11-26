@@ -1,0 +1,47 @@
+usb_host_uac: report a disconnect even when the close fails
+
+_uac_host_device_disconnected() closes each interface of the device that
+went and then tells the user (UAC_HOST_DRIVER_EVENT_DISCONNECTED).  The
+close waits for the interface's lock.  A task that holds it across a
+control transfer of that device (volume, mute, start, stop) waits for the
+transfer's completion, which only this task, the one running the
+disconnect, can deliver: both wait DEFAULT_CTRL_XFER_TIMEOUT_MS.  When the
+close gives up first, UAC_RETURN_ON_ERROR leaves the function: the user is
+never told, the interface stays "open" and the device's other interfaces
+are not handled.  The event is now sent whatever the close returns; the
+user's own uac_host_device_close() after it releases what was left.
+
+With NDEBUG the assert on the device lookup is gone, and a device that is
+not in the list was dereferenced as NULL; the function returns instead.
+
+Applies to espressif/esp-usb 9abfde7ac1723335430474f378976da2d1f68c01.
+---
+--- a/host/class/uac/usb_host_uac/uac_host.c
++++ b/host/class/uac/usb_host_uac/uac_host.c
+@@ -1080,6 +1080,9 @@
+     uac_device_t *uac_device = get_uac_device_by_handle(dev_hdl);
+     // Device should be in the list
+     assert(uac_device);
++    if (uac_device == NULL) {
++        return ESP_ERR_NOT_FOUND;
++    }
+ 
+     UAC_ENTER_CRITICAL();
+     uac_iface_t *uac_iface = STAILQ_FIRST(&s_uac_driver->uac_ifaces_tailq);
+@@ -1088,8 +1091,14 @@
+         UAC_EXIT_CRITICAL();
+         if (uac_iface->parent && (uac_iface->parent->addr == uac_device->addr)) {
+             uac_iface->flags |= FLAG_INTERFACE_WAIT_USER_DELETE;
+-            UAC_RETURN_ON_ERROR(uac_host_device_close(uac_iface), "Unable to close device");
+-            UAC_RETURN_ON_ERROR(uac_host_interface_shutdown(uac_iface), "Unable to shutdown interface");
++            // A close that fails (the interface is locked by a task that waits for a
++            // control transfer of the device that is gone) must not keep the event
++            // from the user and from the device's other interfaces: the user's own
++            // close, after the event, releases what this one could not
++            if (uac_host_device_close(uac_iface) != ESP_OK) {
++                ESP_LOGW(TAG, "Unable to close device, the user is notified anyway");
++            }
++            uac_host_interface_shutdown(uac_iface);
+         }
+         UAC_ENTER_CRITICAL();
+         uac_iface = next_iface;
