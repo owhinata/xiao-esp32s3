@@ -204,9 +204,39 @@ the ROM download mode, where esptool can connect.  A reset from esptool or the
 RESET button returns to the firmware.  `id` prints the factory MAC address
 from eFuse.
 
-`ota status` shows the two application slots: which one this image runs
-from, which one the bootloader starts next, and for each its otadata entry
-(sequence number and state) and its image's version and build time.
+### Updating over Wi-Fi
+
+```sh
+cmake -S . -B build -DOTA_HOST=<the board's IP address>   # once; "ifconfig" shows the address
+cmake --build build --target ota-flash
+```
+
+`ota-flash` runs `script/ota.py <address> build/xiao_esp32s3_threadx.bin`,
+which sends the image to the board's OTA service (TCP port 3232).  The board
+writes it to the application slot that is not running, checks it (the image's
+SHA-256, read back from flash), makes it the slot to boot and restarts.  The
+tool then connects again and confirms the image, which takes about 22 s in
+all for a 0.9 MB image.  A running USB audio stream is stopped for the update
+and not started again.
+
+A new image runs unconfirmed until the tool, or `ota confirm`, confirms it:
+any reset before that makes the bootloader go back to the previous image.
+`--no-confirm` leaves it unconfirmed, `--no-reboot` leaves the restart to
+you.  A transfer that fails or an image that does not pass the check changes
+nothing: the running image stays the one to boot.
+
+**The service has no authentication**, like the Telnet shell: anyone who
+reaches the board on the network can replace its firmware.
+
+`ota status` shows the two application slots: which one this image runs from
+and its state, which one the bootloader starts next, a transfer in progress,
+and for each slot its otadata entry (sequence number and state) and its
+image's version, build time and ELF SHA-256.  `ota rollback` marks the
+running image invalid and restarts into the other slot, when that holds an
+image that may be booted.
+
+`flash` and `app-flash` over USB or UART keep working whatever the slots
+hold: they write `ota_0` and a blank `otadata`.
 
 `dmesg` shows a log kept in RAM that survives a reset, so it also holds the
 lines of earlier boots.
@@ -264,7 +294,9 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    sets up the clocks (PLL, CPU at 80 MHz), the flash and the cache, reads the
    partition table (`partitions.csv`: settings, two application slots and
    otadata), picks the slot that otadata selects (`ota_0` when otadata is
-   blank, which it then records), verifies the application image, loads its RAM segments, maps
+   blank, which it then records; a slot that was started once and not
+   confirmed is given up for the previous one), verifies the application
+   image, loads its RAM segments, maps
    its flash segments and jumps to `_start`.  Its log goes to UART0 and to the
    USB console.
 3. `_start` (`port/startup.c`) does what ESP-IDF's application start-up does
@@ -325,7 +357,7 @@ What ESP-IDF's application start-up does and this firmware does not:
 bootloader/     build of ESP-IDF's second-stage bootloader
 cmake/          toolchain file (downloads the compiler), upstream fetch
 partitions.csv  partition table
-script/         flash tool
+script/         flash tool (USB, UART) and the Wi-Fi update tool
 ldscript/       linker script, and the check run after linking that the code
                 that has to run from RAM references neither flash nor the
                 code that is in RAM for speed

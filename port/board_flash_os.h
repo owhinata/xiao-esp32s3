@@ -19,7 +19,6 @@ extern const esp_flash_os_functions_t board_flash_os_functions;
  *   SETTINGS  the "settings" partition, the persistent store
  *   OTADATA   the "otadata" partition, which records the OTA slot to boot
  *   OTA_SLOT  the OTA slot that is not running, while an update writes it
- *             (no code opens it: the update's transfer is not built)
  */
 enum board_flash_region {
     BOARD_FLASH_REGION_SETTINGS,

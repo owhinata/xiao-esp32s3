@@ -29,7 +29,8 @@
  *
  * region_protected() lets a write or erase through only inside one of the
  * regions that port/board_flash.c has opened (board_flash_os.h): the
- * "settings" partition and otadata.  Nothing is open until the partition
+ * "settings" partition, otadata and, during an update, the OTA slot that
+ * is not running.  Nothing is open until the partition
  * table in flash has been found to agree with the build; port/board_flash.c
  * never opens a region in the bootloader, the partition table or the
  * running application.

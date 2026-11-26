@@ -110,6 +110,10 @@ ALLOWED = (
      "the PS it restores has the interrupts open; it is entered only with "
      "them masked (the cache freeze, port/esp_compat/esp_cache_utils.c, and "
      "the flash driver's windows)"),
+    ("esp_flash_api.c.obj", r"\.literal\.esp_flash_read_encrypted", r"spi_flash_(mmap|munmap)",
+     "a read through a mapping of the cache, with the cache on: called by "
+     "bootloader_flash_read() (the image check of an update) only when flash "
+     "encryption is on, never inside a window"),
     ("esp_mmu_map.c.obj", r"\.dram1\..*", r".*",
      "the MMU driver's log tag (a DRAM_ATTR pointer to its string in "
      "flash), read only by its functions in flash: the ones in RAM log "

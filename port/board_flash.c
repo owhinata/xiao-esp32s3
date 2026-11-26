@@ -28,7 +28,10 @@
  * sectors of the chip, not below the first 64 KiB (the bootloader, the
  * table and "settings") and not in the application partition the image
  * runs from (the one the MMU maps this code from).  Nothing else is opened
- * here; the OTA slots stay closed.
+ * here.  The OTA slot that is not running is opened by the update
+ * (board_flash_ota_slot_open()) only for the length of a transfer, and
+ * only when it keeps clear of the running partition and otadata found
+ * here.
  *
  * This file runs with the cache on (it is in flash); everything it calls
  * that runs with the cache off is in RAM.
@@ -60,6 +63,17 @@ static const char TAG[] = "flash";
 
 static bool driver_started;
 static bool settings_found;
+
+/*
+ * What the start-up found in the partition table: the chip's size, the
+ * application partition this image runs from and otadata (size 0: not
+ * found), which an OTA slot must keep clear of.
+ */
+static uint32_t chip_bytes;
+static uint32_t running_offset;
+static uint32_t running_size;
+static uint32_t otadata_offset;
+static uint32_t otadata_size;
 
 /* esp_flash_io_mode_t's names, as ESP-IDF's log prints them. */
 static const char *io_mode_name(esp_flash_io_mode_t mode)
@@ -165,8 +179,14 @@ static bool table_check(uint32_t chip_size)
         board_flash_os_set_region(BOARD_FLASH_REGION_SETTINGS, BOARD_SETTINGS_OFFSET, BOARD_SETTINGS_SIZE);
         otadata = table_find(table, count, PART_TYPE_DATA, PART_SUBTYPE_DATA_OTA);
         running = table_running(table, count);
+        if (running != NULL) {
+            running_offset = running->pos.offset;
+            running_size = running->pos.size;
+        }
         if (otadata != NULL && running != NULL && otadata_usable(otadata, running, chip_size)) {
             board_flash_os_set_region(BOARD_FLASH_REGION_OTADATA, otadata->pos.offset, otadata->pos.size);
+            otadata_offset = otadata->pos.offset;
+            otadata_size = otadata->pos.size;
         } else {
             ESP_EARLY_LOGE(TAG, "No usable otadata partition in the partition table at 0x%x; "
                            "it stays closed", CONFIG_PARTITION_TABLE_OFFSET);
@@ -191,6 +211,7 @@ ESP_SYSTEM_INIT_FN(board_flash, CORE, BIT(0), 130)
     ESP_EARLY_LOGI(TAG, "ID 0x%06" PRIx32 " (%s), %" PRIu32 " MB, %s", chip->chip_id,
                    chip->chip_drv->name, chip->size >> 20, io_mode_name(chip->read_mode));
 
+    chip_bytes = chip->size;
     settings_found = table_check(chip->size);
     if (!settings_found) {
         ESP_EARLY_LOGE(TAG, "No \"settings\" partition at 0x%x (0x%x bytes) in the partition table "
@@ -262,4 +283,30 @@ int board_flash_erase(uint32_t offset, uint32_t len)
         return -ENODEV;
     }
     return to_errno(esp_flash_erase_region(NULL, offset, len));
+}
+
+/* Whether [a, a + a_size) and [b, b + b_size) share a byte (no sum wraps: both lie inside the chip). */
+static bool overlaps(uint32_t a, uint32_t a_size, uint32_t b, uint32_t b_size)
+{
+    return a < b + b_size && b < a + a_size;
+}
+
+int board_flash_ota_slot_open(uint32_t offset, uint32_t size)
+{
+    if (!settings_found || running_size == 0u) {
+        return -ENODEV;
+    }
+    if (size == 0u || offset % SPI_FLASH_SEC_SIZE != 0u || size % SPI_FLASH_SEC_SIZE != 0u
+        || offset < BOOT_AREA_END || offset > chip_bytes || size > chip_bytes - offset
+        || overlaps(offset, size, running_offset, running_size)
+        || (otadata_size != 0u && overlaps(offset, size, otadata_offset, otadata_size))) {
+        return -EINVAL;
+    }
+    board_flash_os_set_region(BOARD_FLASH_REGION_OTA_SLOT, offset, size);
+    return 0;
+}
+
+void board_flash_ota_slot_close(void)
+{
+    board_flash_os_set_region(BOARD_FLASH_REGION_OTA_SLOT, 0, 0);
 }

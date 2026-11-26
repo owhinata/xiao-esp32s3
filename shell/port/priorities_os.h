@@ -83,6 +83,21 @@
 #define APP_STACK_ZPERF_SERVER  6144
 
 /*
+ * The OTA service's thread "ota_service" (shell/port/ota_service.c), at
+ * the priority of "telnet_service" and the zperf server (Zephyr's 14,
+ * ThreadX 30).  Its deepest path is the end of an update in
+ * port/ota_slots.c: esp_ota_end() and esp_ota_set_boot_partition() each
+ * check the image with esp_image_verify(), about 1.3 KiB of frames down
+ * to its SHA-256 or its flash reads (GCC's call graph; PSA's hash
+ * operation is on the heap), and an ESP_LOGx of the check goes on through
+ * the RAM log's vprintf (0.75 KiB) into newlib's vsnprintf() (about
+ * 1.1 KiB): about 3.2 KiB with an interrupt's frame.  "ps" shows what is
+ * left.
+ */
+#define APP_PRIO_OTA_SERVICE    APP_PRIO_FROM_ZEPHYR(14)
+#define APP_STACK_OTA_SERVICE   4096
+
+/*
  * The time synchronization's thread "time_sync_tid" (shell/common/imu/
  * time_sync.c, the shared default 2048 bytes): a UDP send and receive
  * through the socket layer to lwIP (each lwIP call waits for "tcpip") and

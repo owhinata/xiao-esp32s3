@@ -18,8 +18,9 @@
  * partition table) and a switch that lets the OTA code rewrite the
  * second-stage bootloader and the partition table.  Here
  * port/board_flash_os.c lets a write or erase through only inside the
- * regions port/board_flash.c opens ("settings" and otadata; never the
- * bootloader, the partition table or the running application), so there
+ * regions port/board_flash.c opens ("settings", otadata and, during an
+ * update, the OTA slot that is not running; never the bootloader, the
+ * partition table or the running application), so there
  * is nothing to register and no switch to set: both succeed without doing
  * anything, and a request to rewrite the bootloader or the table is
  * refused there.

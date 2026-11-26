@@ -799,10 +799,12 @@ add_library(esp_idf OBJECT
     "${ESP_HAL}/esp_hw_support/port/esp32s3/esp_cpu_intr.c"
     "${ESP_HAL}/soc/esp32s3/interrupts.c"                       # names in its messages
     "${ESP_HAL}/esp_hw_support/periph_ctrl.c"
-    # eFuse: the chip's package (the PHY's init) and whether flash encryption
-    # is on (the alignment of DMA-capable allocations).
+    # eFuse: the chip's package (the PHY's init), whether flash encryption
+    # is on (the alignment of DMA-capable allocations) and the chip's
+    # revision (the image check of an update, against the image's range).
     "${ESP_HAL}/efuse/src/esp_efuse_fields.c"
     "${ESP_HAL}/hal/efuse_hal.c"
+    "${ESP_HAL}/hal/esp32s3/efuse_hal.c"
     # The PHY: ESP-IDF's esp_phy component and the binary libraries below.
     "${ESP_HAL}/esp_phy/src/phy_init.c"
     "${ESP_HAL}/esp_phy/src/phy_common.c"
@@ -1226,6 +1228,7 @@ add_library(shell OBJECT
     "${SHELL_PORT}/commands.c"
     "${SHELL_PORT}/fault_record.c"
     "${SHELL_PORT}/flash_kv_os.c"
+    "${SHELL_PORT}/ota_service.c"
     "${SHELL_PORT}/ota_shell.c"
     "${SHELL_PORT}/shell_port.c"
     "${SHELL_PORT}/uac_shell.c"
@@ -1349,6 +1352,7 @@ set(ESPPORT "" CACHE STRING
 # default flash baud rate (idf.py, CONFIG_ESPTOOLPY_BAUD); the ROM and the shell
 # are reached at the console's rate first.
 set(ESPBAUD 460800 CACHE STRING "Baud rate of a flash transfer over a USB-serial adapter")
+set(OTA_HOST "" CACHE STRING "The board's IP address for ota-flash (the shell's \"ifconfig\")")
 
 # The two offsets and the console's baud rate are read from sdkconfig.h, which
 # the bootloader is built with.
@@ -1525,3 +1529,18 @@ add_custom_target(app-flash
             ${OTADATA_OFFSET} "${OTADATA_BIN}"
             ${APP_OFFSET} "${APP_BIN}"
     DEPENDS images USES_TERMINAL COMMAND_EXPAND_LISTS VERBATIM)
+
+# ota-flash: the application over Wi-Fi, into the OTA slot that is not
+# running, through the board's OTA service (script/ota.py): written,
+# checked, switched to, restarted and confirmed once the board runs it.
+# Without OTA_HOST the target only says how to set it.
+if(OTA_HOST)
+    add_custom_target(ota-flash
+        COMMAND "${ESP_PYTHON}" -u "${CMAKE_CURRENT_LIST_DIR}/script/ota.py" "${OTA_HOST}" "${APP_BIN}"
+        DEPENDS images USES_TERMINAL VERBATIM)
+else()
+    add_custom_target(ota-flash
+        COMMAND "${CMAKE_COMMAND}" -E echo "ota-flash: configure with -DOTA_HOST=<the board's IP address>"
+        COMMAND "${CMAKE_COMMAND}" -E false
+        USES_TERMINAL VERBATIM)
+endif()
