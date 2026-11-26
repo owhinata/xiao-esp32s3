@@ -314,7 +314,7 @@ The boot chain is ESP-IDF's, without ESP-IDF's application start-up code.
    opens only that partition and otadata for writing), the
    constructors, then `main()`.  The later hooks run where ESP-IDF runs
    them: in `tx_application_define()` (esp_timer's task) and in the first
-   task, "main", which then starts the Wi-Fi driver in station mode
+   thread, "main", which then starts the Wi-Fi driver in station mode
    (ESP-IDF's event loop, `esp_wifi_init()`, `esp_wifi_start()`, which
    calibrates the PHY), then lwIP with the station's network interface
    the Telnet shell, the time synchronization and the iperf3 server's

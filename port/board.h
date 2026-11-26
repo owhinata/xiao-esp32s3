@@ -84,8 +84,10 @@ bool     board_reset_by_int_wdt(void);
  * _start runs the core ones (the heap, esp_timer's counter).  The others:
  *
  *   board_sys_init_secondary()  ESP-IDF's do_secondary_init(): from
- *                               tx_application_define(), once the FreeRTOS
- *                               layer is set up (esp_timer's task and
+ *                               tx_application_define(); it sets up the
+ *                               FreeRTOS layer first (its byte pool and the
+ *                               thread that reaps deleted tasks), which
+ *                               the hooks use (esp_timer's task and
  *                               interrupt)
  *   board_sys_pre_scheduler()   at the end of tx_application_define()
  *   board_sys_pre_app_main()    from the first thread, as ESP-IDF's main

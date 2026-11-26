@@ -8,26 +8,26 @@
  * layer it is written on.  esp_timer runs on ThreadX's FreeRTOS
  * compatibility layer: its task "esp_timer" calls the LED callback, woken
  * by the SYSTIMER alarm interrupt, so the LED rate is a direct check of
- * esp_timer, its interrupt and the FreeRTOS layer.  The FreeRTOS task
- * "main", like ESP-IDF's main task, finishes the start-up from a thread and
- * then ends: ESP-IDF's last start-up hooks, the persistent store in flash
- * (the shell's "kv") with the stored Wi-Fi networks ("wifi cred"), then
- * the Wi-Fi driver and lwIP (port/net/wifi.c, port/net/wlanif.c), then the
+ * esp_timer, its interrupt and the FreeRTOS layer.  The thread "main",
+ * like ESP-IDF's main task, finishes the start-up from a thread and then
+ * ends: ESP-IDF's last start-up hooks, the persistent store in flash (the
+ * shell's "kv") with the stored Wi-Fi networks ("wifi cred"), then the
+ * Wi-Fi driver and lwIP (port/net/wifi.c, port/net/wlanif.c), then the
  * shell on Telnet (port 23), on lwIP's sockets, the OTA service (port
- * 3232) and the network applications: the time synchronization ("ntp"), the iperf3 server of
- * "zperf" and the automatic connection to a stored network.
+ * 3232) and the network applications: the time synchronization ("ntp"),
+ * the iperf3 server of "zperf" and the automatic connection to a stored
+ * network.
  */
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "tx_api.h"
 #include "esp_err.h"
-#include "esp_task.h"
 #include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 #include "app_log.h"
 #include "board.h"
+#include "esp_compat/pthread_local.h"
 #include "fault_record.h"
 #include "flash_kv_os.h"
 #include "kv_store.h"
@@ -71,16 +71,48 @@ static int blink_start(void)
 }
 
 /*
- * ESP-IDF's main task (esp_system's main_task()): the start-up hooks that
- * ESP-IDF runs in it, among them the heap's taking over the stack _start
- * ran on, then what app_main() would do.  Its stack is ESP-IDF's default
- * of 3584 bytes plus room for the RF calibration in libphy (esp_wifi_start()),
- * whose depth is not documented.
+ * The thread "main", ESP-IDF's main task (esp_system's main_task()): the
+ * start-up hooks that ESP-IDF runs in it, among them the heap's taking over
+ * the stack _start ran on, then what app_main() would do.  Its stack is
+ * ESP-IDF's default of 3584 bytes plus room for the RF calibration in libphy
+ * (esp_wifi_start()), whose depth is not documented; its priority is that
+ * of ESP-IDF's main task (FreeRTOS priority 1), with the shell's thread.
+ *
+ * The control block and the stack are one block of the heap, which goes
+ * back once the thread has ended: a thread cannot delete itself, so its
+ * last act is to start a one-shot timer, and the timer's callback, in the
+ * esp_timer task, deletes it.
  */
-#define MAIN_TASK_STACK_SIZE    4096u
+#define MAIN_THREAD_STACK_SIZE  4096u
+#define MAIN_THREAD_PRIORITY    30u
+#define MAIN_THREAD_REAP_US     10000u
 
-static void main_task(void *arg)
+static TX_THREAD *main_thread;      /* the control block, then the stack */
+static esp_timer_handle_t main_thread_reaper;
+
+/*
+ * esp_timer callback.  The thread has returned from main_thread_entry() by
+ * now, or is about to and holds nothing: end it if it has not ended, run
+ * the destructors of its thread-specific data (lwIP's semaphore of the
+ * thread) and free it.
+ */
+static void main_thread_reap(void *arg)
 {
+    (void) arg;
+    (void) tx_thread_terminate(main_thread);
+    esp_compat_pthread_destructors(main_thread);
+    if (tx_thread_delete(main_thread) == TX_SUCCESS) {
+        free(main_thread);
+    }
+    (void) esp_timer_delete(main_thread_reaper);
+}
+
+static void main_thread_entry(ULONG arg)
+{
+    static const esp_timer_create_args_t reaper_args = {
+        .callback = main_thread_reap,
+        .name = "main_reap",
+    };
     int ret;
 
     (void) arg;
@@ -103,17 +135,36 @@ static void main_task(void *arg)
      * Once lwIP runs: the Telnet shell's listening socket and threads, as
      * rp2040-connect starts it after its network interface (a failure is
      * logged and leaves no Telnet), the OTA service (TCP port 3232,
-     * script/ota.py), then the time synchronization, the
-     * iperf3 server's thread and the automatic connection to a stored
-     * network (the Wi-Fi profile), as rp2040-connect's application start
-     * does them last.
+     * script/ota.py), then the time synchronization, the iperf3 server's
+     * thread and the automatic connection to a stored network (the Wi-Fi
+     * profile), as rp2040-connect's application start does them last.
      */
     if (net_wifi_start() == 0) {
         (void) shell_telnet_init(PROMPT);
         (void) ota_service_init();
         (void) zephyr_net_app_start();
     }
-    vTaskDelete(NULL);
+
+    /* Without the timer the thread's memory stays allocated. */
+    if (esp_timer_create(&reaper_args, &main_thread_reaper) != ESP_OK
+        || esp_timer_start_once(main_thread_reaper, MAIN_THREAD_REAP_US) != ESP_OK) {
+        LOG_ERR("The main thread's memory is not freed");
+    }
+}
+
+static int main_thread_start(void)
+{
+    main_thread = malloc(sizeof(*main_thread) + MAIN_THREAD_STACK_SIZE);
+    if (main_thread == NULL) {
+        return -1;
+    }
+    if (tx_thread_create(main_thread, "main", main_thread_entry, 0, main_thread + 1,
+                         MAIN_THREAD_STACK_SIZE, MAIN_THREAD_PRIORITY, MAIN_THREAD_PRIORITY,
+                         TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS) {
+        free(main_thread);
+        return -1;
+    }
+    return 0;
 }
 
 /*
@@ -156,19 +207,16 @@ void tx_application_define(void *first_unused_memory)
     (void) flash_kv_os_initialize();
 
     /*
-     * The FreeRTOS layer (its byte pool and the thread that reaps deleted
-     * tasks), then ESP-IDF's start-up hooks of the stage before its
-     * scheduler (esp_timer's task and interrupt), then the LED and "main".
+     * The FreeRTOS layer and ESP-IDF's start-up hooks of the stage before
+     * its scheduler (esp_timer's task and interrupt), then the LED and
+     * "main".
      */
-    if (tx_freertos_init() != TX_SUCCESS) {
-        printf("The FreeRTOS layer did not start\n");
-    }
     board_sys_init_secondary();
     if (blink_start() != 0) {
         printf("The LED timer did not start\n");
     }
-    if (xTaskCreate(main_task, "main", MAIN_TASK_STACK_SIZE, NULL, ESP_TASK_MAIN_PRIO, NULL) != pdPASS) {
-        printf("The main task did not start\n");
+    if (main_thread_start() != 0) {
+        printf("The main thread did not start\n");
     }
 
     /*

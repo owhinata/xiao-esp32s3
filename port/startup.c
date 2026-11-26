@@ -81,6 +81,7 @@
 #include "xtensa/xtruntime.h"
 
 #include "board.h"
+#include "freertos/FreeRTOS.h"
 
 _Static_assert(BOARD_CPU_FREQ_MHZ == CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
                "board.h and sdkconfig.h name different CPU clocks");
@@ -193,6 +194,11 @@ static void sys_event_run(const esp_sys_event_handler_t *h, const esp_sys_event_
 
 void board_sys_init_secondary(void)
 {
+    /* The hooks create FreeRTOS tasks (esp_timer's). */
+    if (tx_freertos_init() != TX_SUCCESS) {
+        esp_rom_printf("The FreeRTOS layer did not start\n");
+        abort();
+    }
     sys_event_run(_esysev_inits_start, _esysev_inits_end);
 }
 
