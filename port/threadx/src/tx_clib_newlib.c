@@ -34,6 +34,7 @@
 #include <sys/lock.h>
 
 #include "tx_api.h"
+#include "tx_mutex.h"
 #include "tx_thread.h"
 
 #ifndef TX_THREAD_SAFE_CLIB
@@ -91,10 +92,18 @@ static void lock_new(_LOCK_T *lock)
     *lock = l;
 }
 
+/*
+ * The kernel's function, not tx_mutex_delete(): the checked service refuses
+ * every caller but a thread (TX_CALLER_ERROR), and a lock is also closed
+ * during initialization (tx_application_define()).  The mutex would stay in
+ * the kernel's list of mutexes while its memory goes back to the heap, and
+ * the next mutex created or deleted would write into that memory.  The
+ * function itself needs no thread: nothing waits for the mutex then.
+ */
 static void lock_free(_LOCK_T lock)
 {
     if (lock != NULL) {
-        tx_mutex_delete(&lock->mutex);
+        _tx_mutex_delete(&lock->mutex);
         free(lock);
     }
 }
