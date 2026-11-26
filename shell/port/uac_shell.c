@@ -8,8 +8,9 @@
  *                                 its formats (channels, bits, sampling
  *                                 rates) and, while streaming, its volume
  *                                 and mute
- *   uac start [<rate> [<ch>]]     start the stream (default 48000 Hz, 1
- *                                 channel, 16 bits)
+ *   uac start [<rate> [<ch>]]     start the stream, 16 bits (default: 48000
+ *                                 Hz if offered, else 16000, else the highest
+ *                                 up to 48000; one channel if offered)
  *   uac stop                      stop it
  *   uac volume [<0..100>]         the volume (percent of the device's range
  *                                 and dB) and mute, or set the volume; while
@@ -22,6 +23,9 @@
  *                                 (default 1600, at most 16000), read with
  *                                 usbaudio_read_16k() into a buffer first,
  *                                 then printed 16 per line and "END <count>"
+ *   uac hum [50|60|off]           the mains hum filter (notches at the mains
+ *                                 frequency and its harmonics up to 420 Hz),
+ *                                 50 until set
  *   uac stats                     what the stream has delivered: counters,
  *                                 the measured rate against the nominal one
  *
@@ -215,6 +219,12 @@ static int cmd_uac_info(const struct shell *sh, size_t argc, char **argv)
                         info->feature_unit == 0u ? " (no feature unit)" : "");
         }
     }
+    if (info->default_rate != 0u) {
+        shell_print(sh, "default for \"uac start\": %u Hz, %u channel%s", (unsigned int) info->default_rate,
+                    info->default_channels, info->default_channels == 1u ? "" : "s");
+    } else {
+        shell_print(sh, "default for \"uac start\": none (no 16-bit format)");
+    }
     if (!info->streaming) {
         shell_print(sh, "stream: stopped (volume and mute are read while it runs)");
     } else {
@@ -248,11 +258,12 @@ static bool parse_u32(const char *s, uint32_t *out)
 
 static int cmd_uac_start(const struct shell *sh, size_t argc, char **argv)
 {
-    uint32_t rate = 48000;
-    uint32_t channels = 1;
+    uint32_t rate = 0;              /* 0: the microphone's default */
+    uint32_t channels = 0;
+    struct usbaudio_stats st;
     int ret;
 
-    if (argc > 1 && !parse_u32(argv[1], &rate)) {
+    if (argc > 1 && (!parse_u32(argv[1], &rate) || rate == 0u)) {
         shell_error(sh, "Not a sampling rate: %s", argv[1]);
         return -EINVAL;
     }
@@ -262,9 +273,9 @@ static int cmd_uac_start(const struct shell *sh, size_t argc, char **argv)
     }
     ret = usbaudio_stream_start(rate, (uint8_t) channels);
     if (ret == 0) {
-        shell_print(sh, "Streaming: %u Hz, %u channel%s, 16 bits; decimated to %u Hz",
-                    (unsigned int) rate, (unsigned int) channels, channels == 1u ? "" : "s",
-                    (unsigned int) (rate == 16000u ? rate : rate / 3u));
+        (void) usbaudio_stats(&st);
+        shell_print(sh, "Streaming: %u Hz, %u channel%s, 16 bits; %u Hz out", (unsigned int) st.rate,
+                    st.channels, st.channels == 1u ? "" : "s", (unsigned int) st.out_rate);
     }
     return report(sh, ret);
 }
@@ -362,6 +373,45 @@ static int cmd_uac_mute(const struct shell *sh, size_t argc, char **argv)
         return report_control(sh, ret);
     }
     shell_print(sh, "Mute %s", mute ? "on" : "off");
+    return 0;
+}
+
+/* ---- uac hum ------------------------------------------------------------- */
+
+static void print_hum(const struct shell *sh)
+{
+    unsigned int hz = usbaudio_hum_get();
+
+    if (hz == 0u) {
+        shell_print(sh, "hum filter: off");
+    } else {
+        shell_print(sh, "hum filter: %u Hz mains (notches at %u, %u, .. %u Hz)", hz, hz, 2u * hz,
+                    USBAUDIO_HUM_TOP_HZ / hz * hz);
+    }
+}
+
+static int cmd_uac_hum(const struct shell *sh, size_t argc, char **argv)
+{
+    unsigned int hz;
+    int ret;
+
+    if (argc > 1) {
+        if (strcmp(argv[1], "50") == 0) {
+            hz = 50;
+        } else if (strcmp(argv[1], "60") == 0) {
+            hz = 60;
+        } else if (strcmp(argv[1], "off") == 0) {
+            hz = 0;
+        } else {
+            shell_error(sh, "Not 50, 60 or off: %s", argv[1]);
+            return -EINVAL;
+        }
+        ret = usbaudio_hum_set(hz);
+        if (ret != 0) {
+            return report(sh, ret);
+        }
+    }
+    print_hum(sh);
     return 0;
 }
 
@@ -555,10 +605,12 @@ static int cmd_uac_stats(const struct shell *sh, size_t argc, char **argv)
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_uac,
     SHELL_CMD_ARG(dump, NULL, "Print consecutive 16 kHz samples: dump [<samples>] (default 1600)",
                   cmd_uac_dump, 1, 1),
+    SHELL_CMD_ARG(hum, NULL, "Show or set the mains hum filter: hum [50|60|off] (default 50)",
+                  cmd_uac_hum, 1, 1),
     SHELL_CMD(info, NULL, "Show the microphone and its formats", cmd_uac_info),
     SHELL_CMD_ARG(level, NULL, "Show the level in dBFS: level [<seconds>] (default 5)",
                   cmd_uac_level, 1, 1),
-    SHELL_CMD_ARG(start, NULL, "Start the stream: start [<rate> [<channels>]] (default 48000 1)",
+    SHELL_CMD_ARG(start, NULL, "Start the stream: start [<rate> [<channels>]] (default: \"uac info\")",
                   cmd_uac_start, 1, 2),
     SHELL_CMD_ARG(mute, NULL, "Set the mute while streaming: mute on|off", cmd_uac_mute, 2, 0),
     SHELL_CMD(stats, NULL, "Show what the stream has delivered", cmd_uac_stats),

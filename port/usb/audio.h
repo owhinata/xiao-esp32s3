@@ -4,8 +4,9 @@
  * usb_host_uac driver, a UAC 2.0 one through port/usb/audio_uac2.c.  The
  * stream's PCM samples (16 bits, one or two channels) are mixed to one
  * channel, decimated by 3 (to 16 kHz from a 48 kHz stream; a 16 kHz stream
- * is taken as it is), and freed of their DC offset (a 30 Hz high-pass),
- * into a ring that a consumer reads with usbaudio_read_16k().  This
+ * is taken as it is), freed of their DC offset (a 30 Hz high-pass) and of
+ * mains hum (notches at 50 or 60 Hz and its harmonics up to 420 Hz), into
+ * a ring that a consumer reads with usbaudio_read_16k().  This
  * header does not include esp-usb's or ESP-IDF's: its users see only
  * these types.
  *
@@ -84,6 +85,14 @@ struct usbaudio_info {
     int16_t volume_min;
     int16_t volume_max;
     int16_t volume_res;
+    /*
+     * What "start" without a rate or channel count takes: 48000 Hz if
+     * offered, else 16000, else the highest rate offered up to 48000; one
+     * channel if a 16-bit format has one, else the channels of the first
+     * 16-bit one.  0: no 16-bit format.
+     */
+    uint32_t default_rate;
+    uint8_t default_channels;
     bool streaming;
     /* While streaming, from the device (GET_CUR of its feature unit). */
     bool volume_valid;
@@ -97,7 +106,8 @@ int usbaudio_info(struct usbaudio_info *info);
 
 /*
  * Starts the stream at rate Hz with channels channels (1 or 2) of 16
- * bits, on the alternate setting that has them (UAC 2.0: with the clock
+ * bits (0 for either: the microphone's default, default_rate and
+ * default_channels of usbaudio_info), on the alternate setting that has them (UAC 2.0: with the clock
  * set to rate and read back).  0,
  * -ENODEV (no microphone), -EBUSY (streaming), -EINVAL, -ENOTSUP (no
  * alternate setting has them), -EALREADY, -ETIMEDOUT, -EIO.
@@ -135,6 +145,17 @@ int usbaudio_volume_get(struct usbaudio_volume *volume);
  */
 int usbaudio_volume_set(uint8_t percent);
 int usbaudio_mute_set(bool mute);
+
+/*
+ * The mains frequency the hum filter removes, with its harmonics up to
+ * USBAUDIO_HUM_TOP_HZ: 50, 60 or 0 (off); 50 until set.  Kept for the session, in
+ * RAM; a running stream takes it from the next sample on.  0, -EINVAL,
+ * -ETIMEDOUT, -EIO.
+ */
+#define USBAUDIO_HUM_TOP_HZ     420u
+
+int usbaudio_hum_set(unsigned int hz);
+unsigned int usbaudio_hum_get(void);
 
 /* What the stream has delivered since it started; kept after it stops. */
 struct usbaudio_stats {

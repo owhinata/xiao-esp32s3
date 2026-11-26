@@ -33,7 +33,7 @@ UART0.
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
 | Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect`, `wifi status`, `wifi disconnect`, and `wifi cred` for stored networks with automatic connection |
 | USB host | Espressif's USB Host Library (espressif/esp-usb) with external hubs, on the USB OTG controller (full speed) through the internal PHY of the USB-C connector; started by `usb host start`.  While it runs, the USB-C console is off |
-| Audio input | A USB Audio Class microphone on the USB host: UAC 1.0 through Espressif's UAC host driver (esp-usb `usb_host_uac`), UAC 2.0 through `port/usb/audio_uac2.c`.  16-bit PCM, mixed to one channel, decimated by 3 (a 51-tap FIR) from 48 kHz or taken as it is at 16 kHz, and high-passed at 30 Hz to remove the DC offset, for `port/usb/audio.h`; the `uac` command |
+| Audio input | A USB Audio Class microphone on the USB host: UAC 1.0 through Espressif's UAC host driver (esp-usb `usb_host_uac`), UAC 2.0 through `port/usb/audio_uac2.c`.  16-bit PCM, mixed to one channel, decimated by 3 (a 51-tap FIR) from 48 kHz or taken as it is at 16 kHz, high-passed at 30 Hz to remove the DC offset, and freed of mains hum by notches at 50 Hz (or 60 Hz) and its harmonics up to 420 Hz, for `port/usb/audio.h`; the `uac` command |
 | TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23).  `zperf` runs iperf3 TCP tests in both directions, and `ntp` keeps the clock of `date` on the NTP server at the default gateway |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, a 28 KiB `settings` partition at 0x9000, the firmware as the factory application at 0x10000 |
 | Settings | rp2040-connect's key-value store (Zephyr settings on Zephyr NVS) in the `settings` partition, written through ESP-IDF's esp_flash driver; the `kv` command |
@@ -173,12 +173,16 @@ class-specific ones in hexadecimal.  The connector does not supply power:
 
 While the host runs, the first USB Audio Class microphone that connects
 (UAC 1.0 or 2.0) is opened.  `uac info` shows its formats, `uac start [<rate> [<channels>]]`
-starts the stream (default 48000 Hz, one channel, 16 bits; a 16000 Hz
-stream skips the decimation), `uac stop`
+starts the stream (by default at 48000 Hz if the microphone offers it,
+else 16000, else its highest rate up to 48000, and with one channel if it
+has one; `uac info` shows the choice; a 16000 Hz stream skips the
+decimation), `uac stop`
 stops it, `uac level [<seconds>]` prints the peak and RMS level in dBFS
 four times a second, and `uac stats` the counters, the measured sample
 rate, the DC offset of the input and the number of samples at full scale.
 `uac dump [<samples>]` prints consecutive 16 kHz samples as numbers.
+`uac hum [50|60|off]` sets the mains frequency of the hum filter (50 by
+default).
 `uac volume [<0..100>]` shows the microphone's volume (percent of its
 range and dB) and mute, or sets the volume; `uac mute on|off` sets the
 mute.  Both work while the stream runs, and what was set last is set again

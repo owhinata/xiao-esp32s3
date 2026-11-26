@@ -30,8 +30,9 @@
  *                   usbaudio_stop(), and reads the samples: woken when the
  *                   buffer passed a quarter, it drains it without waiting,
  *                   mixes the channels to one, decimates by 3 (not a 16 kHz
- *                   stream), removes the DC (a 30 Hz high-pass), keeps the
- *                   level and the ring of usbaudio_read_16k().
+ *                   stream), removes the DC (a 30 Hz high-pass) and the
+ *                   mains hum (notches), keeps the level and the ring of
+ *                   usbaudio_read_16k().
  *
  * The callbacks run in the clients' tasks and must not block: they only
  * count, note and wake "uac".  Neither client can be called from its own
@@ -51,6 +52,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 #include "tx_api.h"
@@ -109,6 +111,7 @@ enum audio_request {
     REQUEST_VOLUME_GET,
     REQUEST_VOLUME_SET,
     REQUEST_MUTE_SET,
+    REQUEST_HUM_SET,
     REQUEST_QUIT,
 };
 
@@ -118,6 +121,7 @@ struct request_args {
     uint8_t channels;
     uint8_t percent;
     bool mute;
+    uint8_t hum_hz;
     struct usbaudio_info *info;
     struct usbaudio_volume *volume;
 };
@@ -177,6 +181,58 @@ struct dc_block {
     int64_t y;                  /* Q15 */
 };
 
+/*
+ * Mains hum: a cascade of notch filters at the mains frequency and its
+ * harmonics up to HUM_TOP_HZ, at the output rate, after the DC blocker and
+ * before the level and the ring: 50 .. 400 Hz (8) for 50 Hz mains,
+ * 60 .. 420 Hz (7) for 60 Hz.  Those are the lines measured above the
+ * floor with a microphone worn (the hum was most of a silent signal);
+ * above them the lines were weaker, and a voice's harmonics are denser.
+ *
+ * Each one: H(z) = (1 - 2 cos w z^-1 + z^-2) / (1 - 2 r cos w z^-1 + r^2 z^-2),
+ * w = 2 pi f / fs, zeros on the unit circle at f, poles at radius
+ * r = 1 - pi B / fs for a -3 dB width of B Hz.  The n-th harmonic drifts n
+ * times as far as the mains (0.2 Hz), and the notch is about
+ * 20 log10(2 drift / B) dB deep there, so B grows with n where 12 Hz would
+ * leave less than about 15 dB: B = max(12, 2.4 n) Hz, 12 Hz up to the 5th,
+ * 19.2 Hz at the 8th.  A voice harmonic d Hz from a notch loses about
+ * 10 log10(1 + (B / 2d)^2) dB: 1.3 dB at 10 Hz from a 12 Hz notch, 2.8 dB
+ * from the 19.2 Hz one.  The narrowest poles decay with a time constant of
+ * 1 / (pi 12 Hz) = 27 ms.  The coefficients are computed for the output
+ * rate at the stream start or when the setting changes (in the task, with
+ * the FPU: cos()), in Q26.
+ *
+ * Separate biquads rather than one comb filter: a comb (1 - z^-N) would
+ * notch every multiple of the mains up to the Nyquist frequency at one
+ * width, deep in the voice's band, and needs fs / f to be a whole number.
+ *
+ * At such a low w (0.02 rad at 16 kHz) the poles sit near z = 1 and the
+ * feedback amplifies rounding by about 500, so the state is not kept in
+ * 16 bits: the stages pass values with 16 fraction bits in 64 bits (Q16),
+ * the products are rounded, and the rounding noise stays near 0.002 LSB,
+ * far below one output LSB, so no limit cycle reaches the output.  Each
+ * value is limited to +-2^17 LSB, so no sum exceeds 2^62 (inputs up to
+ * 2^17 LSB in Q16 are 2^33, coefficients below 2^27); the output is
+ * rounded and saturated to 16 bits.
+ */
+#define HUM_HARMONICS           8
+#define HUM_TOP_HZ              USBAUDIO_HUM_TOP_HZ
+#define HUM_WIDTH_HZ            12.0
+#define HUM_WIDTH_PER_HARMONIC  2.4
+#define NOTCH_COEF_BITS         26
+#define NOTCH_FRAC_BITS         16
+#define NOTCH_LIMIT             ((int64_t) 1 << (17 + NOTCH_FRAC_BITS))
+
+struct notch {
+    int32_t b1;                 /* -2 cos w, Q26 */
+    int32_t a1;                 /* 2 r cos w */
+    int32_t a2;                 /* r^2 */
+    int64_t x1;                 /* Q16 */
+    int64_t x2;
+    int64_t y1;
+    int64_t y2;
+};
+
 /* Running level of the decimated samples. */
 struct level_acc {
     uint32_t window;            /* samples per window */
@@ -206,6 +262,8 @@ static struct {
     uint8_t want_percent;
     bool want_mute_set;
     bool want_mute;
+    /* The mains frequency of the hum filter, Hz, 0: off; for the session. */
+    uint8_t hum_hz;
     int result;
 
     /* Written by the drivers' callbacks (their tasks), read by "uac". */
@@ -228,6 +286,8 @@ static struct {
     uint8_t carry_len;
     struct decimator dec;
     struct dc_block dc_block;
+    uint8_t notches;                    /* in use */
+    struct notch notch[HUM_HARMONICS];
     int64_t dc_sum;                     /* of the raw (mixed) input samples, this second */
     uint32_t dc_count;
     struct level_acc acc;
@@ -306,6 +366,61 @@ static int16_t dc_block(struct dc_block *f, int16_t x)
     return (int16_t) out;
 }
 
+/* The notches for the mains frequency at the output rate, their state cleared. */
+static void hum_setup(void)
+{
+    uint32_t fs = audio.rate / audio.factor;
+
+    audio.notches = 0;
+    memset(audio.notch, 0, sizeof(audio.notch));
+    if (audio.hum_hz == 0u || fs == 0u) {
+        return;
+    }
+    for (int h = 1; h <= HUM_HARMONICS && (unsigned int) audio.hum_hz * h <= HUM_TOP_HZ; h++) {
+        double f = (double) audio.hum_hz * h;
+        double w = 2.0 * M_PI * f / fs;
+        double c = cos(w);
+        double width = HUM_WIDTH_PER_HARMONIC * h > HUM_WIDTH_HZ ? HUM_WIDTH_PER_HARMONIC * h : HUM_WIDTH_HZ;
+        double rr = 1.0 - M_PI * width / fs;
+        double one = (double) (1 << NOTCH_COEF_BITS);
+        struct notch *n = &audio.notch[audio.notches];
+
+        if (f >= 0.45 * fs) {
+            break;
+        }
+        n->b1 = (int32_t) lround(-2.0 * c * one);
+        n->a1 = (int32_t) lround(2.0 * rr * c * one);
+        n->a2 = (int32_t) lround(rr * rr * one);
+        audio.notches++;
+    }
+}
+
+static int64_t notch_limit(int64_t v)
+{
+    return v > NOTCH_LIMIT ? NOTCH_LIMIT : v < -NOTCH_LIMIT ? -NOTCH_LIMIT : v;
+}
+
+static int16_t hum_filter(int16_t in)
+{
+    int64_t x = (int64_t) in * (1 << NOTCH_FRAC_BITS);
+    int64_t out;
+
+    for (uint8_t i = 0; i < audio.notches; i++) {
+        struct notch *n = &audio.notch[i];
+        int64_t acc = (x + n->x2) * (1 << NOTCH_COEF_BITS) + (int64_t) n->b1 * n->x1
+                      + (int64_t) n->a1 * n->y1 - (int64_t) n->a2 * n->y2;
+        int64_t y = notch_limit((acc + (1 << (NOTCH_COEF_BITS - 1))) >> NOTCH_COEF_BITS);
+
+        n->x2 = n->x1;
+        n->x1 = x;
+        n->y2 = n->y1;
+        n->y1 = y;
+        x = y;
+    }
+    out = (x + (1 << (NOTCH_FRAC_BITS - 1))) >> NOTCH_FRAC_BITS;
+    return (int16_t) (out > INT16_MAX ? INT16_MAX : out < INT16_MIN ? INT16_MIN : out);
+}
+
 /* A decimated sample into the level; a complete window is published (data_lock held). */
 static void level_add(int16_t s)
 {
@@ -371,7 +486,7 @@ static void process(size_t got)
         } else if (!decimate(&audio.dec, (int16_t) s, &out)) {
             continue;
         }
-        out = dc_block(&audio.dc_block, out);
+        out = hum_filter(dc_block(&audio.dc_block, out));
         level_add(out);
         if (audio.ring != NULL) {
             audio.ring[audio.written & RING_MASK] = out;
@@ -563,6 +678,94 @@ static void ascii_of(const wchar_t *s, char *out, size_t size)
     out[n] = '\0';
 }
 
+/* Whether alternate setting a (UAC 1.0) or the clock (UAC 2.0) offers rate. */
+static bool offers(const struct usbaudio_info *info, const struct usbaudio_alt *a, uint32_t rate)
+{
+    if (info->uac_version == 2u) {
+        if (info->clock_range_count == 0u) {
+            return rate == info->clock_rate;
+        }
+        for (uint8_t i = 0; i < info->clock_range_count; i++) {
+            const struct usbaudio_rate_range *r = &info->clock_ranges[i];
+
+            if (rate >= r->min && rate <= r->max && (r->res == 0u || (rate - r->min) % r->res == 0u)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (a->rate_count == 0u) {
+        return rate >= a->rate_min && rate <= a->rate_max;
+    }
+    for (uint8_t i = 0; i < a->rate_count; i++) {
+        if (a->rates[i] == rate) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The highest rate up to limit that alternate setting a or the clock offers, 0: none. */
+static uint32_t highest(const struct usbaudio_info *info, const struct usbaudio_alt *a, uint32_t limit)
+{
+    uint32_t best = 0;
+
+    if (info->uac_version == 2u) {
+        for (uint8_t i = 0; i < info->clock_range_count; i++) {
+            const struct usbaudio_rate_range *r = &info->clock_ranges[i];
+            uint32_t top = r->max < limit ? r->max : limit;
+
+            if (top >= r->min) {
+                top = r->res == 0u ? top : r->min + (top - r->min) / r->res * r->res;
+                best = top > best ? top : best;
+            }
+        }
+        if (info->clock_range_count == 0u && info->clock_rate <= limit) {
+            best = info->clock_rate;
+        }
+        return best;
+    }
+    if (a->rate_count == 0u) {
+        return a->rate_min <= limit ? (a->rate_max < limit ? a->rate_max : limit) : 0u;
+    }
+    for (uint8_t i = 0; i < a->rate_count; i++) {
+        if (a->rates[i] <= limit && a->rates[i] > best) {
+            best = a->rates[i];
+        }
+    }
+    return best;
+}
+
+/* The defaults of "start" for the open microphone (usbaudio_info). */
+static void default_format(struct usbaudio_info *info)
+{
+    const struct usbaudio_alt *pick = NULL;
+
+    info->default_rate = 0;
+    info->default_channels = 0;
+    for (uint8_t i = 0; i < info->alt_count; i++) {
+        const struct usbaudio_alt *a = &info->alts[i];
+
+        if (a->bits != 16u || a->subframe != 2u || a->channels < 1u || a->channels > 2u) {
+            continue;
+        }
+        if (pick == NULL || (a->channels == 1u && pick->channels != 1u)) {
+            pick = a;
+        }
+    }
+    if (pick == NULL) {
+        return;
+    }
+    info->default_channels = pick->channels;
+    if (offers(info, pick, 48000u)) {
+        info->default_rate = 48000u;
+    } else if (offers(info, pick, 16000u)) {
+        info->default_rate = 16000u;
+    } else {
+        info->default_rate = highest(info, pick, 48000u);
+    }
+}
+
 static void interface_open(void)
 {
     uint32_t c = audio.pending;
@@ -591,6 +794,7 @@ static void interface_open(void)
     if (ret == 0) {
         audio.version = 2;
         audio.open_address = addr;
+        default_format(info);
         LOG_INF("microphone: device %u interface %u, %04x:%04x \"%s\", UAC 2.0", addr, info->interface,
                 info->vid, info->pid, info->product);
         return;
@@ -639,6 +843,7 @@ static void interface_open(void)
             info->alt_count++;
         }
     }
+    default_format(info);
     LOG_INF("microphone: device %u interface %u, %04x:%04x \"%s\", %u alternate settings", addr,
             iface, info->vid, info->pid, info->product, info->alt_count);
 }
@@ -889,12 +1094,22 @@ static int mic_stop(void)
 
 static int serve_start(void)
 {
-    uint32_t frame = (uint32_t) audio.arg.channels * 2u;
+    uint32_t frame;
     int ret;
 
     if (audio.version == 0u) {
         return -ENODEV;
     }
+    if (audio.arg.rate == 0u) {
+        audio.arg.rate = audio.info.default_rate;
+    }
+    if (audio.arg.channels == 0u) {
+        audio.arg.channels = audio.info.default_channels;
+    }
+    if (audio.arg.rate == 0u || audio.arg.channels == 0u) {
+        return -ENOTSUP;            /* no 16-bit format */
+    }
+    frame = (uint32_t) audio.arg.channels * 2u;
     if (audio.streaming) {
         return -EBUSY;
     }
@@ -911,6 +1126,7 @@ static int serve_start(void)
     audio.carry_len = 0;
     decimator_reset(&audio.dec);
     memset(&audio.dc_block, 0, sizeof(audio.dc_block));
+    hum_setup();
     audio.dc_sum = 0;
     audio.dc_count = 0;
     memset(&audio.acc, 0, sizeof(audio.acc));
@@ -1080,6 +1296,14 @@ static void audio_task(void *arg)
         case REQUEST_MUTE_SET:
             answer(serve_mute_set());
             break;
+        case REQUEST_HUM_SET:
+            /* From the next sample on, the notches' state cleared. */
+            audio.hum_hz = audio.arg.hum_hz;
+            if (audio.streaming) {
+                hum_setup();
+            }
+            answer(0);
+            break;
         case REQUEST_QUIT:
             ret = serve_quit();
 
@@ -1136,6 +1360,7 @@ static int objects_create(void)
     if (audio.created) {
         return 0;
     }
+    audio.hum_hz = 50;
     if (tx_mutex_create(&audio.request_lock, "uac_req", TX_INHERIT) != TX_SUCCESS) {
         return -ENOMEM;
     }
@@ -1285,6 +1510,34 @@ int usbaudio_mute_set(bool mute)
     const struct request_args args = { .mute = mute };
 
     return request(REQUEST_MUTE_SET, &args);
+}
+
+int usbaudio_hum_set(unsigned int hz)
+{
+    const struct request_args args = { .hum_hz = (uint8_t) hz };
+    int ret;
+
+    if (hz != 0u && hz != 50u && hz != 60u) {
+        return -EINVAL;
+    }
+    ret = objects_create();
+    if (ret != 0) {
+        return ret;
+    }
+    ret = request(REQUEST_HUM_SET, &args);
+    if (ret == -EALREADY) {
+        /* No task: taken at the next stream start. */
+        (void) tx_mutex_get(&audio.request_lock, TX_WAIT_FOREVER);
+        audio.hum_hz = (uint8_t) hz;
+        (void) tx_mutex_put(&audio.request_lock);
+        ret = 0;
+    }
+    return ret;
+}
+
+unsigned int usbaudio_hum_get(void)
+{
+    return audio.created ? audio.hum_hz : 50u;
 }
 
 int usbaudio_stats(struct usbaudio_stats *stats)
