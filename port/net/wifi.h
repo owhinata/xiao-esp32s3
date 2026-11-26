@@ -127,9 +127,11 @@ enum net_wifi_disconn_reason {
  * After a connection is lost without a request the station connects again
  * by itself, for at most WLANIF_ADDRESS_HOLD_MS (120 s) from the loss, and
  * the address stays for that time: a connection that comes back ends with
- * ip_set(), link_up(), connect_result(0) again; else ip_clear() ends the
- * hold, the station stops trying and tells the reconnection policy
- * (struct net_wifi_reconnect_ops, request()).
+ * ip_set(), link_up(), connect_result(0) again (ip_clear() first when
+ * DHCP refuses the old address on the new association, the address that
+ * follows being new); else ip_clear() ends the hold, the station stops
+ * trying and tells the reconnection policy (struct net_wifi_reconnect_ops,
+ * request()).
  * Addresses are 4 bytes in network order.  Called one at a time, from the
  * event loop's task ("sys_evt"), which also runs the requests of
  * net_wifi_connect() and net_wifi_disconnect(): they must not block, and

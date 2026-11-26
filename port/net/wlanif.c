@@ -39,8 +39,11 @@
  * the station is associated again the link goes down and up in one step,
  * which makes DHCP ask for the same address first (lwIP's
  * dhcp_network_changed_link_up(): DHCP's reboot); its answer reports the
- * address again and ends the hold.  When the time is over without that
- * answer, DHCP releases the address, and starts afresh if the station is
+ * address again and ends the hold.  When DHCP refuses the address instead
+ * (a NAK: lwIP clears it and asks for a new one), the address is lost
+ * (WLANIF_LOST_DHCP) and the station stays associated.  When the time is
+ * over without that answer, DHCP releases the address
+ * (WLANIF_LOST_HOLD_*), and starts afresh if the station is
  * associated, else the link goes down until it is.  esp_netif
  * instead clears the address at once (esp_netif_down_api()) and only
  * delays the "lost" event, which ends TCP connections with the link.
@@ -111,6 +114,7 @@ static struct wlanif_ip_event waiting;
 static esp_err_t waiting_err;           /* the first refusal of the event waiting */
 static u32_t waiting_since;             /* sys_now() at that refusal */
 static bool retry_armed;                /* announce_retry() is due */
+static uint8_t lost_cause = WLANIF_LOST_DHCP;  /* of a LOST_IP from now on (hold_expired()) */
 
 /* A received frame: lwIP's pbuf on the driver's buffer. */
 struct wlanif_rx_pbuf {
@@ -272,6 +276,7 @@ static void announce_set(int32_t id, const esp_netif_ip_info_t *info, bool chang
     waiting.ip.ip_info = *info;
     waiting.ip.ip_changed = changed;
     waiting.session = session;
+    waiting.lost = lost_cause;
     announce();
 }
 
@@ -321,14 +326,16 @@ static void netif_changed(struct netif *netif, netif_nsc_reason_t reason,
 /*
  * The address hold is over (sys_timeout(), tcpip thread): no address was
  * confirmed since the link went down.  DHCP gives it up, and starts again
- * if a link is there by now.
+ * if a link is there by now; the LOST_IP of the release says which.
  */
 static void hold_expired(void *arg)
 {
     (void) arg;
     hold_pending = false;
     if (dhcp_running) {
+        lost_cause = associated ? WLANIF_LOST_HOLD_LINKED : WLANIF_LOST_HOLD_UNLINKED;
         dhcp_release_and_stop(&sta_netif);
+        lost_cause = WLANIF_LOST_DHCP;
         dhcp_running = false;
         if (associated) {
             if (dhcp_start(&sta_netif) != ERR_OK) {

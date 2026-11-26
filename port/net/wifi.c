@@ -35,8 +35,10 @@
  *     same network every RETRY_DELAY_US (retry timer), 30 s for each after
  *     its association.
  *   RECONNECTING --address--> CONNECTED, connect_result(0); --the address
- *     hold ends (WLANIF_ADDRESS_HOLD_MS after the loss)--> IDLE: ip_clear(),
- *     then the reconnection policy's request().
+ *     hold ends without an access point (WLANIF_ADDRESS_HOLD_MS after the
+ *     loss)--> IDLE: ip_clear(), then the reconnection policy's request().
+ *     DHCP dropping the address on a new association (a NAK) only clears
+ *     it (ip_clear()): the attempt goes on, to a new address.
  *   any --net_wifi_disconnect()--> IDLE.
  *
  * What belongs to an earlier attempt is told apart: the interface's events
@@ -474,11 +476,21 @@ static void retry_stop(void)
 }
 
 /*
- * The address hold is over without a connection: the attempts end, and
- * one in progress is stopped; the policy decides what comes next.
+ * The address hold is over without a connection: the address goes, the
+ * attempts end, and one in progress is stopped; the policy decides what
+ * comes next.
  */
 static void retry_give_up(void)
 {
+    if (have_address) {
+        LOG_INF("%u.%u.%u.%u dropped: no connection for %lu s, %u attempts failed; "
+                "reconnection stopped", address[0], address[1], address[2], address[3],
+                ms_since(lost_at) / 1000u, retries);
+    } else {
+        LOG_INF("no connection for %lu s, %u attempts failed; reconnection stopped",
+                ms_since(lost_at) / 1000u, retries);
+    }
+    address_clear();
     retry_stop();
     go_idle();
     driver_leave();
@@ -487,10 +499,16 @@ static void retry_give_up(void)
     }
 }
 
-/* The retry timer: the next attempt, unless a scan runs (then later). */
+/*
+ * The retry timer: the next attempt, unless a scan runs (then later).  With
+ * the address gone (DHCP dropped it after the loss) nothing ends the hold
+ * in the interface, so the attempts end here once WLANIF_ADDRESS_HOLD_MS
+ * have passed since the loss.
+ */
 static void retry_due(void)
 {
     bool busy;
+    bool linked;
     esp_err_t err;
 
     if (!timer_due(&retry_deadline)) {
@@ -498,8 +516,14 @@ static void retry_due(void)
     }
     lock_take();
     busy = scanning;
+    linked = associated;
     lock_give();
     if (conn_get() != CONN_RECONNECTING) {
+        return;
+    }
+    if (!have_address && !linked
+        && esp_timer_get_time() - lost_at >= (int64_t) WLANIF_ADDRESS_HOLD_MS * 1000) {
+        retry_give_up();
         return;
     }
     if (busy) {
@@ -816,22 +840,42 @@ static void got_ip(const struct wlanif_ip_event *event)
     }
 }
 
+/*
+ * The address is gone.  The interface says why (enum wlanif_lost): only the
+ * end of the address hold without an access point, then and now, ends the
+ * attempts after a loss (RECONNECTING).  Otherwise DHCP has let the address go (a NAK, also
+ * to the reboot on a new association, or the lease's expiry) or asks afresh
+ * after the hold: the station stays associated (or keeps trying), DHCP
+ * runs, the interface's owner drops the address as for a new one, and the
+ * next address ends the attempt (got_ip()), or the lease timer does.  In
+ * CONNECTED the link goes down until DHCP gives an address again; in
+ * CONNECTING and IDLE there is no address.
+ */
 static void lost_ip(const struct wlanif_ip_event *event)
 {
-    enum conn_state c = conn_get();
+    enum conn_state c;
+    bool linked;
 
+    lock_take();
+    c = conn;
+    linked = associated;
+    lock_give();
     if (session == 0u || event->session != session || !have_address) {
         return;
     }
-    if (c == CONN_RECONNECTING) {
-        LOG_INF("%u.%u.%u.%u dropped: no connection for %u s, %u attempts failed; "
-                "reconnection stopped", address[0], address[1], address[2], address[3],
-                (unsigned int) (WLANIF_ADDRESS_HOLD_MS / 1000u), retries);
-        address_clear();
+    /* Associated again by now: the new link's DHCP starts (wlanif_link_up() comes after). */
+    if (c == CONN_RECONNECTING && event->lost == WLANIF_LOST_HOLD_UNLINKED && !linked) {
         retry_give_up();
         return;
     }
-    LOG_INF("%u.%u.%u.%u dropped by DHCP", address[0], address[1], address[2], address[3]);
+    if (event->lost == WLANIF_LOST_DHCP) {
+        LOG_INF("%u.%u.%u.%u dropped by DHCP%s", address[0], address[1], address[2],
+                address[3], c == CONN_RECONNECTING ? ", asking for a new one" : "");
+    } else {
+        LOG_INF("%u.%u.%u.%u dropped: not confirmed by DHCP in %u s, asking for a new one",
+                address[0], address[1], address[2], address[3],
+                (unsigned int) (WLANIF_ADDRESS_HOLD_MS / 1000u));
+    }
     if (c == CONN_CONNECTED) {
         ops->link_down();
     }

@@ -30,6 +30,15 @@
 struct wlanif_ip_event {
     ip_event_got_ip_t ip;
     uint32_t session;
+    uint8_t lost;               /* IP_EVENT_STA_LOST_IP: enum wlanif_lost */
+};
+
+/* Why the address went (IP_EVENT_STA_LOST_IP). */
+enum wlanif_lost {
+    WLANIF_LOST_DHCP,           /* DHCP gave it up: refused (NAK) or the lease expired */
+    WLANIF_LOST_HOLD_LINKED,    /* the address hold ended, associated but not confirmed;
+                                   DHCP asks for an address afresh */
+    WLANIF_LOST_HOLD_UNLINKED,  /* the address hold ended without an access point */
 };
 
 /*
