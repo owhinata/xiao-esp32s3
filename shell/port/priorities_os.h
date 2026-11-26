@@ -105,4 +105,37 @@
 #define APP_STACK_USB_HOST      4096
 #define APP_STACK_USB_CLIENT    4096
 
+/*
+ * The USB audio input's FreeRTOS tasks (port/usb/audio.c), above lwIP's
+ * "tcpip" (ThreadX 13, which can run for many milliseconds on end while
+ * TCP data flows, as under "zperf") and the network event thread
+ * "net_mgmt" (15), and below the Wi-Fi driver's task (8) and esp_timer's
+ * (9), whose bursts are short and which have deadlines of their own.
+ *
+ * "USB UAC Host", the UAC driver's event task, ThreadX 10 (FreeRTOS 21,
+ * Zephyr -6), above "sys_evt" (11) too: an isochronous IN transfer that
+ * completes is copied to the driver's buffer and resubmitted in it, which
+ * has to happen before the two other transfers in flight are done (6 ms;
+ * the packets of a missed frame are lost, isochronous transfers have no
+ * retry).  Its work is a copy of about 300 bytes and a resubmission every
+ * 3 ms, so it takes little from the threads below it.  The USB Host
+ * Library's own tasks (APP_PRIO_USB_HOST) are not on that path: a
+ * transfer's completion goes from the controller's interrupt to the
+ * client's task.  They serve the enumeration and the control transfers,
+ * which may wait.
+ *
+ * "uac", which reads the samples from the driver's buffer, decimates them
+ * and serves the requests, ThreadX 12 (FreeRTOS 19, Zephyr -4), below
+ * "sys_evt" and above "tcpip": the driver's buffer holds 40 to 80 ms
+ * (port/usb/audio.c), and an RX_DONE wakes it every 10 to 20 ms.
+ *
+ * 4096 bytes each, as in esp-usb's UAC examples; both log with newlib's
+ * vsnprintf(), "uac" also through the driver's calls (ESP_LOGx).  "ps"
+ * shows what is left.
+ */
+#define APP_PRIO_UAC_DRIVER     APP_PRIO_FROM_ZEPHYR(-6)
+#define APP_STACK_UAC_DRIVER    4096
+#define APP_PRIO_UAC_READER     APP_PRIO_FROM_ZEPHYR(-4)
+#define APP_STACK_UAC_READER    4096
+
 #endif /* PRIORITIES_OS_H */

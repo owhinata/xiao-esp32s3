@@ -19,8 +19,9 @@
  * Takes the internal USB PHY from the USB Serial/JTAG controller (the
  * console on USB-C goes silent, port/board.c: console_usb_detach()), gives
  * it to USB OTG in host mode and starts the library with the root port
- * powered, its event task "usb_host" and the client task "usb_client",
- * which logs devices as they come and go.  0, -EALREADY when it runs,
+ * powered, its event task "usb_host", the USB audio input (port/usb/
+ * audio.h: usbaudio_start()) and the client task "usb_client", which logs
+ * devices as they come and go.  0, -EALREADY when it runs,
  * -ENOMEM, -EIO when the library or its client did not start (logged;
  * the PHY is back with USB Serial/JTAG then), -ETIMEDOUT when a task did
  * not answer (the host is then left as it is, and every later call
@@ -29,8 +30,9 @@
 int usbhost_start(void);
 
 /*
- * Ends what usbhost_start() started, in the library's order: the client
- * deregisters, every device is freed, the library is uninstalled (root
+ * Ends what usbhost_start() started, in the library's order: the audio
+ * input stops (usbaudio_stop(); when it fails, the host stays as it is and
+ * its error is returned), the client deregisters, every device is freed, the library is uninstalled (root
  * port off, PHY deleted), the PHY goes back to USB Serial/JTAG and the
  * console's USB transport with it.  0, -EALREADY when it does not run,
  * -ETIMEDOUT (see above), -EIO.

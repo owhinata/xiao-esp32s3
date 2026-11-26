@@ -33,6 +33,7 @@ UART0.
 | Log | ESP-IDF's log (`ESP_LOGx`) goes into the RAM log that `dmesg` shows |
 | Radio | Espressif's Wi-Fi driver (esp_wifi with the binary Wi-Fi and PHY libraries, wpa_supplicant, mbedTLS) in station mode: `wifi scan`, `wifi connect`, `wifi status`, `wifi disconnect`, and `wifi cred` for stored networks with automatic connection |
 | USB host | Espressif's USB Host Library (espressif/esp-usb) with external hubs, on the USB OTG controller (full speed) through the internal PHY of the USB-C connector; started by `usb host start`.  While it runs, the USB-C console is off |
+| Audio input | A USB Audio Class 1.0 microphone through Espressif's UAC host driver (esp-usb `usb_host_uac`) on the USB host: 16-bit PCM, mixed to one channel, decimated by 3 (a 51-tap FIR) to 16 kHz and high-passed at 30 Hz to remove the DC offset, for `port/usb/audio.h`; the `uac` command |
 | TCP/IP | lwIP (Espressif's fork with ESP-IDF's port) on the Wi-Fi station: IPv4, DHCP.  rp2040-connect's socket layer (Zephyr's BSD socket API) runs on it, and the shell is also on Telnet (port 23).  `zperf` runs iperf3 TCP tests in both directions, and `ntp` keeps the clock of `date` on the NTP server at the default gateway |
 | Flash | ESP-IDF's layout: second-stage bootloader at 0x0, partition table at 0x8000, a 28 KiB `settings` partition at 0x9000, the firmware as the factory application at 0x10000 |
 | Settings | rp2040-connect's key-value store (Zephyr settings on Zephyr NVS) in the `settings` partition, written through ESP-IDF's esp_flash driver; the `kv` command |
@@ -121,6 +122,7 @@ Available commands:
   ps       : List the tasks
   reboot   : Restart the board
   sleep    : Sleep for <ms> milliseconds (Zephyr's kernel sleep)
+  uac      : USB audio input (UAC 1.0 microphone)
   uptime   : Show the time since the start (SYSTIMER) and the ticks
   usb      : USB host
   version  : Show the versions of the kernel, HAL and compiler
@@ -168,6 +170,17 @@ a full-speed USB host port: the console on that connector stops, and
 devices, and `usb desc <address>` a device's descriptors, the
 class-specific ones in hexadecimal.  The connector does not supply power:
 5 V on the board's 5V pin feeds the board and the device.
+
+While the host runs, the first USB Audio Class 1.0 microphone that connects
+is opened.  `uac info` shows its formats, `uac start [<rate> [<channels>]]`
+starts the stream (default 48000 Hz, one channel, 16 bits), `uac stop`
+stops it, `uac level [<seconds>]` prints the peak and RMS level in dBFS
+four times a second, and `uac stats` the counters, the measured sample
+rate, the DC offset of the input and the number of samples at full scale.
+`uac volume [<0..100>]` shows the microphone's volume (percent of its
+range and dB) and mute, or sets the volume; `uac mute on|off` sets the
+mute.  Both work while the stream runs, and what was set last is set again
+at every stream start until the next reboot.
 
 The orange LED toggles every 0.5 s.  The banner is printed at boot; a terminal
 opened later gets a prompt on Enter.  Output goes to both transports and input
@@ -303,7 +316,8 @@ shell/port/     this board's part of the shell
 lib/            upstream sources, fetched by CMake; read-only, not tracked
 port/           board and start-up code, and port/esp_compat: what the
                 Espressif sources expect from parts of ESP-IDF that are not built
-port/usb/       USB host: start, stop, the list of devices
+port/usb/       USB host: start, stop, the list of devices; the USB audio
+                input (audio.c)
 port/threadx/   ThreadX architecture port, and its FreeRTOS compatibility layer
                 (freertos/)
 src/            application

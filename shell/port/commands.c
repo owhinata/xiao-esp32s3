@@ -358,8 +358,9 @@ SHELL_CMD_REGISTER(ps, NULL, "List the tasks", cmd_ps);
  * flash of shell/port/flash_kv_os.c), "ntp" (shell/common/imu/time_sync.c,
  * which sets the realtime clock of "date"), "zperf"
  * (shell/common/compat/zephyr_zperf_shell.c, on the iperf3 of
- * shell/common/compat/zperf_iperf3.c) and "usb" (shell/port/usb_shell.c,
- * on the USB host of port/usb/host.h).
+ * shell/common/compat/zperf_iperf3.c), "usb" (shell/port/usb_shell.c,
+ * on the USB host of port/usb/host.h) and "uac" (shell/port/uac_shell.c,
+ * on the USB audio input of port/usb/audio.h).
  */
 SHELL_ENGINE_CMD_DECLARE(bootsel);
 SHELL_ENGINE_CMD_DECLARE(date);
@@ -373,6 +374,7 @@ SHELL_ENGINE_CMD_DECLARE(kv);
 SHELL_ENGINE_CMD_DECLARE(ntp);
 SHELL_ENGINE_CMD_DECLARE(reboot);
 SHELL_ENGINE_CMD_DECLARE(sleep);
+SHELL_ENGINE_CMD_DECLARE(uac);
 SHELL_ENGINE_CMD_DECLARE(uptime);
 SHELL_ENGINE_CMD_DECLARE(usb);
 SHELL_ENGINE_CMD_DECLARE(wifi);
@@ -394,6 +396,7 @@ const struct shell_engine_cmd shell_engine_cmds[] = {
     SHELL_ENGINE_CMD(ps),
     SHELL_ENGINE_CMD(reboot),
     SHELL_ENGINE_CMD(sleep),
+    SHELL_ENGINE_CMD(uac),
     SHELL_ENGINE_CMD(uptime),
     SHELL_ENGINE_CMD(usb),
     SHELL_ENGINE_CMD(version),

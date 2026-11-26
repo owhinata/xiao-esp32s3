@@ -21,6 +21,12 @@
  *                 client's API is made from the client's own task.  It
  *                 opens a device only for the time of such a request.
  *
+ * The USB audio input (port/usb/audio.c) is the library's second client,
+ * esp-usb's UAC driver with tasks of its own: usbhost_start() starts it
+ * right after the library, before the client above, and usbhost_stop()
+ * ends it first, so that its device is closed before every device is
+ * freed.
+ *
  * Both are FreeRTOS tasks because the library waits for the controller in
  * the caller's task with task notifications (hcd_dwc.c), which exist only
  * for the FreeRTOS layer's tasks.  The caller (the shell's thread) waits
@@ -52,6 +58,7 @@
 #include "app_log.h"
 #include "board.h"
 #include "priorities.h"
+#include "usb/audio.h"
 #include "usb/host.h"
 
 LOG_MODULE_REGISTER(usbhost, LOG_LEVEL_INF);
@@ -536,6 +543,22 @@ int usbhost_start(void)
     }
     host.state = HOST_RUNNING;
 
+    /*
+     * The audio driver's client registers before any device enumerates
+     * (the debounce alone is CONFIG_USB_HOST_DEBOUNCE_DELAY_MS): a client
+     * learns only of the devices that come after it.
+     */
+    ret = usbaudio_start();
+    if (ret == -ETIMEDOUT) {
+        host.state = HOST_BROKEN;
+        return ret;
+    }
+    if (ret != 0) {
+        int stopped = stop_tasks();
+
+        return stopped != 0 ? stopped : ret;
+    }
+
     if (xTaskCreate(client_task, "usb_client", APP_STACK_USB_CLIENT, NULL, APP_PRIO_USB_HOST, NULL)
         != pdPASS) {
         ret = -ENOMEM;
@@ -549,8 +572,14 @@ int usbhost_start(void)
         }
     }
     if (ret != 0) {
-        /* The library without its client: uninstalled again. */
-        int stopped = stop_tasks();
+        /* The library without its client: uninstalled again, the audio driver first. */
+        int stopped = usbaudio_stop();
+
+        if (stopped == -ETIMEDOUT) {
+            host.state = HOST_BROKEN;
+            return stopped;
+        }
+        stopped = stopped != 0 ? stopped : stop_tasks();
 
         return stopped != 0 ? stopped : ret;
     }
@@ -563,6 +592,16 @@ int usbhost_stop(void)
     int ret = ready();
 
     if (ret != 0) {
+        return ret;
+    }
+    /* The audio driver first: its client closes its device and deregisters. */
+    ret = usbaudio_stop();
+    if (ret == -ETIMEDOUT) {
+        host.state = HOST_BROKEN;
+        return ret;
+    }
+    if (ret != 0 && ret != -EALREADY) {
+        /* The driver stays installed, the host running. */
         return ret;
     }
     ret = stop_tasks();

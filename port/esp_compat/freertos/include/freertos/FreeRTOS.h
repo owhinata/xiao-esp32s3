@@ -161,6 +161,23 @@ TaskHandle_t xTaskCreateStaticPinnedToCore(TaskFunction_t pxTaskCode,
  */
 size_t esp_compat_freertos_pool_free(void);
 
+/* ---- Lists -------------------------------------------------------------- */
+
+/*
+ * Stock FreeRTOS's opaque list type, as its FreeRTOS.h defines it.  Only
+ * ESP-IDF's freertos/ringbuf.h names it, in StaticRingbuffer_t, the buffer
+ * of the static ring buffers, which port/esp_compat/freertos/ringbuf.c does
+ * not implement.
+ */
+typedef struct xSTATIC_LIST {
+    UBaseType_t uxDummy1;
+    void *pvDummy2;
+    struct {
+        TickType_t xDummy2;
+        void *pvDummy3[2];
+    } xDummy3;
+} StaticList_t;
+
 /* ---- Queues ------------------------------------------------------------- */
 
 #define queueSEND_TO_BACK               ((BaseType_t) 0)

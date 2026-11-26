@@ -45,7 +45,8 @@ fetch_upstream(esp-idf
     components/esp_partition/include
     components/esp_netif/include
     components/lwip/include
-    components/lwip/port)
+    components/lwip/port
+    components/esp_ringbuf/include)
 # Git submodules of ESP-IDF that the mirror records only as commits (empty
 # directories), fetched at those commits: the TLSF allocator of the heap
 # component, and the PHY and Wi-Fi binary libraries (this chip's directory).
@@ -87,14 +88,17 @@ fetch_upstream(mbedtls
 # The USB Host Library, which ESP-IDF no longer carries: espressif/esp-usb
 # (host/usb, the component "espressif/usb"), at the commit of its release
 # 1.6.1, the last one before the ESP-IDF commit above (ESP-IDF's USB host
-# examples ask for ^1.3.0).  Its sources and headers only.
+# examples ask for ^1.3.0).  Its sources and headers only, and the USB
+# Audio Class driver (host/class/uac/usb_host_uac, its version 1.5.0 with
+# one fix after it), a directory because its sources are at its top.
 fetch_upstream(esp-usb
     https://github.com/espressif/esp-usb
     9abfde7ac1723335430474f378976da2d1f68c01
     SPARSE
     host/usb/include
     host/usb/private_include
-    host/usb/src)
+    host/usb/src
+    host/class/uac/usb_host_uac)
 
 set(ESP_HAL  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-hal-3rdparty/components")
 set(ESP_IDF  "${CMAKE_CURRENT_LIST_DIR}/lib/esp-idf/components")
@@ -263,10 +267,14 @@ target_link_libraries(threadx PUBLIC xtensa_rtos)
 # must not (see freertos/FreeRTOS.h), and it does not link it.
 add_library(freertos STATIC
     "${PORT_DIR}/threadx/freertos/tx_freertos.c"
-    "${PORT_DIR}/esp_compat/freertos/freertos_idf.c")
+    "${PORT_DIR}/esp_compat/freertos/freertos_idf.c"
+    "${PORT_DIR}/esp_compat/freertos/ringbuf.c")
+# ESP-IDF's ring buffer header (esp_ringbuf), unmodified, for the byte
+# buffers of port/esp_compat/freertos/ringbuf.c (usb_host_uac).
 target_include_directories(freertos PUBLIC
     "${PORT_DIR}/esp_compat/freertos/include"
-    "${PORT_DIR}/threadx/freertos")
+    "${PORT_DIR}/threadx/freertos"
+    "${ESP_IDF}/esp_ringbuf/include")
 target_link_libraries(freertos PUBLIC threadx esp_hal)
 
 # ---------------------------------------------------------------------------
@@ -288,6 +296,7 @@ add_executable(app
     "${PORT_DIR}/net/wifi.c"
     "${PORT_DIR}/net/wlanif.c"
     "${PORT_DIR}/net/lwip_bridge.c"
+    "${PORT_DIR}/usb/audio.c"
     "${PORT_DIR}/usb/host.c"
     "${PORT_DIR}/esp_compat/esp_sleep.c"
     "${PORT_DIR}/esp_compat/flash_mmap.c"
@@ -691,6 +700,29 @@ target_include_directories(usb_host PRIVATE
 target_link_libraries(usb_host PRIVATE freertos esp_hal)
 target_compile_options(usb_host PRIVATE -UNDEBUG)
 
+# The USB Audio Class 1.0 host driver (lib/esp-usb, host/class/uac/
+# usb_host_uac), as its CMakeLists.txt builds it: a client of the library
+# above, with ESP-IDF's ring buffer API (port/esp_compat/freertos/
+# ringbuf.c).  Its version macros come from its idf_component.yml there
+# (cmake_utilities' cu_pkg_define_version()); here they are given.
+set(ESP_UAC_DIR "${CMAKE_CURRENT_LIST_DIR}/lib/esp-usb/host/class/uac/usb_host_uac")
+add_library(usb_host_uac STATIC
+    "${ESP_UAC_DIR}/uac_host.c"
+    "${ESP_UAC_DIR}/uac_descriptors.c")
+target_include_directories(usb_host_uac PUBLIC "${ESP_UAC_DIR}/include")
+target_link_libraries(usb_host_uac PUBLIC usb_host PRIVATE freertos esp_hal)
+# Its volume control rounds with roundf() (newlib's libm), in the task of
+# the caller (port/usb/audio.c: "uac"), with the FPU.
+target_link_libraries(usb_host_uac PRIVATE m)
+target_compile_definitions(usb_host_uac PRIVATE
+    USB_HOST_UAC_VER_MAJOR=1 USB_HOST_UAC_VER_MINOR=5 USB_HOST_UAC_VER_PATCH=0)
+target_compile_options(usb_host_uac PRIVATE -UNDEBUG)
+# ESP-IDF's UBaseType_t is unsigned int, the FreeRTOS layer's unsigned long:
+# uac_host.c passes a size_t * for vRingbufferGetInfo()'s UBaseType_t *
+# uxItemsWaiting.  Both are 32 bits; only the C types differ.
+set_source_files_properties("${ESP_UAC_DIR}/uac_host.c"
+    PROPERTIES COMPILE_OPTIONS "-Wno-incompatible-pointer-types")
+
 # ---------------------------------------------------------------------------
 # Espressif sources this image needs, compiled as they are
 # ---------------------------------------------------------------------------
@@ -993,7 +1025,7 @@ set_source_files_properties("${PORT_DIR}/board_flash.c"
     PROPERTIES INCLUDE_DIRECTORIES "${ESP_HAL}/bootloader_support/include")
 # xtensa_rtos is an object library: the vectors are reached only through the
 # linker script and VECBASE, so nothing would pull them out of an archive.
-target_link_libraries(app PRIVATE esp_wifi_headers shell esp_idf ${ESP_WIFI_GROUP} lwip usb_host
+target_link_libraries(app PRIVATE esp_wifi_headers shell esp_idf ${ESP_WIFI_GROUP} lwip usb_host usb_host_uac
                       freertos threadx xtensa_rtos esp_hal)
 add_dependencies(app wpa_supplicant mbedtls)
 # The sources that include lwIP's headers see them (and esp_libc's
@@ -1136,6 +1168,7 @@ add_library(shell OBJECT
     "${SHELL_PORT}/fault_record.c"
     "${SHELL_PORT}/flash_kv_os.c"
     "${SHELL_PORT}/shell_port.c"
+    "${SHELL_PORT}/uac_shell.c"
     "${SHELL_PORT}/usb_shell.c"
     "${SHELL_PORT}/zephyr_net_socket.c"
     "${SHELL_PORT}/zephyr_net_wifi.c"

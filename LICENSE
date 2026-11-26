@@ -58,7 +58,8 @@ and contributors) with ESP-IDF's port of it (Apache-2.0, and the
 fork of Mbed TLS with TF-PSA-Crypto (espressif/mbedtls: Apache-2.0 OR
 GPL-2.0-or-later, at the user's choice; this firmware uses it under the
 Apache License, Version 2.0, Copyright The Mbed TLS Contributors), and
-Espressif's USB Host Library (espressif/esp-usb, Apache-2.0).
+Espressif's USB Host Library and its USB Audio Class driver
+(espressif/esp-usb, Apache-2.0).
 
 
                                  Apache License

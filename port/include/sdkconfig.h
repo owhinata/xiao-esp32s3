@@ -364,6 +364,24 @@
 #define CONFIG_USB_HOST_HUBS_SUPPORTED          1
 #define CONFIG_USB_HOST_EXT_PORT_RESET_RECOVERY_DELAY_MS 30
 
+/* ---- USB Host UAC driver (esp-usb host/class/uac/usb_host_uac, its Kconfig) */
+
+/*
+ * The defaults of its Kconfig: three isochronous transfers in flight of
+ * three packets (1 ms each at full speed) each, up to four discrete
+ * sampling rates kept per alternate setting, six device addresses looked
+ * through by uac_host_device_open_with_vid_pid(), 50 ms for a reader to
+ * leave the ring buffer before uac_host_device_close() deletes it.  The
+ * configuration descriptor is not printed when a device connects
+ * (CONFIG_UAC_PRINTF_CONFIGURATION_DESCRIPTOR off, so not defined).  No
+ * name here is one that the shell's Zephyr-compat layer uses.
+ */
+#define CONFIG_UAC_DEV_ADDR_LIST_MAX            6
+#define CONFIG_UAC_FREQ_NUM_MAX                 4
+#define CONFIG_UAC_NUM_ISOC_URBS                3
+#define CONFIG_UAC_NUM_PACKETS_PER_URB          3
+#define CONFIG_UAC_RINGBUF_SAFE_DELETE_WAITING_MS 50
+
 /* ---- lwIP (esp-lwip with ESP-IDF's port, lwipopts.h) ------------------- */
 
 /*
