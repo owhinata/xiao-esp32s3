@@ -35,12 +35,18 @@ leave the mains hum below their lower edge out. The recorded M4 configuration, i
 | `analysis/make_features_np_consts.py` | `MEL_SPECS` holds the lower edge; it also builds and checks the two variant matrices |
 | `analysis/test_features_np.py` | `ref_mel` takes the lower edge; `MelTest.test_variant_sets` |
 | `analysis/test_m4_infer.py` | `DetectorTest.test_variant_sets_use_their_mel_matrix` |
+| `analysis/features_v2.py` (front-end) | `CNN_INPUT_SETS` (`CNN_SETS` and the front-end sets of `mains_spike.py`), `cnn_signal`; `extract_mfe` and `mfe_windows` run a front-end set's front-end over the whole signal first |
+| `analysis/compare.py` (front-end) | `_extract_fn` reads any of `CNN_INPUT_SETS` |
+| `analysis/m4_infer.py` (front-end) | `FRONT_SETS`; `parse_config` accepts them for `classifier=cnn`; `Detector` still takes `CNN_SETS` only |
+| `analysis/test_m4_variant.py` (recordings) | `ExtraTest`, `VariantExtraRunTest`; more argument refusals in `test_main_refuses_before_reading` |
 
 ## Added
 
 | File | What |
 |---|---|
-| `analysis/m4_variant.py` | The experimental entry point: the C4 x P2 cross-validation (`--cv`) and the final model (`--final-model`) of a variant with the otherwise identical 0038 configuration on the training side only, and the hum sensitivity check (`--hum`); `--allow-dirty` |
+| `analysis/m4_variant.py` | The experimental entry point: the C4 x P2 cross-validation (`--cv`) and the final model (`--final-model`) of a variant with the otherwise identical 0038 configuration on the training side only, and the hum sensitivity check (`--hum`); `--allow-dirty`; AudioStudio recordings as extra training data (`--extra`, `--extra-weight`) and as scored recordings (`--test`, `--models`) |
+| `analysis/studio.py`, `analysis/test_studio.py` | AudioStudio recordings (16 kHz WAV + marks) as sessions, labels by the application's reading of the marks; tests |
+| `analysis/mains_spike.py`, `analysis/test_mains_spike.py` | the front-end of the set `mfe40ms` (mains-synchronous burst limiter); tests on synthetic signals |
 | `analysis/test_m4_variant.py` | its tests (synthetic data) |
 | `analysis/mel40_htk_200_4000.npy`, `analysis/mel40_htk_500_4000.npy` | the variants' mel matrices (`make_features_np_consts.py`) |
 | `analysis/models/m4-f200.npz`, `analysis/models/m4-f500.npz` | the variants' final models (sha256 below) |

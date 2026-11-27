@@ -16,7 +16,7 @@ messages and decision records are in Japanese.
 
 | Path | Contents |
 |---|---|
-| `analysis/` | the scripts, their tests, the mel matrices, `models/m4-0038.npz` (the M4 model), `models/m4-f200.npz` and `models/m4-f500.npz` (experimental variants) |
+| `analysis/` | the scripts, their tests, the mel matrices, `models/m4-0038.npz` (the M4 model), `models/m4-f200.npz`, `models/m4-f500.npz`, `models/m4-ms.npz` and `models/m4-heater-w10.npz` (experimental variants) |
 | `tools/throat_check.py` | reading and checking a throat-microphone session (used by `analysis/features.py`) |
 | `docs/` | evaluation rules (`evaluation.md`), session format (`data-schema.md`), recording protocol, the decision records the code checks or implements (`decisions/`), the markers of the one-time evaluation-side scoring (`log/`) |
 | `data/` | the recordings (not in Git) |
@@ -141,6 +141,62 @@ cd model
   model's training data.
 - `--allow-dirty` runs although tracked files have uncommitted changes; the
   report says so.
+
+### AudioStudio recordings
+
+`analysis/studio.py` reads an AudioStudio recording (16 kHz mono 16-bit
+WAV and its `<name>.marks.csv`) as a session. Copy the recording's two
+files into `data/studio/<name>/` (not in Git). Labels follow the
+application's reading of the marks (`MarkReview.cs`): an indication without
+a `false` mark, and every `swallow` mark, is a swallow (a `swallow` mark
+near a hit is the same swallow); the window labels are those of a
+throat-microphone session. Windows are 1.0 s every 0.25 s from the start of
+the range, all inside it; the features come from the 16 kHz samples (no
+48 kHz step). A spec `DIR@A:B` takes only the seconds `[A, B)`.
+
+```
+cd model
+R=data/studio/<name>
+.venv/bin/python -B analysis/m4_variant.py data/raw --models analysis/models/m4-0038.npz --test $R
+.venv/bin/python -B analysis/m4_variant.py data/raw --set mfe40 --cv --extra $R@0:42 --extra-weight 10 --test $R@42:
+.venv/bin/python -B analysis/m4_variant.py data/raw --set mfe40 --final-model analysis/models/<name>.npz --extra $R --extra-weight 10 --test $R
+```
+
+- `--extra SPEC` (repeatable) adds a recording to the training side of
+  every cross-validation fold and of the final model; the folds stay those
+  of the training-side sessions, and an extra recording is never a
+  validation session. `--extra-weight W` puts the loss weight `W` on its
+  windows (the `sample_weight` path of `hard_negative=w3.0`; the positive
+  weight still counts windows). With `--extra`, `--set mfe40 --final-model`
+  is allowed: the model's config is the 0038 line and loads with the
+  unchanged inference code and AudioStudio, but it is not the recorded M4
+  model.
+- `--test SPEC` (repeatable) scores recordings: with `--cv` by each fold's
+  models (mean of the seeds), with `--final-model` by the saved model, and
+  with `--models M.npz ...` by the given models without training. It prints
+  per recording the windows, the indications (rising edges of the
+  post-processing output), the fraction of windows at or above 0.85, and the
+  median probability inside and outside the intervals `[t, t + 7 s)` of the
+  indications marked `false`.
+
+### Front-end set mfe40ms
+
+`mfe40ms` is `analysis/mains_spike.py` on the 16 kHz signal, then `mfe40`.
+The front-end limits short bursts in the band above about 450 Hz that come
+back at the same place of every mains period (seen with a hand on or near
+an electric heater), and leaves sound that is not synchronous with the
+mains alone. It is causal and runs from the first sample of the signal (of
+a session, of a recording, of a stream); the output is the input delayed
+by 80 samples (5 ms) wherever it does not act. The module docstring gives
+the algorithm and constants; `MainsSpike` is the per-sample reference for
+ports, `apply` the same over a whole signal. A model of this set names
+`set=mfe40ms` in its config; `m4_infer.model_prob` scores its features,
+`Detector` (which takes windows) and the current AudioStudio reject it,
+since the front-end has to run on the stream before the windows are cut.
+
+```
+.venv/bin/python -B analysis/m4_variant.py data/raw --set mfe40ms --cv --final-model analysis/models/m4-ms.npz --test $R
+```
 
 ## The evaluation side
 

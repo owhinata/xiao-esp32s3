@@ -33,6 +33,11 @@ CNN_SET = "mfe40"
 # variants with a higher lower mel edge (features_np.CNN_FMIN_HZ). The model's
 # config string names its set, so inference uses that set's mel matrix.
 CNN_SETS = features_np.CNN_SETS
+# Experimental front-end sets (mains_spike.FRONT_SETS): the CNN input is the
+# log-mel of the base set computed after a front-end that runs on the 16 kHz
+# stream before windowing. A configuration may name them and model_prob
+# scores their features; Detector, which takes windows, rejects them.
+FRONT_SETS = ("mfe40ms",)  # the keys of mains_spike.FRONT_SETS (checked by a test)
 LR_SET = "a52"
 # 1 ホップ（窓の開始の間隔）。evaluate.HOP_S と同じ値
 HOP_S = postprocess.HOP_S
@@ -77,7 +82,9 @@ def parse_config(text: str) -> dict:
     ok = (
         (
             (c["set"], c["classifier"]) == (LR_SET, "lr")
-            or (c["set"] in CNN_SETS and c["classifier"] == "cnn")
+            or (
+                c["set"] in CNN_SETS + FRONT_SETS and c["classifier"] == "cnn"
+            )
         )
         and c["seeds"] in (("-",) if lr else ("0", "0,1,2"))
         and c["hard_negative"]

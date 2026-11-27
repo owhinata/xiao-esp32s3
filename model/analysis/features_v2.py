@@ -39,6 +39,7 @@ import scipy.fft
 
 import features
 import features_np
+import mains_spike
 
 _CACHE_STOP = (
     "{}。librosa のキャッシュは特徴量をディスクや標準出力に出すので、この環境では"
@@ -103,6 +104,10 @@ CNN_SET = "mfe40"
 # CNN sets: mfe40 and the experimental variants with a higher lower mel edge
 # (features_np.CNN_FMIN_HZ)
 CNN_SETS = features_np.CNN_SETS
+# CNN input sets: CNN_SETS and the experimental front-end sets
+# (mains_spike.FRONT_SETS: a front-end over the whole 16 kHz signal, then the
+# log-mel of its base set)
+CNN_INPUT_SETS = CNN_SETS + tuple(mains_spike.FRONT_SETS)
 # 判定の窓の終端より後に要る音（秒）。装置で結果が出るまでの追加の待ち時間
 EXTRA_LATENCY_S = {
     "base15": 0.0,
@@ -308,8 +313,8 @@ def extract(session_dir: Path, feature_set: str) -> features.WindowFeatures:
 
 def extract_mfe(session_dir: Path, feature_set: str = CNN_SET) -> tuple:
     """CNN の入力: (t_start_s, M (n, 98, 40) float32, valid)。feature_set is
-    one of CNN_SETS (default mfe40)."""
-    if feature_set not in CNN_SETS:
+    one of CNN_INPUT_SETS (default mfe40)."""
+    if feature_set not in CNN_INPUT_SETS:
         raise ValueError(f"CNN の特徴量の組ではありません: {feature_set!r}")
     x, sample_t, t_start, start_idx, valid, _, t1 = features._throat_windows(
         Path(session_dir)
@@ -321,13 +326,26 @@ def extract_mfe(session_dir: Path, feature_set: str = CNN_SET) -> tuple:
 def mfe_windows(x, sample_t, start_idx, t1_s, feature_set: str = CNN_SET):
     """The CNN input M (n, 98, 40) float32 of the windows start_idx of an
     in-memory 16 kHz signal x (the session's, from features._throat_windows),
-    with the same bounds as extract_mfe."""
+    with the same bounds as extract_mfe. A front-end set runs its front-end
+    over the whole signal first (cnn_signal)."""
     lo, hi = _session_bounds(x, sample_t, start_idx, t1_s)
+    x, base = cnn_signal(x, feature_set)
     M = np.zeros((len(start_idx), 98, N_MEL_CNN), dtype=np.float32)
     for k, i in enumerate(start_idx):
         a, b = segment_bounds(i, 1.0, lo, hi)
-        M[k] = mfe_one(x[a:b], feature_set)
+        M[k] = mfe_one(x[a:b], base)
     return M
+
+
+def cnn_signal(x, feature_set: str) -> tuple:
+    """(signal, base CNN set): x itself for a set of CNN_SETS; for a front-end
+    set, mains_spike.apply over the whole signal from its first sample (as
+    on a stream) and the set's base set. Raises ValueError otherwise."""
+    if feature_set in CNN_SETS:
+        return x, feature_set
+    if feature_set in mains_spike.FRONT_SETS:
+        return mains_spike.apply(x), mains_spike.FRONT_SETS[feature_set]
+    raise ValueError(f"not a CNN input set: {feature_set!r}")
 
 
 # --- 小さな CNN の numpy の順伝播（docs/decisions/0033。学習は compare.py） ---

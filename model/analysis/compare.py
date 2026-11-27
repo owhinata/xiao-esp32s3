@@ -97,7 +97,7 @@ class CompareResult:
 
 
 def _extract_fn(feature_set: str):
-    if feature_set in features_v2.CNN_SETS:
+    if feature_set in features_v2.CNN_INPUT_SETS:
 
         def ex(p):
             t, M, valid = features_v2.extract_mfe(p, feature_set)

@@ -7,9 +7,9 @@ from unittest import mock
 
 import numpy as np
 
-import compare, features_np, fixed_eval, m4_compare as mc, m4_infer
+import compare, features, features_np, fixed_eval, m4_compare as mc, m4_infer
 import m4_variant as mv
-import train_eval
+import studio, train_eval
 from test_m4_compare import (
     build_raw,
     cnn_fit_random,
@@ -59,6 +59,9 @@ class ConfigTest(unittest.TestCase):
             ["x", "--cv"],
             ["x", "--set", "mfe40", "--final-model", "m.npz"],
             ["x", "--hum", "m.npz", "--set", "mfe40f200"],
+            ["x", "--models", "m.npz"],
+            ["x", "--set", "mfe40", "--cv", "--extra-weight", "3"],
+            ["x", "--set", "mfe40", "--cv", "--extra", "d", "--extra-weight", "0"],
         ):
             with self.subTest(argv), contextlib.redirect_stderr(err):
                 with self.assertRaises(SystemExit):
@@ -177,6 +180,117 @@ class VariantRunTest(unittest.TestCase):
         quiet = mv.quiet_sessions(self.names)
         self.assertTrue(quiet)
         self.assertIn(f"sessions: {len(quiet)}", "\n".join(lines))
+
+
+def fake_recording(name, n=40, swallows=(), false_t=(), dims=(98, 40), seed=0):
+    rng = np.random.default_rng(seed)
+    t = 0.25 * np.arange(n)
+    X = rng.normal(0, 1, (n, *dims)).astype(np.float32)
+    feats = features.WindowFeatures(
+        session=name, t_start_s=t, X=X, valid=np.ones(n, bool)
+    )
+    d = train_eval.SessionData(
+        name=name, feats=feats, swallows=list(swallows), t0_s=0.0,
+        duration_s=float(t[-1] + 1.0) if n else 0.0,
+        labels=train_eval.window_labels(t, list(swallows)),
+    )
+    spec = studio.Spec(Path(name), None, None)
+    return studio.Recording(spec=spec, data=d, false_indications=list(false_t))
+
+
+class ExtraTest(unittest.TestCase):
+    def test_weighted_fit(self):
+        calls = []
+
+        def fit(data, where, seed, sample_weight=None):
+            calls.append(None if sample_weight is None else [w.copy() for w in sample_weight])
+            return "m"
+
+        a = fake_recording("studio:a", n=5).data
+        b = fake_recording("b", n=3).data
+        self.assertIs(mv.weighted_fit(["studio:a"], 1.0, fit), fit)
+        f = mv.weighted_fit(["studio:a"], 10.0, fit)
+        f([b], "", 0)
+        f([b, a], "", 0)
+        self.assertIsNone(calls[0])
+        np.testing.assert_array_equal(calls[1][0], np.ones(3))
+        np.testing.assert_array_equal(calls[1][1], np.full(5, 10.0))
+
+    def test_recording_metrics(self):
+        cfg = m4_infer.parse_config(fixed_eval.M4_CONFIG)
+        r = fake_recording("studio:r", n=40, false_t=[2.0])
+        p = np.zeros(40)
+        p[8:20] = 0.95  # centres 2.5 .. 5.25: one indication inside the touch
+        p[30:33] = 0.9  # a second one outside
+        m = mv.recording_metrics(p, r.data, r.false_indications, cfg)
+        self.assertEqual(m["indications"], 2)
+        self.assertAlmostEqual(m["frac_enter"], 15 / 40)
+        c = r.data.feats.t_start_s + 0.5
+        inside = (c >= 2.0) & (c < 9.0)
+        self.assertEqual(m["n_in"], int(inside.sum()))
+        self.assertAlmostEqual(m["median_in"], float(np.median(p[inside])))
+        self.assertAlmostEqual(m["median_out"], float(np.median(p[~inside])))
+
+
+class VariantExtraRunTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.tmp = Path(cls._tmp.name)
+        cls.root = build_raw(cls.tmp)
+        with (
+            mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None),
+            mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", None),
+        ):
+            cls.names = mc.list_train(cls.root).train
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_cv_with_extras_and_tests(self):
+        calls = []
+        ex = fake_recording("studio:h@0:10", dims=(2,))
+        te = fake_recording("studio:h@10:", dims=(2,), false_t=[1.0])
+        with production_ok(self.names):
+            lines, rows = mv.cv(
+                self.root, "mfe40", fake_fit(calls), fake_score, make_loader(),
+                extras=[ex], tests=[te], extra_weight=10.0,
+            )
+            plain_lines, plain = mv.cv(
+                self.root, "mfe40", fake_fit([]), fake_score, make_loader()
+            )
+        # every training has the extra recording, weighted; it is never scored
+        # as a validation session
+        self.assertTrue(calls)
+        self.assertTrue(all("studio:h@0:10" in c[2] and c[1] for c in calls))
+        self.assertNotIn("studio:h@0:10", rows["fixed"].per_session)
+        self.assertEqual(set(rows["fixed"].per_session), set(plain["fixed"].per_session))
+        text = "\n".join(lines)
+        self.assertIn("loss weight 10", text)
+        self.assertIn("mean of", text)
+        self.assertEqual(sum(s.startswith("| fold ") for s in lines),
+                         len(mc.outer_groups([mc._Name(n) for n in self.names])))
+        self.assertNotIn("Test recordings", "\n".join(plain_lines))
+
+    def test_final_with_extras(self):
+        ex = fake_recording("studio:h", dims=(98, 40))
+        out = self.tmp / "extra.npz"
+        calls = []
+
+        def fit(data, where, seed, sample_weight=None):
+            calls.append(sample_weight is not None)
+            return cnn_fit_random(data, where, seed, sample_weight)
+
+        with production_ok(self.names):
+            fl = mv.final(
+                self.root, "mfe40", out, fit, compare.cnn_score,
+                make_loader(dims=(98, 40)), extras=[ex], extra_weight=10.0,
+            )
+        self.assertEqual(calls, [True, True, True])
+        m = m4_infer.load_model(out)
+        self.assertEqual(m["config"], fixed_eval.M4_CONFIG)
+        self.assertTrue(any("extra training recordings: studio:h" in s for s in fl))
 
 
 if __name__ == "__main__":

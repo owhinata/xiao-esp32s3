@@ -343,6 +343,7 @@ The files, in `models/`:
 | `m4-0038.npz` | The weights: three seeds of the CNN with their normalisation, and the configuration string `config` (`set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5`) |
 | `mel40_htk_0_4000.npy` | The mel matrix of `mfe40` (40 × 257, float64, 0 to 4000 Hz) |
 | `m4-f200.npz`, `m4-f500.npz` | Experimental variants: the same configuration with `set=mfe40f200` / `set=mfe40f500`, trained the same way on the same training-side sessions (`model/analysis/m4_variant.py`); their mel bands start at 200 / 500 Hz, so the mains hum below that edge is not an input (for `mfe40f500` all lines from 50 to 450 Hz). Not the recorded M4 detector |
+| `m4-heater-w10.npz` | Experimental: the M4 configuration (`set=mfe40`) trained with one more recording as negative examples, silence with the bursts an electric heater puts into the signal when the wearer touches it (loss weight 10; `model/analysis/m4_variant.py --extra`) |
 | `mel40_htk_200_4000.npy`, `mel40_htk_500_4000.npy` | The variants' mel matrices |
 
 The mel matrix is looked up beside the weights file under the name of the
