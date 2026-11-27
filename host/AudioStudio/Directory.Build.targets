@@ -1,0 +1,10 @@
+<Project>
+  <!--
+    Avalonia's build package (Avalonia.BuildServices) reports every build to
+    Avalonia's server (its target AvaloniaStats, before CoreCompile).  This
+    file is imported after the package's targets, so the empty target of the
+    same name replaces it: nothing is sent, whatever the environment
+    (the package's own switch is the variable AVALONIA_TELEMETRY_OPTOUT).
+  -->
+  <Target Name="AvaloniaStats" />
+</Project>
