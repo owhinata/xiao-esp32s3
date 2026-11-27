@@ -145,7 +145,8 @@ start).
 - **Levels** on the right: peak and RMS in dBFS over the last 0.25 s of the
   view and over the whole view, as the board's `uac level` computes them
   (relative to a full-scale square wave: a full-scale sine is 0 dBFS peak,
-  -3 dBFS RMS).
+  -3 dBFS RMS), and DC, the mean of the same samples in steps of a 16-bit
+  sample: the offset that is left with the board's high-pass (**HPF**) off.
 
 ### Model
 

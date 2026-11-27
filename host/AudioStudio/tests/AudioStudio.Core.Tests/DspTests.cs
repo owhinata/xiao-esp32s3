@@ -124,5 +124,8 @@ public class DspTests
         peak.Should().BeApproximately(-6.02, 0.01);
         rms.Should().BeApproximately(-9.03, 0.01);
         Level.Measure(new float[10]).PeakDb.Should().Be(double.NegativeInfinity);
+        Level.DcLsb(sine).Should().BeApproximately(0, 0.01);
+        Level.DcLsb(Enumerable.Repeat(-100f / 32768, 500).ToArray()).Should().BeApproximately(-100, 0.001);
+        Level.DcLsb([]).Should().Be(0);
     }
 }

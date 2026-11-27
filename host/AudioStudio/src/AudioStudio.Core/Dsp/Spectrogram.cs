@@ -26,6 +26,21 @@ public static class Level
         }
         return (20 * Math.Log10(peak), 10 * Math.Log10(sum / samples.Length));
     }
+
+    /// <summary>The mean of the samples, the DC offset, in steps of a 16-bit sample (LSB).</summary>
+    public static double DcLsb(ReadOnlySpan<float> samples)
+    {
+        if (samples.Length == 0)
+        {
+            return 0;
+        }
+        double sum = 0;
+        foreach (float s in samples)
+        {
+            sum += s;
+        }
+        return sum / samples.Length * 32768;
+    }
 }
 
 /// <summary>

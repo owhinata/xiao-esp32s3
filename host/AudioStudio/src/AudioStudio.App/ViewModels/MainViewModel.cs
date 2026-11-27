@@ -1370,12 +1370,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         Span<float> all = _levelBuffer.AsSpan(0, length);
         source.Read(from, all);
-        (double peak, double rms) = Level.Measure(all[^Math.Min(source.SampleRate / 4, length)..]);
+        Span<float> end = all[^Math.Min(source.SampleRate / 4, length)..];
+        (double peak, double rms) = Level.Measure(end);
         (double viewPeak, double viewRms) = Level.Measure(all);
         LevelText = string.Create(CultureInfo.InvariantCulture, $"""
-                          peak     RMS  [dBFS]
-            end 0.25 s  {Db(peak),6} {Db(rms),7}
-            whole view  {Db(viewPeak),6} {Db(viewRms),7}
+                          peak     RMS      DC
+                        [dBFS]  [dBFS]   [LSB]
+            end 0.25 s  {Db(peak),6} {Db(rms),7} {Level.DcLsb(end),7:F1}
+            whole view  {Db(viewPeak),6} {Db(viewRms),7} {Level.DcLsb(all),7:F1}
             """);
     }
 
