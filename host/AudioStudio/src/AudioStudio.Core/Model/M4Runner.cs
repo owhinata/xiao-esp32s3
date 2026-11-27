@@ -124,10 +124,27 @@ public sealed class M4History
 /// is negative. On the live stream the runner starts at the newest complete
 /// window, and when it falls behind it catches up rather than dropping
 /// windows; <see cref="Backlog"/> tells how far behind it is.
+/// <para>
+/// With the spike filter (<see cref="MainsSpike"/>, a mains frequency given
+/// to the constructor) the detector's windows are the filter's output, read
+/// in the source's time (<see cref="SpikeFilteredInput"/>), so the window
+/// positions and the indications refer to the source's samples as without
+/// it. The filter runs over a stretch's samples in order: a file from its
+/// first sample, the live stream from <see cref="LivePrimeSamples"/> before
+/// the first window run (where the ring still holds them), and afresh after
+/// a new stream or after the runner fell behind the ring. A window then
+/// needs <see cref="MainsSpike.Delay"/> samples after its end, and lost
+/// samples within that many samples of it make it not valid. The source is
+/// only read: what is shown and recorded stays the source's samples.
+/// </para>
 /// </summary>
 public sealed class M4Runner
 {
+    /// <summary>How far before its first window the filter starts on the live stream: 2 s.</summary>
+    public const int LivePrimeSamples = 2 * M4Model.SampleRate;
+
     private readonly M4Model _model;
+    private readonly SpikeFilteredInput? _spike;
     private readonly object _stateLock = new();
     private M4Detector? _detector;
     private long _origin = -1;
@@ -139,12 +156,18 @@ public sealed class M4Runner
     private long _lastWindowTicks;
     private string? _error;
 
-    public M4Runner(M4Model model)
+    /// <param name="spikeFilterMainsHz">The mains frequency of the spike filter before the detector; null: no filter.</param>
+    public M4Runner(M4Model model, double? spikeFilterMainsHz = null)
     {
         _model = model;
+        _spike = spikeFilterMainsHz is double hz ? new SpikeFilteredInput(hz) : null;
     }
 
     public M4Model Model => _model;
+    /// <summary>The spike filter's mains frequency; null when the runner has no filter.</summary>
+    public double? SpikeFilterMainsHz => _spike?.MainsHz;
+    /// <summary>Samples a window needs after its end: the filter's delay, or none.</summary>
+    private int Lookahead => _spike is null ? 0 : MainsSpike.Delay;
     public M4History History { get; } = new();
     /// <summary>Windows run, valid or not.</summary>
     public long Runs => Interlocked.Read(ref _runs);
@@ -212,8 +235,8 @@ public sealed class M4Runner
         {
             // The newest stretch, from its newest complete window.
             _origin = LastNewStream(source, source.Start, end) ?? 0;
-            long k0 = Math.Max(0, (end - _origin - M4Model.WindowSamples) / M4Model.HopSamples);
-            StartStretch(_origin, k0);
+            long k0 = Math.Max(0, (end - _origin - M4Model.WindowSamples - Lookahead) / M4Model.HopSamples);
+            StartStretch(_origin, k0, source);
         }
         while (true)
         {
@@ -225,35 +248,67 @@ public sealed class M4Runner
             if (LastNewStream(source, start + 1, stop - 1) is long restart && restart > _origin)
             {
                 _origin = restart;
-                StartStretch(restart, 0);
+                StartStretch(restart, 0, source);
                 continue;
             }
-            if (stop > end)
+            if (stop + Lookahead > end)
             {
                 Interlocked.Exchange(ref _backlog, 0);
                 break;
             }
-            bool lagged = start < source.Start;
-            bool valid = !lagged && !OverlapsGap(source, start, stop);
+            bool lagged;
+            if (_spike is null)
+            {
+                lagged = start < source.Start;
+            }
+            else
+            {
+                if (_spike.Next < source.Start)
+                {
+                    // Samples the filter had not taken left the ring: it starts afresh.
+                    _spike.Restart(source.Start);
+                }
+                lagged = start < _spike.From;
+            }
+            bool valid = !lagged && !OverlapsGap(source, start - Lookahead, stop + Lookahead);
             if (lagged)
             {
                 Interlocked.Increment(ref _lagged);
             }
+            if (_spike is not null)
+            {
+                _spike.Advance(source, stop + Lookahead);
+            }
             if (valid)
             {
-                source.Read(start, window);
+                ReadWindow(source, start, window);
             }
             Record(start, Compute(valid ? window : null), lagged);
             Interlocked.Exchange(ref _lastWindowTicks, Stopwatch.GetTimestamp());
-            Interlocked.Exchange(ref _backlog, Math.Max(0, (end - stop) / M4Model.HopSamples));
+            Interlocked.Exchange(ref _backlog, Math.Max(0, (end - stop - Lookahead) / M4Model.HopSamples));
         }
     }
 
-    private void StartStretch(long origin, long firstWindow)
+    private void StartStretch(long origin, long firstWindow, ISampleSource source)
     {
         _detector = new M4Detector(_model, firstWindow);
         _origin = origin;
         _lastPositive = false;
+        long first = origin + firstWindow * M4Model.HopSamples;
+        _spike?.Restart(Math.Max(Math.Max(origin, source.Start), first - LivePrimeSamples));
+    }
+
+    /// <summary>The window's samples: the source's, or the spike filter's output for them.</summary>
+    private void ReadWindow(ISampleSource source, long start, Span<float> window)
+    {
+        if (_spike is null)
+        {
+            source.Read(start, window);
+        }
+        else
+        {
+            _spike.Read(start, window);
+        }
     }
 
     /// <summary>Runs every window of a file in order; reports the fraction done.</summary>
@@ -267,7 +322,7 @@ public sealed class M4Runner
         return _running = Task.Run(() =>
         {
             long count = Math.Max(0, (source.End - source.Start - M4Model.WindowSamples) / M4Model.HopSamples + 1);
-            StartStretch(source.Start, 0);
+            StartStretch(source.Start, 0, source);
             // The probabilities of a batch in parallel, then the post-processing in order.
             const int Batch = 64;
             double[] probabilities = new double[Batch];
@@ -276,12 +331,14 @@ public sealed class M4Runner
             {
                 ct.ThrowIfCancellationRequested();
                 int n = (int)Math.Min(Batch, count - first);
+                // The filter in order, then the windows of the batch read its output in parallel.
+                _spike?.Advance(source, source.Start + (first + n - 1) * M4Model.HopSamples + M4Model.WindowSamples + Lookahead);
                 Parallel.For(0, n, new ParallelOptions { CancellationToken = ct }, i =>
                 {
                     long start = source.Start + (first + i) * M4Model.HopSamples;
-                    valid[i] = !OverlapsGap(source, start, start + M4Model.WindowSamples);
+                    valid[i] = !OverlapsGap(source, start - Lookahead, start + M4Model.WindowSamples + Lookahead);
                     float[] window = new float[M4Model.WindowSamples];
-                    source.Read(start, window);
+                    ReadWindow(source, start, window);
                     probabilities[i] = valid[i] ? Probability(window) : double.NaN;
                 });
                 for (int i = 0; i < n; i++)

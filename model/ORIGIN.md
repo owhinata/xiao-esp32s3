@@ -44,12 +44,13 @@ leave the mains hum below their lower edge out. The recorded M4 configuration, i
 
 | File | What |
 |---|---|
-| `analysis/m4_variant.py` | The experimental entry point: the C4 x P2 cross-validation (`--cv`) and the final model (`--final-model`) of a variant with the otherwise identical 0038 configuration on the training side only, and the hum sensitivity check (`--hum`); `--allow-dirty`; AudioStudio recordings as extra training data (`--extra`, `--extra-weight`) and as scored recordings (`--test`, `--models`) |
+| `analysis/m4_variant.py` | The experimental entry point: the C4 x P2 cross-validation (`--cv`) and the final model (`--final-model`) of a variant with the otherwise identical 0038 configuration on the training side only, and the hum sensitivity check (`--hum`); `--allow-dirty`; AudioStudio recordings as extra training data (`--extra`, `--extra-weight`) and as scored recordings (`--test`, `--models`); the front-end check of `mains_spike.py` before an unchanged mfe40 model (`--front`, `--front-param`) |
 | `analysis/studio.py`, `analysis/test_studio.py` | AudioStudio recordings (16 kHz WAV + marks) as sessions, labels by the application's reading of the marks; tests |
 | `analysis/mains_spike.py`, `analysis/test_mains_spike.py` | the front-end of the set `mfe40ms` (mains-synchronous burst limiter); tests on synthetic signals |
 | `analysis/test_m4_variant.py` | its tests (synthetic data) |
 | `analysis/mel40_htk_200_4000.npy`, `analysis/mel40_htk_500_4000.npy` | the variants' mel matrices (`make_features_np_consts.py`) |
 | `analysis/models/m4-f200.npz`, `analysis/models/m4-f500.npz` | the variants' final models (sha256 below) |
+| `analysis/models/m4-ms.npz` | the final model of the set `mfe40ms` (sha256 `1fcf4741fc06fa2b...`), trained with the front-end's earlier template rate `ALPHA = 1/16`; `mains_spike.py` now has `ALPHA = 1/8`, so the model's training input differs a little from what the set now computes (not retrained) |
 
 ## Code, constants, model, tests (copied; edited ones above)
 

@@ -173,6 +173,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private decimal? _modelWindow;
     /// <summary>The loaded model is the M4 swallow detector (a .npz), not an ONNX model.</summary>
     [ObservableProperty] private bool _isM4Model;
+    /// <summary>The spike filter runs before the M4 detector's input.</summary>
+    [ObservableProperty] private bool _isSpikeFilterOn;
     [ObservableProperty] private string _indicatorText = "";
     [ObservableProperty] private Avalonia.Media.IBrush _indicatorBrush = Avalonia.Media.Brushes.Gray;
     [ObservableProperty] private string _detectorText = "";
@@ -218,8 +220,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <param name="board">Board address to connect the audio stream to at once.</param>
     /// <param name="shell">Connect the shell at once too.</param>
     /// <param name="target">The target profile (a name or a path); otherwise the one of the settings.</param>
-    public MainViewModel(string? board = null, bool shell = false, string? image = null, string? target = null)
+    /// <param name="spikeFilter">The spike filter on or off; otherwise as the settings say.</param>
+    /// <param name="mainsHz">The spike filter's mains frequency (50 or 60); otherwise the settings'.</param>
+    public MainViewModel(string? board = null, bool shell = false, string? image = null, string? target = null,
+                         bool? spikeFilter = null, double? mainsHz = null)
     {
+        _settings.SpikeFilter = spikeFilter ?? _settings.SpikeFilter;
+        _settings.MainsHz = mainsHz ?? (_settings.MainsHz is 50 or 60 ? _settings.MainsHz : MainsSpike.DefaultMainsHz);
+        _isSpikeFilterOn = _settings.SpikeFilter;
         foreach (string name in TargetProfile.Available())
         {
             Targets.Add(name);
@@ -1797,7 +1805,29 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void MakeLiveClassifier()
     {
         _liveClassifier = _model is null ? null : new Classifier(_model, Hop(_model));
-        _liveM4 = _m4 is null ? null : new M4Runner(_m4);
+        _liveM4 = _m4 is null ? null : new M4Runner(_m4, SpikeFilterMainsHz);
+    }
+
+    /// <summary>The mains frequency of the spike filter before the M4 detector; null while it is off.</summary>
+    private double? SpikeFilterMainsHz => IsSpikeFilterOn ? _settings.MainsHz : null;
+
+    public string SpikeFilterTip => string.Create(CultureInfo.InvariantCulture,
+        $"Mains-synchronous spike filter ({_settings.MainsHz:0} Hz) before the swallow detector: limits short bursts above about 450 Hz that repeat in every mains period (an electric heater the wearer touches). Only the detector's input: the views, the levels and recordings keep the raw samples. Switching it runs the detector again (live: from the newest window; a file: from its start).");
+
+    /// <summary>Switches the spike filter; the detector starts again with or without it.</summary>
+    [RelayCommand]
+    private void ToggleSpikeFilter()
+    {
+        IsSpikeFilterOn = !IsSpikeFilterOn;
+        _settings.SpikeFilter = IsSpikeFilterOn;
+        if (_m4 is not null)
+        {
+            MakeLiveClassifier();
+            AnalyzeFile();
+        }
+        Message = IsSpikeFilterOn
+            ? string.Create(CultureInfo.InvariantCulture, $"Spike filter on ({_settings.MainsHz:0} Hz mains) before the swallow detector")
+            : "Spike filter off";
     }
 
     /// <summary>Runs the model over the whole of the opened file, in the background.</summary>
@@ -1851,7 +1881,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>Runs the M4 detector over the whole of the opened file, in the background.</summary>
     private void AnalyzeFileM4(M4Model model, FileSource file)
     {
-        M4Runner runner = new(model);
+        M4Runner runner = new(model, SpikeFilterMainsHz);
         CancellationTokenSource cts = new();
         _fileAnalysis = cts;
         _fileM4 = runner;
@@ -1965,9 +1995,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             ? string.Create(CultureInfo.InvariantCulture, $", {runner.Backlog} behind") : "";
         string lagged = runner.Lagged > 0
             ? string.Create(CultureInfo.InvariantCulture, $", {runner.Lagged} not valid: the PC fell behind") : "";
+        string filter = runner.SpikeFilterMainsHz is double hz
+            ? string.Create(CultureInfo.InvariantCulture, $"spike filter, {hz:0} Hz mains (delay of {MainsSpike.Delay} samples taken off)")
+            : "none";
         ModelText = string.Create(CultureInfo.InvariantCulture, $"""
             {Path.GetFileName(model.Path)} (M4 swallow detector)
             {c.Text}
+            input    {filter}
             features {c.Set}: 40 mel bands, {c.MelLowHz} to 4000 Hz ({Path.GetFileName(model.MelPath)})
             seeds    {string.Join(", ", c.Seeds)}
             post     {post}

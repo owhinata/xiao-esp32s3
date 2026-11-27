@@ -68,9 +68,14 @@ The C# code of the detector (`src/AudioStudio.Core/Model/M4Config.cs`,
 repository's Python code: `parse_config`, `_check_arrays`, `model_prob` and
 `Detector` of `analysis/m4_infer.py`, `mfe40`, `mfe` (the variants'
 feature sets) and `cnn_forward` of `analysis/features_np.py`, `PostStepper` of `analysis/postprocess.py`, and
-`LedStepper` of `analysis/led_rule.py`. The fixtures in
-`tests/AudioStudio.Core.Tests/Fixtures/` are the values that Python code
-gives for synthetic signals, written by `tools/make_m4_fixtures.py`.
+`LedStepper` of `analysis/led_rule.py`. The spike filter
+(`src/AudioStudio.Core/Model/MainsSpike.cs`) is written after this
+repository's `model/analysis/mains_spike.py` (`MainsSpike`, the per-sample
+reference of the front-end, with its constants, `lp_taps` and `bp_coeffs`);
+`SpikeFilteredInput` and the filter's place in the runner are AudioStudio's.
+The fixtures in `tests/AudioStudio.Core.Tests/Fixtures/` are the values
+that Python code gives for synthetic signals, written by
+`tools/make_m4_fixtures.py`.
 
 ## The UNO Q tool (zaitaku-mealpace)
 

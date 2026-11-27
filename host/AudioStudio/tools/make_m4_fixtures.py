@@ -32,6 +32,17 @@ Files written to --out:
                     and probabilities, and the probability, positive and LED
                     of every window of the stream of m4_stream.npz through
                     its Detector.
+  m4_mains_spike.npz  when <mealpace>/analysis/mains_spike.py is there (it
+                    also needs scipy): a 24 s int16 signal (hum, a noise
+                    floor, bursts twice per mains period with a wobbling
+                    amplitude from 3 to 14 s, two broadband transients, three
+                    swallow-like bursts), the front-end's output (apply over
+                    the signal and MainsSpike.Delay zeros after it), the
+                    probability, positive and LED of every window of the
+                    output read Delay samples late (the delay compensated)
+                    through the M4 Detector, the raw signal's probabilities,
+                    a 6 s signal at 60 Hz with its output at 60 Hz, and the
+                    front-end's constants.
 """
 
 import argparse
@@ -371,6 +382,76 @@ def main():
             stream_led=np.array([r[2] for r in rows_v], dtype=np.int64),
         )
         written.append(f"{set_name} ({sum(r[1] for r in rows_v)} positive stream windows)")
+
+    # (f) the mains-synchronous spike front-end (model/analysis/mains_spike.py).
+    if (mealpace / "analysis" / "mains_spike.py").exists():
+        import mains_spike as ms
+
+        D = (ms.LP_TAPS - 1) // 2
+        rng_ms = np.random.default_rng(20261128)
+
+        def spiky(seconds, mains, burst_from, burst_to, amp):
+            n_ = int(seconds * SR)
+            tt = np.arange(n_) / SR
+            x_ = (2e-3 * np.sin(2 * np.pi * mains * tt) + 4e-4 * np.sin(2 * np.pi * 3 * mains * tt + 0.3)
+                  + 3e-4 * rng_ms.standard_normal(n_))
+            period = SR / mains
+            k = 0
+            while True:
+                c = burst_from * SR + 37.0 + k * period / 2
+                i = int(c)
+                if i + 24 >= min(n_, burst_to * SR):
+                    break
+                a_ = amp * (0.55 + 0.45 * np.sin(2 * np.pi * 14.3 * i / SR))
+                x_[i : i + 24] += a_ * np.hanning(24) * rng_ms.standard_normal(24)
+                k += 1
+            return x_
+
+        def transient(x_, at, length, amp):
+            i, L = int(at * SR), int(length * SR)
+            x_[i : i + L] += amp * np.hanning(L) * rng_ms.standard_normal(L)
+
+        def front(q, mains):
+            x_ = (q / 32768.0).astype(np.float32)
+            return ms.apply(np.concatenate((x_, np.zeros(D, np.float32))), mains_hz=mains)
+
+        x = spiky(24.0, 50.02, 3.0, 14.0, 0.005)
+        transient(x, 8.0, 0.3, 0.01)
+        transient(x, 16.0, 0.4, 0.01)
+        picks = find_events(np, fnp, det, rng_ms, {(0.97, 1.01): 3})
+        for at, q in zip((10.0, 17.5, 20.0), picks[(0.97, 1.01)]):
+            i = int(at * SR)
+            x[i : i + WINDOW] += 4.0 * q / 32768.0
+        sig_ms = to_int16(np, np.clip(x, -1, 1))
+        y = front(sig_ms, 50.0)
+        k_ms = 1 + (len(sig_ms) - WINDOW) // HOP
+        d_on, d_off = m4.Detector(model), m4.Detector(model)
+        on_rows, raw_prob = [], []
+        for k in range(k_ms):
+            seg = y[D + k * HOP : D + k * HOP + WINDOW]
+            p_, pos, led_, _ = d_on.step(seg, k * 250)
+            on_rows.append((p_, pos, led_))
+            raw = (sig_ms[k * HOP : k * HOP + WINDOW] / 32768.0).astype(np.float32)
+            raw_prob.append(d_off.step(raw, k * 250)[0])
+        sig60 = to_int16(np, np.clip(spiky(6.0, 60.03, 1.0, 6.0, 0.005), -1, 1))
+        np.savez_compressed(
+            out / "m4_mains_spike.npz",
+            signal=sig_ms,
+            output=y.astype(np.float32),
+            prob=np.array([r[0] for r in on_rows], dtype=np.float64),
+            positive=np.array([r[1] for r in on_rows], dtype=np.int64),
+            led=np.array([r[2] for r in on_rows], dtype=np.int64),
+            raw_prob=np.array(raw_prob, dtype=np.float64),
+            signal60=sig60,
+            output60=front(sig60, 60.0).astype(np.float32),
+            constants=np.array([
+                ms.LP_HZ, ms.LP_TAPS, ms.ENV_TAU, ms.HUM_Q, ms.REFRACTORY, ms.PERIOD_TOL,
+                ms.PERIOD_RATE, ms.ALPHA, ms.QUANT_STEP, ms.MARGIN, ms.LIMIT, ms.FLOOR_GAIN2,
+                ms.F_INIT, ms.WARMUP], dtype=np.float64),
+        )
+        written.append(
+            f"mains spike ({k_ms} windows, {sum(r[1] for r in on_rows)} positive with the front-end, "
+            f"{sum(p_ >= cfg['enter'] for p_ in raw_prob)} raw windows >= enter)")
 
     print(
         f"variants: {', '.join(written) or 'none'}", file=sys.stderr)

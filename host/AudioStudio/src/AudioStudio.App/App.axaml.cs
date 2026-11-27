@@ -15,11 +15,14 @@ public partial class App : Application
         {
             // --target NAME or FILE.json: the target profile; --board ADDRESS: connect the audio stream;
             // --shell: and the shell; --open FILE.wav: show a file; --model FILE.onnx or FILE.npz: load a model;
-            // --image FILE.bin: the firmware image; --view audio|firmware.
+            // --image FILE.bin: the firmware image; --view audio|firmware;
+            // --spike-filter on|off: the spike filter before the M4 detector; --mains 50|60: its mains frequency.
             string[] args = desktop.Args ?? [];
             desktop.MainWindow = new Views.MainWindow(new Views.StartOptions(
                 Option(args, "--board"), args.Contains("--shell"), Option(args, "--open"), Option(args, "--model"),
-                Option(args, "--image"), Option(args, "--view"), Option(args, "--target")));
+                Option(args, "--image"), Option(args, "--view"), Option(args, "--target"),
+                Option(args, "--spike-filter") switch { "on" => true, "off" => false, _ => null },
+                Option(args, "--mains") switch { "50" => 50.0, "60" => 60.0, _ => null }));
         }
 
         base.OnFrameworkInitializationCompleted();

@@ -40,6 +40,15 @@ Usage (from model/):
   python analysis/m4_variant.py data/raw --models M.npz [...] --test REC
       Scores the --test recordings with the given models (no training).
   --set mfe40ms is the front-end set of mains_spike.py (then mfe40).
+  python analysis/m4_variant.py data/raw --front M.npz --test REC [...] \\
+          [--front-param current] [--front-param ALPHA=1/16,WARMUP=16 ...]
+      An mfe40 model without and with the front-end (no training), one case
+      per --front-param (mains_spike constants changed for that case): per
+      touch of each recording (sync_touches) how long the probability stays
+      at or above 0.85 / 0.5, the indications and the windows >= 0.85; the
+      probabilities at the recordings' swallows; and the training-side
+      swallow check (damage_sessions: swallows found, false indications,
+      the positive windows' mean probability and band-energy change).
 
   --allow-dirty  run although a tracked file has an uncommitted change (the
                  report says so; its numbers are then not reproducible from
@@ -51,13 +60,13 @@ signals stay in memory.
 """
 
 from __future__ import annotations
-import argparse, sys, time
+import argparse, contextlib, sys, time
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 
-import features, features_np, features_v2, fixed_eval, m4_compare as mc
+import evaluate, features, features_np, features_v2, fixed_eval, m4_compare as mc
 import postprocess, studio, train_eval
 from m4_infer import (
     CNN_SET,
@@ -486,6 +495,312 @@ def hum(root: Path, model_paths: Sequence[Path], windows_fn=None) -> list:
     return lines
 
 
+# --- front-end check (mains_spike.py before an unchanged mfe40 model) ---
+
+FRONT_PARAMS = (  # mains_spike constants --front-param may change
+    "ALPHA", "MARGIN", "LIMIT", "WARMUP", "QUANT_STEP", "FLOOR_GAIN2",
+    "ENV_TAU", "PERIOD_RATE",
+)
+TOUCH_BAND_HZ = (500.0, 4000.0)
+TOUCH_SMOOTH = 16  # samples (1 ms) of envelope smoothing
+TOUCH_PERIODS = 12  # mains periods per segment
+TOUCH_STEP = 80  # samples (5 ms) between segments
+TOUCH_SYNC_DB = 11.0
+TOUCH_MIN_S = 2.0
+TOUCH_GAP_S = 0.5
+DAMAGE_CONDS = ("water", "saliva")  # + the first training-side meal
+
+
+def parse_front_params(text: str) -> dict:
+    """"NAME=VALUE,NAME=VALUE" (VALUE a number or a fraction a/b) -> dict;
+    "" or "current" is the module's constants."""
+    from fractions import Fraction
+
+    out: dict = {}
+    text = text.strip()
+    if text in ("", "current"):
+        return out
+    for item in text.split(","):
+        k, sep, v = item.partition("=")
+        k = k.strip()
+        if not sep or k not in FRONT_PARAMS:
+            raise ValueError(
+                f"--front-param: NAME=VALUE with NAME one of {', '.join(FRONT_PARAMS)}: {item!r}"
+            )
+        f = float(Fraction(v.strip()))
+        out[k] = int(f) if k == "WARMUP" else f
+    return out
+
+
+def front_label(params: dict) -> str:
+    if not params:
+        return "front-end (current)"
+    return "front-end " + ", ".join(f"{k}={v:g}" for k, v in params.items())
+
+
+@contextlib.contextmanager
+def front_constants(params: dict):
+    """mains_spike's module constants set to params for the duration (both
+    apply() and MainsSpike read them at call time); restored afterwards."""
+    import mains_spike
+
+    old = {k: getattr(mains_spike, k) for k in params}
+    try:
+        for k, v in params.items():
+            setattr(mains_spike, k, v)
+        yield
+    finally:
+        for k, v in old.items():
+            setattr(mains_spike, k, v)
+
+
+def sync_touches(x, mains_hz: float = 50.0, sr: int = features_np.SR) -> list:
+    """Intervals [(a, b)] (seconds) in which mains-synchronous bursts are
+    present, found offline (non-causal, only to measure the causal front-end
+    against): the band TOUCH_BAND_HZ envelope (zero-phase filter, smoothed
+    over TOUCH_SMOOTH samples) is folded over TOUCH_PERIODS nominal periods
+    every TOUCH_STEP samples; the per-bin median over the periods (a
+    transient in a few periods does not count) gives the profile, and its
+    top 10 % against its lower half in dB is the segment's sync level,
+    assigned to the segment's centre. Runs above TOUCH_SYNC_DB, joined over
+    gaps below TOUCH_GAP_S, of at least TOUCH_MIN_S are the touches."""
+    import scipy.signal
+
+    P = int(round(sr / mains_hz))
+    sos = scipy.signal.butter(4, TOUCH_BAND_HZ, "bandpass", fs=sr, output="sos")
+    e = scipy.signal.sosfiltfilt(sos, np.asarray(x, np.float64)) ** 2
+    e = scipy.signal.lfilter(np.ones(TOUCH_SMOOTH) / TOUCH_SMOOTH, [1.0], e)
+    L = TOUCH_PERIODS * P
+    top, low = max(1, P // 10), P // 2
+    cs, on = [], []
+    for a in range(0, len(e) - L, TOUCH_STEP):
+        prof = np.sort(np.median(e[a : a + L].reshape(-1, P), axis=0))
+        lo = prof[:low].mean()
+        level = 10.0 * np.log10(prof[-top:].mean() / lo) if lo > 0 else 0.0
+        cs.append((a + L / 2) / sr)
+        on.append(level > TOUCH_SYNC_DB)
+    runs: list = []
+    start = None
+    for c, o in zip(cs, on):
+        if o and start is None:
+            start = c
+        elif not o and start is not None:
+            runs.append([start, c])
+            start = None
+    if start is not None:
+        runs.append([start, cs[-1]])
+    merged: list = []
+    for r in runs:
+        if merged and r[0] - merged[-1][1] < TOUCH_GAP_S:
+            merged[-1][1] = r[1]
+        else:
+            merged.append(r)
+    return [(float(a), float(b)) for a, b in merged if b - a >= TOUCH_MIN_S]
+
+
+def touch_metrics(t_start_s, prob, touches, cfg) -> list:
+    """Per touch (a, b): the time from a until the probability stays below
+    0.85 (enter) / 0.5 up to b (windows whose centre is in [a, b]; 0 when no
+    window is at or above, inf when the last one is), the indications
+    (rising edges of the post-processing output whose window centre is in
+    [a - 0.5, b + 1)) and the fraction of the windows >= enter."""
+    t_start_s = np.asarray(t_start_s, np.float64)
+    prob = np.asarray(prob)
+    c = t_start_s + 0.5
+    m = config_mask(cfg, prob, np.ones(len(prob), bool), t_start_s)
+    rise = m & ~np.concatenate(([False], m[:-1])) if len(m) else m
+    out = []
+    for a, b in touches:
+        w = (c >= a) & (c <= b)
+        cc, pp = c[w], prob[w]
+
+        def stays(th):
+            above = np.flatnonzero(pp >= th)
+            if len(above) == 0:
+                return 0.0
+            k = above[-1]
+            return float("inf") if k == len(pp) - 1 else float(cc[k + 1] - a)
+
+        out.append({
+            "to_enter": stays(cfg["enter"]),
+            "to_half": stays(0.5),
+            "indications": int(np.sum(rise & (c >= a - 0.5) & (c < b + 1.0))),
+            "frac_enter": float(np.mean(pp >= cfg["enter"])) if len(pp) else float("nan"),
+        })
+    return out
+
+
+def swallow_probs(t_start_s, prob, swallows) -> list:
+    """The highest probability of the windows whose centre is in a swallow's
+    counting interval [t - 0.5, t + 1.5] (nan when there is none)."""
+    c = np.asarray(t_start_s, np.float64) + evaluate.WINDOW_S / 2
+    prob = np.asarray(prob)
+    out = []
+    for t in swallows:
+        w = (c >= t - evaluate.PRE_S) & (c <= t + evaluate.POST_S)
+        out.append(float(prob[w].max()) if w.any() else float("nan"))
+    return out
+
+
+def damage_sessions(names: Sequence[str]) -> list:
+    """The training-side sessions of the swallow check: the condition
+    sessions whose task is swallowing (DAMAGE_CONDS) and the first meal."""
+    picked = [n for n in names if mc.cond_of(n) in DAMAGE_CONDS]
+    meals = [n for n in names if mc.is_meal(n)]
+    return picked + meals[:1]
+
+
+def _band(x, sr: int = features_np.SR):
+    import scipy.signal
+
+    sos = scipy.signal.butter(4, TOUCH_BAND_HZ, "bandpass", fs=sr, output="sos")
+    return scipy.signal.sosfilt(sos, np.asarray(x, np.float64))
+
+
+def _rec_windows(y) -> tuple:
+    starts = studio.window_starts(len(y), 0, len(y))
+    M = np.zeros((len(starts), 98, features_v2.N_MEL_CNN), dtype=np.float32)
+    for k, s in enumerate(starts):
+        M[k] = features_v2.mfe_one(y[s : s + studio.WINDOW_SAMPLES], CNN_SET)
+    return starts / studio.SR, M
+
+
+def _fmt_s(v: float) -> str:
+    return "never above" if v == 0.0 else ("not before the end" if v == float("inf") else f"{v:.2f} s")
+
+
+def front_check(root: Path, model_path: Path, specs, candidates,
+                windows_fn=None, events_fn=None) -> list:
+    """Report lines: the mfe40 model of model_path without the front-end
+    and with it at each parameter set of candidates (dicts for
+    front_constants; {} the current constants), over the recordings of specs
+    (per touch of sync_touches: touch_metrics; the probabilities at the
+    recording's swallows) and over the training-side damage_sessions
+    (swallows found, false indications, mean probability of the positive
+    windows, the change of the TOUCH_BAND_HZ energy of the positive windows
+    by the front-end). windows_fn / events_fn replace
+    features._throat_windows / evaluate.load_events (tests)."""
+    import mains_spike
+
+    m = load_model(Path(model_path))
+    cfg = m["cfg"]
+    if cfg["kind"] != "cnn" or cfg["set"] != CNN_SET:
+        raise SystemExit(f"--front は set={CNN_SET} の CNN のモデルで使う: {model_path}")
+    D = (mains_spike.LP_TAPS - 1) // 2
+    cases = [("raw", None)] + [(front_label(p), p) for p in candidates]
+
+    def run(x, params):
+        if params is None:
+            return np.asarray(x, np.float32)
+        with front_constants(params):
+            return mains_spike.apply(x)
+
+    lines = [
+        f"## Front-end check: {Path(model_path).name} without / with mains_spike",
+        "",
+        "- touches: sync_touches (offline: the median-folded "
+        f"{TOUCH_BAND_HZ[0]:.0f}-{TOUCH_BAND_HZ[1]:.0f} Hz envelope above "
+        f"{TOUCH_SYNC_DB:g} dB, at least {TOUCH_MIN_S:g} s); times are window "
+        "centres from the touch start",
+        "",
+        "| recording | touch (s) | case | to < 0.85 | to < 0.5 | indications | windows >= 0.85 |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    sw_lines = [
+        "",
+        "| recording | case | probability at each swallow | swallows found |",
+        "|---|---|---|---|",
+    ]
+    for spec in specs:
+        spec = studio.parse_spec(spec) if not isinstance(spec, studio.Spec) else spec
+        if spec.a_s is not None or spec.b_s is not None:
+            raise SystemExit(f"--front takes whole recordings (no @A:B): {spec.name}")
+        wav, marks = studio.find_files(spec.path)
+        x = studio.read_wav(wav)
+        swallows = studio.review(studio.read_marks(marks))["swallows"]
+        touches = sync_touches(x)
+        per_case = []
+        for label, params in cases:
+            t_start, M = _rec_windows(run(x, params))
+            prob = model_prob(m, M)
+            per_case.append((label, touch_metrics(t_start, prob, touches, cfg),
+                             swallow_probs(t_start, prob, swallows), t_start, prob))
+        for i, (a, b) in enumerate(touches):
+            for label, tm, _, _, _ in per_case:
+                r = tm[i]
+                lines.append(
+                    f"| {spec.path.name} | {a:.2f}-{b:.2f} | {label} | "
+                    f"{_fmt_s(r['to_enter'])} | {_fmt_s(r['to_half'])} | "
+                    f"{r['indications']} | {r['frac_enter']:.3f} |"
+                )
+        for label, _, sp, t_start, prob in per_case:
+            mask = config_mask(cfg, prob, np.ones(len(prob), bool), t_start)
+            got = evaluate.event_metrics(
+                [t for t in swallows if 0 <= t <= len(x) / studio.SR],
+                t_start[mask].tolist(), len(x) / studio.SR, 0.0,
+            )["detected"] if swallows else 0
+            sw_lines.append(
+                f"| {spec.path.name} | {label} | "
+                f"{' '.join(f'{v:.2f}' for v in sp) or '-'} | {got}/{len(swallows)} |"
+            )
+    lines += sw_lines
+
+    root = Path(root)
+    names = damage_sessions(mc.list_train(root).train)
+    windows_fn = windows_fn or features._throat_windows
+    events_fn = events_fn or evaluate.load_events
+    acc = {label: {"per": {}, "p": [], "db": []} for label, _ in cases}
+    for n in names:
+        x, sample_t, t_start, start_idx, valid, t0, t1 = windows_fn(root / n)
+        swallows = events_fn(root / n)
+        t_start = np.asarray(t_start, np.float64)
+        pos = (train_eval.window_labels(t_start, swallows) == train_eval.POSITIVE) & np.asarray(valid)
+        hx = _band(x)
+        for label, params in cases:
+            y = run(x, params)
+            M = features_v2.mfe_windows(y, sample_t, start_idx, t1, CNN_SET)
+            prob = np.asarray(model_prob(m, M))
+            mask = config_mask(cfg, prob, valid, t_start)
+            acc[label]["per"][n] = evaluate.event_metrics(
+                swallows, t_start[mask].tolist(), t1 - t0, t0
+            )
+            acc[label]["p"].append(prob[pos])
+            if params is not None:
+                hy = _band(y)
+                for i in np.asarray(start_idx)[pos]:
+                    ex = float(np.sum(hx[i : i + studio.WINDOW_SAMPLES] ** 2))
+                    ey = float(np.sum(hy[i + D : i + D + studio.WINDOW_SAMPLES] ** 2))
+                    if ex > 0 and ey > 0:
+                        acc[label]["db"].append(10.0 * np.log10(ey / ex))
+            del y, M
+    lines += [
+        "",
+        f"### Training-side swallow check ({len(names)} sessions: "
+        f"{' and '.join(DAMAGE_CONDS)} conditions and the first meal; in-sample for the model)",
+        "",
+        "| case | swallows found | false indications (runs / min) | mean p, positive windows "
+        "| band energy change, positive windows: mean / min dB |",
+        "|---|---|---|---|---|",
+    ]
+    for label, _ in cases:
+        per = acc[label]["per"].values()
+        tot = {k: sum(v[k] for v in per) for k in
+               ("swallows", "detected", "false_positive_runs", "non_swallow_min")}
+        tot["false_positives_per_min"] = (
+            tot["false_positive_runs"] / tot["non_swallow_min"]
+            if tot["non_swallow_min"] > 0 else None
+        )
+        p = np.concatenate(acc[label]["p"]) if acc[label]["p"] else np.zeros(0)
+        db = np.asarray(acc[label]["db"])
+        lines.append(
+            f"| {label} | {tot['detected']}/{tot['swallows']} | "
+            f"{tot['false_positive_runs']} ({train_eval._per_min(tot['false_positives_per_min'])}) | "
+            f"{(p.mean() if len(p) else float('nan')):.3f} | "
+            + (f"{db.mean():.2f} / {db.min():.2f} |" if len(db) else "- |")
+        )
+    return lines
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -511,9 +826,29 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--models", type=Path, nargs="+",
         help="score the --test recordings with these models (no training)",
     )
+    ap.add_argument(
+        "--front", type=Path,
+        help="an mfe40 model without / with the mains_spike front-end over the "
+             "--test recordings and the training-side swallow check (no training)",
+    )
+    ap.add_argument(
+        "--front-param", action="append", default=None,
+        help="with --front: a front-end case NAME=VALUE[,NAME=VALUE] of "
+             "mains_spike constants (\"current\" = unchanged); repeatable; "
+             "default one case with the current constants",
+    )
     ap.add_argument("--allow-dirty", action="store_true")
     a = ap.parse_args(argv)
-    if a.hum is not None:
+    if a.front_param is not None and a.front is None:
+        ap.error("--front-param は --front と一緒に使う")
+    if a.front is not None:
+        if a.set or a.cv or a.final_model or a.extra or a.models or a.hum:
+            ap.error("--front は --test（と --front-param）とだけ使う")
+        try:
+            front_cases = [parse_front_params(t) for t in (a.front_param or ["current"])]
+        except ValueError as e:
+            ap.error(str(e))
+    elif a.hum is not None:
         if a.set or a.cv or a.final_model or a.extra or a.test or a.models:
             ap.error("--hum は単独で使う")
     elif a.models is not None:
@@ -530,6 +865,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     notes = check_inputs(a.allow_dirty)  # before any data is read
     print("# M4 experimental variant (not the recorded M4 result)\n")
     print("\n".join(notes))
+    if a.front is not None:
+        print("\n" + "\n".join(front_check(a.root, a.front, a.test, front_cases)), flush=True)
+        return
     if a.hum is not None:
         print("\n" + "\n".join(hum(a.root, a.hum)))
         return

@@ -273,6 +273,8 @@
                     <TextBlock Classes="label" Text="Window" Width="100" />
                     <NumericUpDown IsEnabled="False" FormatString="0 '(1.0 s)'" Value="16000" ShowButtonSpinner="False" />
                   </DockPanel>
+                  <controls:StateButton Content="Spike filter" IsChecked="{Binding IsSpikeFilterOn, Mode=OneWay}"
+                                        Command="{Binding ToggleSpikeFilterCommand}" ToolTip.Tip="{Binding SpikeFilterTip}" />
                   <Border Background="{Binding IndicatorBrush}" CornerRadius="6" Padding="10,8" Margin="0,4,0,0"
                           ToolTip.Tip="As the device's LED matrix: yellow while it runs, green for 1.75 s after a window of a swallow indication. An indication, not a judgement; not a medical device.">
                     <TextBlock Text="{Binding IndicatorText}" FontSize="20" FontWeight="SemiBold" Foreground="#101010"

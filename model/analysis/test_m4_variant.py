@@ -293,5 +293,170 @@ class VariantExtraRunTest(unittest.TestCase):
         self.assertTrue(any("extra training recordings: studio:h" in s for s in fl))
 
 
+def spiky_signal(seconds=12.0, bursts=(3.0, 8.0), seed=0):
+    """Noise, hum and bursts twice per 50 Hz period in [a, b) s (float32)."""
+    import mains_spike as ms
+
+    rng = np.random.default_rng(seed)
+    n = int(seconds * ms.SR)
+    t = np.arange(n) / ms.SR
+    x = 2e-3 * np.sin(2 * np.pi * 50.0 * t) + 3e-4 * rng.standard_normal(n)
+    k = 0
+    while True:
+        i = int(bursts[0] * ms.SR + 37 + k * 160)
+        if i + 24 >= bursts[1] * ms.SR:
+            break
+        x[i : i + 24] += 0.005 * np.hanning(24) * rng.standard_normal(24)
+        k += 1
+    return x.astype(np.float32)
+
+
+class FrontCheckTest(unittest.TestCase):
+    def test_parse_front_params(self):
+        self.assertEqual(mv.parse_front_params(""), {})
+        self.assertEqual(mv.parse_front_params("current"), {})
+        self.assertEqual(
+            mv.parse_front_params("ALPHA=1/16, WARMUP=16"),
+            {"ALPHA": 0.0625, "WARMUP": 16},
+        )
+        self.assertIsInstance(mv.parse_front_params("WARMUP=8")["WARMUP"], int)
+        for bad in ("ALPHA", "LP_TAPS=101", "alpha=0.1", "ALPHA=x"):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                mv.parse_front_params(bad)
+        self.assertEqual(mv.front_label({}), "front-end (current)")
+        self.assertEqual(mv.front_label({"ALPHA": 0.0625}), "front-end ALPHA=0.0625")
+
+    def test_front_constants_are_restored(self):
+        import mains_spike as ms
+
+        x = spiky_signal(seconds=3.0, bursts=(0.5, 3.0))
+        before = ms.ALPHA
+        y0 = ms.apply(x)
+        with mv.front_constants({"ALPHA": 1.0 / 2.0, "WARMUP": 4}):
+            self.assertEqual(ms.ALPHA, 0.5)
+            y1 = ms.apply(x)
+        self.assertEqual(ms.ALPHA, before)
+        self.assertFalse(np.array_equal(y0, y1))
+        np.testing.assert_array_equal(ms.apply(x), y0)
+
+    def test_sync_touches(self):
+        touches = mv.sync_touches(spiky_signal())
+        self.assertEqual(len(touches), 1)
+        a, b = touches[0]
+        self.assertLess(abs(a - 3.0), 0.3)
+        self.assertLess(abs(b - 8.0), 0.3)
+        # a broadband transient alone is not a touch
+        rng = np.random.default_rng(1)
+        x = spiky_signal(bursts=(0.0, 0.0))
+        x[3 * 16000 : 6 * 16000] += 0.01 * rng.standard_normal(3 * 16000).astype(np.float32)
+        self.assertEqual(mv.sync_touches(x), [])
+
+    def test_touch_metrics_and_swallow_probs(self):
+        cfg = m4_infer.parse_config(fixed_eval.M4_CONFIG)
+        t = 0.25 * np.arange(40)
+        c = t + 0.5
+        p = np.full(40, 0.1)
+        p[(c >= 2.0) & (c < 3.0)] = 0.95  # the first second of the touch [2, 6]
+        p[(c >= 3.0) & (c < 3.5)] = 0.6
+        m = mv.touch_metrics(t, p, [(2.0, 6.0)], cfg)[0]
+        self.assertAlmostEqual(m["to_enter"], 1.0)
+        self.assertAlmostEqual(m["to_half"], 1.5)
+        self.assertEqual(m["indications"], 1)
+        inside = (c >= 2.0) & (c <= 6.0)
+        self.assertAlmostEqual(m["frac_enter"], 4 / inside.sum())
+        self.assertEqual(mv.touch_metrics(t, np.full(40, 0.1), [(2.0, 6.0)], cfg)[0]["to_enter"], 0.0)
+        self.assertEqual(mv.touch_metrics(t, np.full(40, 0.9), [(2.0, 6.0)], cfg)[0]["to_enter"], float("inf"))
+        sp = mv.swallow_probs(t, p, [2.0, 8.0, 30.0])
+        self.assertAlmostEqual(sp[0], 0.95)
+        self.assertAlmostEqual(sp[1], 0.1)
+        self.assertTrue(np.isnan(sp[2]))
+
+    def test_damage_sessions(self):
+        names = [
+            "20261011-101644_self_water", "20261011-102354_self_talk",
+            "20261011-102854_self_saliva", "20261025-200807_self_meal",
+            "20261026-190244_self_meal",
+        ]
+        self.assertEqual(
+            mv.damage_sessions(names),
+            ["20261011-101644_self_water", "20261011-102854_self_saliva",
+             "20261025-200807_self_meal"],
+        )
+
+    def test_main_refuses_front_combinations(self):
+        err = io.StringIO()
+        for argv in (
+            ["x", "--front-param", "ALPHA=1/8"],
+            ["x", "--front", "m.npz", "--set", "mfe40", "--cv"],
+            ["x", "--front", "m.npz", "--front-param", "NOPE=1"],
+        ):
+            with self.subTest(argv), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit):
+                    mv.main(argv)
+
+
+class FrontCheckRunTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.tmp = Path(cls._tmp.name)
+        cls.root = build_raw(cls.tmp)
+        with (
+            mock.patch.object(fixed_eval, "M4_EXPECTED_TRAIN", None),
+            mock.patch.object(fixed_eval, "M4_EXPECTED_EVAL", None),
+        ):
+            cls.names = mc.list_train(cls.root).train
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_front_check(self):
+        import wave
+
+        rec = self.tmp / "studio" / "r"
+        rec.mkdir(parents=True)
+        x = spiky_signal()
+        with wave.open(str(rec / "r.wav"), "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(16000)
+            f.writeframes(np.round(x * 32768).astype("<i2").tobytes())
+        (rec / "r.marks.csv").write_text(
+            "sample,seconds,kind,probability,text\n160000,10.000,swallow,,\n",
+            encoding="utf-8",
+        )
+        model = self.tmp / "front.npz"
+        mc.save_model(model, fixed_eval.M4_CONFIG,
+                      {k: cnn_fit_random([], "", k) for k in (0, 1, 2)})
+        n = 12 * 16000
+        start_idx = np.arange(0, n - 16000 + 1, 4000)
+        seen = []
+
+        def windows_fn(p):
+            seen.append(p.name)
+            return (x, np.arange(n + 1) / 16000, start_idx / 16000, start_idx,
+                    np.ones(len(start_idx), bool), 0.0, n / 16000)
+
+        with production_ok(self.names):
+            lines = mv.front_check(
+                self.root, model, [str(rec)], [{}, {"ALPHA": 0.0625}],
+                windows_fn=windows_fn, events_fn=lambda p: [4.0, 9.0],
+            )
+        text = "\n".join(lines)
+        self.assertEqual(seen, mv.damage_sessions(self.names))
+        touch_rows = [s for s in lines if s.startswith("| r | ")]
+        self.assertEqual(len(touch_rows), 3 * 2)  # raw and two cases, swallow rows too
+        self.assertIn("front-end (current)", text)
+        self.assertIn("front-end ALPHA=0.0625", text)
+        swallows = 2 * len(seen)
+        self.assertIn(f"/{swallows} |", text)
+        other = self.tmp / "other.npz"
+        mc.save_model(other, mv.variant_config("mfe40f500"),
+                      {k: cnn_fit_random([], "", k) for k in (0, 1, 2)})
+        with self.assertRaises(SystemExit):
+            mv.front_check(self.root, other, [], [{}])
+
+
 if __name__ == "__main__":
     unittest.main()

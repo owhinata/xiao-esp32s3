@@ -42,6 +42,10 @@ public sealed class AppSettings
     public int ModelWindowSamples { get; set; } = 16000;
     /// <summary>Samples between windows; 0 for half a window.</summary>
     public int ModelHopSamples { get; set; }
+    /// <summary>The mains-synchronous spike filter before the M4 detector's input (<c>MainsSpike</c>).</summary>
+    public bool SpikeFilter { get; set; }
+    /// <summary>The mains frequency the spike filter follows: 50 or 60 Hz.</summary>
+    public double MainsHz { get; set; } = 50;
     /// <summary>The firmware repository; empty to look for it from the application's directory upwards.</summary>
     public string RepositoryDirectory { get; set; } = "";
 

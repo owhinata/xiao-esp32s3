@@ -17,7 +17,7 @@ namespace AudioStudio.App.Views;
 
 /// <summary>What the command line asks for at the start.</summary>
 public sealed record StartOptions(string? Board, bool Shell, string? Open, string? Model, string? Image, string? View,
-                                  string? Target);
+                                  string? Target, bool? SpikeFilter = null, double? MainsHz = null);
 
 public partial class MainWindow : Window
 {
@@ -41,7 +41,8 @@ public partial class MainWindow : Window
 
     public MainWindow(StartOptions options)
     {
-        _viewModel = new MainViewModel(options.Board, options.Shell, options.Image, options.Target);
+        _viewModel = new MainViewModel(options.Board, options.Shell, options.Image, options.Target,
+                                       options.SpikeFilter, options.MainsHz);
         InitializeComponent();
         if (string.Equals(options.View, "firmware", StringComparison.OrdinalIgnoreCase) && _viewModel.HasOta)
         {

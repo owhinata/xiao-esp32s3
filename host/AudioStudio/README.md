@@ -43,10 +43,13 @@ Arguments (all optional):
 | `--model <file.onnx\|file.npz>` | Load a model (otherwise the last one loaded, or `models/m4-0038.npz` when none was loaded before) |
 | `--image <file.bin>` | The firmware image to offer for an update |
 | `--view <audio\|firmware>` | The tab to start with (`firmware` only for a target with OTA) |
+| `--spike-filter <on\|off>` | The spike filter before the M4 detector (below), on or off (otherwise as last time; off at first) |
+| `--mains <50\|60>` | The mains frequency the spike filter follows (otherwise as last time; 50 at first) |
 
 The target, the address of each target, the view settings, the recording
-label, the model and its settings, and the height of the shell pane are
-saved to `~/.config/AudioStudio/settings.json` on exit (the `BoardAddress` of
+label, the model and its settings, the spike filter and its mains frequency
+(`SpikeFilter`, `MainsHz`; the frequency has no control in the window), and
+the height of the shell pane are saved to `~/.config/AudioStudio/settings.json` on exit (the `BoardAddress` of
 an older settings file is taken as the XIAO's address). Three settings exist
 only there: `RecordingsDirectory` (empty: `host/AudioStudio/recordings/` for
 a build inside the repository, `~/AudioStudio/recordings/` otherwise),
@@ -306,6 +309,23 @@ What it computes, with the same arithmetic as that repository's Python code
 - **Lost samples**: a window that overlaps lost samples (shaded red in the
   waveform) is not valid: it is not run, it ends a run and cannot start one,
   and the trace has no probability there.
+- **Spike filter** (off unless switched on): the detector's windows are
+  taken from the output of `MainsSpike`, the front-end of
+  `model/analysis/mains_spike.py` (set `mfe40ms` there), instead of the raw
+  samples. It limits short bursts above about 450 Hz that come back at the
+  same place of every mains period (seen while the wearer touches an
+  electric heater) and leaves sound that is not synchronous with the mains
+  alone; the Python module describes the algorithm. Its output is the input
+  delayed by 80 samples (5 ms) where it does not act; the windows read it 80
+  samples late, so window positions, indications and their times refer to
+  the raw samples as without the filter, and a window waits for 80 samples
+  after its end. Lost samples within 80 samples of a window make it not
+  valid. The filter runs over the samples in order: over a file from its
+  first sample (as the Python code over a recording), on the live stream
+  from 2 s before the first window run (as far as the live buffer holds
+  them) and afresh after a new stream or after the detector fell behind the
+  live buffer. Only the detector's input changes: the waveform, the
+  spectrogram, the levels and the recorded WAV file are the raw samples.
 
 Every window is run, in order: the post-processing needs each one. On the
 live stream the detector runs on its own thread as samples come, also while
@@ -317,7 +337,12 @@ and 50 ms in the Debug build (one thread, AMD Ryzen 7 8840U). A file is run
 in the background, batches of windows in parallel.
 
 The **Step** and **Window** fields show the detector's fixed 0.25 s and
-1.0 s. Below them:
+1.0 s. **Spike filter** below them switches the filter (remembered); the
+detector then starts again with or without it: on the live stream from the
+newest complete window, and over the whole of an opened file, so the same
+recording can be compared with and without the filter. The filter follows
+50 Hz mains, or 60 Hz with `--mains 60` (or `MainsHz` in the settings
+file). Below the button:
 
 - the LED as the device shows it: **running** (yellow) or **swallow
   indication** (green), for the newest window (live) or the last window in
@@ -327,8 +352,9 @@ The **Step** and **Window** fields show the detector's fixed 0.25 s and
   the last one (live) or of the last one in view (file);
 - for a file, the list of its swallow indications (the centre of the first
   positive window of each); clicking one moves the view there;
-- the weights file, its configuration string, the feature set with its mel
-  bands and mel matrix file, and the time per window.
+- the weights file, its configuration string, the detector's input (`none`
+  or the spike filter with its mains frequency), the feature set with its
+  mel bands and mel matrix file, and the time per window.
 
 Under the spectrogram the **probability trace** shows each window's
 probability over the 0.25 s around the window's centre, so that the windows
@@ -360,6 +386,17 @@ for example (from `host/AudioStudio/`):
 dotnet run --project src/AudioStudio.App -- --model models/m4-f200.npz
 ```
 
+The spike filter works with any of these models (it changes the input, not
+the model). The recorded detector with the filter, on a file:
+
+```bash
+dotnet run --project src/AudioStudio.App -- --model models/m4-0038.npz --spike-filter on --open recordings/<name>.wav
+```
+
+A model trained on the front-end's output (`set=mfe40ms`, such as
+`model/analysis/models/m4-ms.npz`) is not loaded: its configuration names a
+set this application does not take.
+
 The model's panel then shows `set=mfe40f200` in the configuration string and
 `features mfe40f200: 40 mel bands, 200 to 4000 Hz`. The model loaded last
 is loaded again at the next start; load `models/m4-0038.npz` to go back.
@@ -371,7 +408,16 @@ for synthetic signals (sines, a chirp, fixed-seed noise, bursts; no
 recordings), in `tests/AudioStudio.Core.Tests/Fixtures/`. They are written by
 `tools/make_m4_fixtures.py`, run with the interpreter of this repository's
 `model/` (numpy only; it writes nothing there); from the variant models
-there it also writes `m4_variant_<set>.npz`:
+there it also writes `m4_variant_<set>.npz`, and from
+`analysis/mains_spike.py` (which also needs scipy) `m4_mains_spike.npz`: a
+synthetic signal (hum, bursts twice per mains period with a wobbling
+amplitude, transients, swallow-like bursts; also one at 60 Hz), the
+front-end's output and the Python detector's probabilities, positive
+windows and LED over that output read 80 samples late. The C# filter keeps
+its state and computes in double precision as the Python code's float64
+and rounds the output to float as its float32; its samples are compared
+within 1e-6 (they come out equal) and the probabilities within 1e-5 (as for
+the detector without the filter):
 
 ```bash
 ../../model/.venv/bin/python tools/make_m4_fixtures.py \
@@ -462,7 +508,10 @@ While recording, the user leaves marks: timed notes beside the WAV file.
   `indication`, at the time of the indication (the centre of its first
   positive window, as the list of indications shows it), with the highest
   probability of its positive windows, so the notes can be read against
-  what was shown. An indication that started before the recording is left
+  what was shown. They are the indications of the detector as it ran, so
+  they depend on the model and on the **Spike filter** switch at the time;
+  the file does not say which were used. Switching either during a
+  recording ends an open indication there. An indication that started before the recording is left
   out. Only the M4 detector gives indications; with an ONNX model no
   `indication` rows are written (its classes have no indication).
 - **On disk at once**: each mark is written when it is made, without its
@@ -579,11 +628,11 @@ firmware.
 
 | Path | Role |
 | --- | --- |
-| `src/AudioStudio.Core` | The target profiles (`Targets/`), the audio stream protocol, its sources (TCP, a command over ssh) and client, the ssh connection (`Ssh/`), the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, and its runner), the OTA client, the shell (Telnet or ssh), the reading of the board's state as its profile describes it, board discovery, the settings, the marks of a recording (`Marks/`: the file, the log written as marks come, the live-to-WAV timeline, the indications of the detector, the counts, the editing of an opened file's marks) |
+| `src/AudioStudio.Core` | The target profiles (`Targets/`), the audio stream protocol, its sources (TCP, a command over ssh) and client, the ssh connection (`Ssh/`), the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, the spike filter before it, and its runner), the OTA client, the shell (Telnet or ssh), the reading of the board's state as its profile describes it, board discovery, the settings, the marks of a recording (`Marks/`: the file, the log written as marks come, the live-to-WAV timeline, the indications of the detector, the counts, the editing of an opened file's marks) |
 | `src/AudioStudio.App` | The Avalonia user interface (MVVM): the waveform, spectrogram, class strip, probability trace and marks controls, the view model, the window |
 | `models/` | The M4 swallow detector's weights and mel matrix |
 | `targets/` | The target profiles: `xiao-esp32s3.json`, `unoq.json` |
-| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host, microphone, volume and mute, hum filter and high-pass filter with the XIAO's profile, the profiles and their checks, the ssh transport with a fake ssh (the stream, exit code 75, a refused key, the shell and its queries, no process left behind), the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams, the marks (file round trip and quoting, sorting, the time and sample index, a mark during memo entry, indications with their highest probability, the counts, editing a file's marks: add, edit, move, delete, mark wrong, the indications kept, the file removed with the last mark, a write that fails) |
+| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host, microphone, volume and mute, hum filter and high-pass filter with the XIAO's profile, the profiles and their checks, the ssh transport with a fake ssh (the stream, exit code 75, a refused key, the shell and its queries, no process left behind), the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams, the spike filter and the detector behind it against the Python front-end's values (file and live, the stream's samples unchanged), the marks (file round trip and quoting, sorting, the time and sample index, a mark during memo entry, indications with their highest probability, the counts, editing a file's marks: add, edit, move, delete, mark wrong, the indications kept, the file removed with the last mark, a write that fails) |
 | `tools/` | `make_test_model.py`, `make_m4_fixtures.py`, `make_icon.py`, `install_desktop.sh` |
 | `tools/unoq/` | `audio_stream.py` (runs on the UNO Q), `deploy.sh`, `make_unoq_fixtures.py`, `test_audio_stream.py` |
 

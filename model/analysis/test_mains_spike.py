@@ -159,6 +159,19 @@ class SuppressionTest(unittest.TestCase):
         self.assertLess(db(high(y)[late & sm]) - db(high(x)[late & sm]), -10.0)
 
 
+    def test_onset(self):
+        # bursts that start after 3 s without them are limited from about
+        # 0.1 s on (the template follows at ALPHA per period)
+        x1, sm, _ = make(seconds=6.0, seed=2)
+        x0, _, _ = make(seconds=6.0, spikes=False, seed=2)
+        n = np.arange(len(x1))
+        x = np.where(n < 3 * SR, x0, x1)
+        sm = sm & (n >= 3 * SR)
+        y, x, sm = aligned(ms.apply(x), x, sm)
+        soon = (np.arange(len(x)) >= int(3.1 * SR)) & (np.arange(len(x)) < int(3.5 * SR))
+        self.assertLess(db(high(y)[soon & sm]) - db(high(x)[soon & sm]), -8.0)
+
+
 class SetTest(unittest.TestCase):
     def test_front_set(self):
         self.assertEqual(ms.FRONT_SETS, {"mfe40ms": "mfe40"})

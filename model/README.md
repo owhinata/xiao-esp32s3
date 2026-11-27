@@ -59,7 +59,7 @@ starts a child interpreter with `-I`, which still writes
 
 ```
 cd model
-.venv/bin/python -B -m unittest discover -s analysis   # 382 tests, about 2 minutes
+.venv/bin/python -B -m unittest discover -s analysis   # 416 tests, about 2 minutes
 .venv/bin/python -B -m unittest discover -s tools      # 10 tests
 ```
 
@@ -191,12 +191,42 @@ by 80 samples (5 ms) wherever it does not act. The module docstring gives
 the algorithm and constants; `MainsSpike` is the per-sample reference for
 ports, `apply` the same over a whole signal. A model of this set names
 `set=mfe40ms` in its config; `m4_infer.model_prob` scores its features,
-`Detector` (which takes windows) and the current AudioStudio reject it,
-since the front-end has to run on the stream before the windows are cut.
+`Detector` (which takes windows) and AudioStudio reject it, since the
+front-end has to run on the stream before the windows are cut. AudioStudio
+has the front-end as its **Spike filter** switch (a C# port of
+`MainsSpike`, checked against it) before the `mfe40` models it loads.
 
 ```
 .venv/bin/python -B analysis/m4_variant.py data/raw --set mfe40ms --cv --final-model analysis/models/m4-ms.npz --test $R
+.venv/bin/python -B analysis/m4_variant.py data/raw --front analysis/models/m4-0038.npz --test $R [--test ...] \
+    [--front-param current] [--front-param ALPHA=1/16 ...]
 ```
+
+`analysis/models/m4-ms.npz` was trained with the front-end's earlier
+template rate `ALPHA = 1/16` (now `1/8`); it was not retrained, so its
+training input differs a little from what `mfe40ms` now computes.
+
+`--front M.npz` (an `mfe40` model, no training) scores the model on its own
+and behind the front-end, once per `--front-param` case (`NAME=VALUE,...`
+of the constants `ALPHA`, `MARGIN`, `LIMIT`, `WARMUP`, `QUANT_STEP`,
+`FLOOR_GAIN2`, `ENV_TAU`, `PERIOD_RATE`, values as numbers or fractions;
+`current` or none: the module's constants), and prints:
+
+- per touch of each `--test` recording: the time from the touch's start
+  until the probability stays below 0.85 and below 0.5 (window centres),
+  the indications from 0.5 s before the touch to 1 s after it, and the
+  fraction of the touch's windows at or above 0.85. The touches are found
+  offline (`sync_touches`, non-causal, only to measure the causal
+  front-end): the 500-4000 Hz envelope folded over 12 mains periods every
+  5 ms, the per-bin median over the periods, its top 10 % against its lower
+  half above 11 dB, runs of at least 2 s;
+- the probability at each swallow of each recording (the highest in its
+  counting interval) and the swallows found;
+- the training-side swallow check, on the `water` and `saliva` condition
+  sessions and the first meal (10 sessions, 162 swallows; in the model's
+  training data): swallows found, false indications, the mean probability
+  of the positive windows, and the change of their 500-4000 Hz energy by
+  the front-end (mean and lowest, dB). About 1 minute per case.
 
 ## The evaluation side
 
