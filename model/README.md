@@ -7,15 +7,16 @@ every 0.25 s; three seeds averaged; hysteresis enter 0.85 / exit 0.65 and a
 detector's output is an *indication* of swallowing for the user's own notes.
 It is not a medical device and makes no judgement or diagnosis.
 
-The files come unchanged from the author's repository zaitaku-mealpace
-(see `ORIGIN.md`). The comments, messages and decision records are in
-Japanese.
+The files come from the author's repository zaitaku-mealpace; a few
+scripts were extended here for the experimental feature variants below
+(`ORIGIN.md` lists the edited and added files). The copied comments,
+messages and decision records are in Japanese.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `analysis/` | the scripts, their tests, the mel matrices, `models/m4-0038.npz` (the M4 model) |
+| `analysis/` | the scripts, their tests, the mel matrices, `models/m4-0038.npz` (the M4 model), `models/m4-f200.npz` and `models/m4-f500.npz` (experimental variants) |
 | `tools/throat_check.py` | reading and checking a throat-microphone session (used by `analysis/features.py`) |
 | `docs/` | evaluation rules (`evaluation.md`), session format (`data-schema.md`), recording protocol, the decision records the code checks or implements (`decisions/`), the markers of the one-time evaluation-side scoring (`log/`) |
 | `data/` | the recordings (not in Git) |
@@ -58,7 +59,7 @@ starts a child interpreter with `-I`, which still writes
 
 ```
 cd model
-.venv/bin/python -B -m unittest discover -s analysis   # 373 tests, about 2 minutes
+.venv/bin/python -B -m unittest discover -s analysis   # 382 tests, about 2 minutes
 .venv/bin/python -B -m unittest discover -s tools      # 10 tests
 ```
 
@@ -96,6 +97,50 @@ that, negative otherwise (decision 0014). Counting: a swallow is found when
 a positive window's centre is in `[t - 0.5, t + 1.5]`; false indications
 per minute are runs of positive windows outside those intervals per minute
 of the rest (`docs/evaluation.md`, decision 0011).
+
+## Experimental feature variants
+
+The CNN feature set names the lower edge of its 40 mel bands
+(`features_np.CNN_FMIN_HZ`): `mfe40` is 0-4000 Hz (the M4 set),
+`mfe40f200` is 200-4000 Hz and `mfe40f500` 500-4000 Hz. Framing,
+pre-emphasis, window, FFT, HTK scale, 40 bands, the upper edge 4000 Hz and
+the log are the same; only the mel matrix differs
+(`analysis/mel40_htk_<low>_4000.npy`, built by
+`make_features_np_consts.py`). A model's `config` string names its set
+(`set=mfe40f200 ...`), and `m4_infer` (`Detector`, `model_prob` callers)
+computes that set's features.
+
+`analysis/m4_variant.py` runs a variant with the otherwise identical 0038
+configuration (`classifier=cnn seeds=0,1,2 hard_negative=none post=hyst
+enter=0.85 exit=0.65 cap_s=none refractory_s=0.5`) on the training-side
+sessions only (`M4_EXPECTED_TRAIN`; the evaluation side is not opened). It
+is not the recorded M4 result: `fixed_eval.M4_CONFIG`, the 0037 / 0038
+lines, `m4_compare.py --final-model` and `m4_final_eval.py` still take only
+`set=mfe40`.
+
+```
+cd model
+.venv/bin/python -B analysis/m4_variant.py data/raw --set mfe40f200 --cv
+.venv/bin/python -B analysis/m4_variant.py data/raw --set mfe40f200 --final-model analysis/models/m4-f200.npz
+.venv/bin/python -B analysis/m4_variant.py data/raw --hum analysis/models/m4-0038.npz analysis/models/m4-f200.npz analysis/models/m4-f500.npz
+```
+
+- `--cv`: the cross-validation of the candidate C4 x P2 of `m4_compare.py`
+  (folds by collection day, 18 CNN trainings, about an hour), with the
+  numbers at the configuration's operating point and at the point the rule
+  picks from the P2 grid. `--set mfe40 --cv` repeats the recorded C4 x P2
+  numbers.
+- `--final-model`: trains on all training sessions, saves, reads back and
+  prints the sha256 (about 16 minutes); refuses an existing file and the set
+  `mfe40` (that is `m4_compare.py --final-model`).
+- `--hum`: each model over the training-side `quiet` sessions as recorded,
+  with the 50 Hz line at -7 dB, and with the hum lines 50-450 Hz removed
+  (FFT of the whole 16 kHz signal, +-3 Hz around each multiple of 50 Hz);
+  prints the median probability and the fraction of windows at or above
+  0.85. The edited signals stay in memory. The quiet sessions are in every
+  model's training data.
+- `--allow-dirty` runs although tracked files have uncommitted changes; the
+  report says so.
 
 ## The evaluation side
 

@@ -206,12 +206,15 @@ def load_info(session: Path) -> Info:
     )
 
 
-def load_all(root: Path, names: Sequence[str], lr: bool = True):
-    """(CNN の data, LR の data | None, Info の辞書)。"""
+def load_all(
+    root: Path, names: Sequence[str], lr: bool = True, cnn_set: str = CNN_SET
+):
+    """(CNN の data, LR の data | None, Info の辞書)。cnn_set is the CNN
+    feature set (mfe40 unless an experimental variant, m4_variant.py)."""
     import compare
 
     root = Path(root)
-    d_cnn = compare.load_train(root, names, CNN_SET)
+    d_cnn = compare.load_train(root, names, cnn_set)
     d_lr = compare.load_train(root, names, LR_SET) if lr else None
     info = {n: load_info(root / n) for n in names}
     return d_cnn, d_lr, info
@@ -1180,10 +1183,19 @@ def final_model(
     """0038 の構成で学習側の全セッションから最終モデルを作り、保存して読み戻し、
     一致を確かめる。戻り値は報告の行。外れたらファイルを消して止まる。"""
     check_final()
+    return train_final(root, out, fixed_eval.M4_CONFIG, fit, score, loader)
+
+
+def train_final(
+    root: Path, out: Path, config: str, fit=None, score=None, loader=None
+) -> list:
+    """The body of final_model for a given configuration string: train on all
+    training-side sessions (list_train), save, read back and compare. It does
+    not check anything about the configuration; final_model checks the
+    recorded one (check_final), m4_variant.py its experimental ones."""
     out = Path(out)
     if out.exists():
         raise SystemExit(f"出力先が既にあります（上書きしない）: {out}")
-    config = fixed_eval.M4_CONFIG
     cfg = parse_config(config)
     root = Path(root)
     listing = list_train(root)
@@ -1215,7 +1227,7 @@ def final_model(
     try:
         loaded = load_model(out)
         if loaded["config"] != config:
-            raise SystemExit("読み戻した config が M4_CONFIG と違います")
+            raise SystemExit("読み戻した config が保存した config と違います")
         diff, same = 0.0, True
         for d, p in zip(data, want):
             q = model_prob(loaded, d.feats.X)

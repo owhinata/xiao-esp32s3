@@ -286,8 +286,9 @@ What it computes, with the same arithmetic as that repository's Python code
   stream, the detector starts at the newest complete window.
 - **Features**: the samples divided by 32768, pre-emphasis 0.97 over the
   whole window, frames of 400 samples every 160 (98 frames), a symmetric
-  Hamming window, |FFT(512)|²/512, 40 mel bands (0 to 4000 Hz) from the mel
-  matrix, log(x + 1e-10).
+  Hamming window, |FFT(512)|²/512, 40 mel bands from the mel matrix of the
+  configuration's feature set (`mfe40`: 0 to 4000 Hz; the experimental
+  `mfe40f200` and `mfe40f500`: 200 or 500 to 4000 Hz), log(x + 1e-10).
 - **Probability**: per seed, the features normalised with that seed's mean
   and standard deviation, then three 3×3 convolutions with ReLU (2×2 max
   pooling after the first two), the global mean, one fully connected output
@@ -326,7 +327,8 @@ The **Step** and **Window** fields show the detector's fixed 0.25 s and
   the last one (live) or of the last one in view (file);
 - for a file, the list of its swallow indications (the centre of the first
   positive window of each); clicking one moves the view there;
-- the weights file, its configuration string, and the time per window.
+- the weights file, its configuration string, the feature set with its mel
+  bands and mel matrix file, and the time per window.
 
 Under the spectrogram the **probability trace** shows each window's
 probability over the 0.25 s around the window's centre, so that the windows
@@ -339,24 +341,40 @@ The files, in `models/`:
 | File | What |
 | --- | --- |
 | `m4-0038.npz` | The weights: three seeds of the CNN with their normalisation, and the configuration string `config` (`set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5`) |
-| `mel40_htk_0_4000.npy` | The mel matrix (40 × 257, float64); it is looked up beside the weights file, under this name |
+| `mel40_htk_0_4000.npy` | The mel matrix of `mfe40` (40 × 257, float64, 0 to 4000 Hz) |
+| `m4-f200.npz`, `m4-f500.npz` | Experimental variants: the same configuration with `set=mfe40f200` / `set=mfe40f500`, trained the same way on the same training-side sessions (`model/analysis/m4_variant.py`); their mel bands start at 200 / 500 Hz, so the mains hum below that edge is not an input (for `mfe40f500` all lines from 50 to 450 Hz). Not the recorded M4 detector |
+| `mel40_htk_200_4000.npy`, `mel40_htk_500_4000.npy` | The variants' mel matrices |
 
-The weights file is read without code execution (numpy's `.npz`, a zip of
-`.npy` arrays) and checked as the Python code checks it: exactly the keys the
-configuration needs, each with its shape and dtype, and `format` 1. Only the
-`mfe40` CNN configurations are supported.
+The mel matrix is looked up beside the weights file under the name of the
+configuration's set (`mel40_htk_<low>_4000.npy`). The weights file is read
+without code execution (numpy's `.npz`, a zip of `.npy` arrays) and checked
+as the Python code checks it: exactly the keys the configuration needs, each
+with its shape and dtype, and `format` 1. The CNN configurations of the sets
+`mfe40`, `mfe40f200` and `mfe40f500` are supported.
+
+A variant is loaded like any model, with **Load…** or on the command line,
+for example (from `host/AudioStudio/`):
+
+```bash
+dotnet run --project src/AudioStudio.App -- --model models/m4-f200.npz
+```
+
+The model's panel then shows `set=mfe40f200` in the configuration string and
+`features mfe40f200: 40 mel bands, 200 to 4000 Hz`. The model loaded last
+is loaded again at the next start; load `models/m4-0038.npz` to go back.
 
 #### Regenerating the fixtures
 
 The tests compare the C# detector with values that the Python code gives
 for synthetic signals (sines, a chirp, fixed-seed noise, bursts; no
 recordings), in `tests/AudioStudio.Core.Tests/Fixtures/`. They are written by
-`tools/make_m4_fixtures.py`, run with a zaitaku-mealpace checkout's own
-interpreter (numpy only; it writes nothing into the checkout):
+`tools/make_m4_fixtures.py`, run with the interpreter of this repository's
+`model/` (numpy only; it writes nothing there); from the variant models
+there it also writes `m4_variant_<set>.npz`:
 
 ```bash
-/path/to/zaitaku-mealpace/.venv/bin/python tools/make_m4_fixtures.py \
-    --mealpace /path/to/zaitaku-mealpace --out tests/AudioStudio.Core.Tests/Fixtures
+../../model/.venv/bin/python tools/make_m4_fixtures.py \
+    --mealpace ../../model --out tests/AudioStudio.Core.Tests/Fixtures
 ```
 
 The UNO Q tool's fixtures (`unoq_decimate3.s16`, the left channel of a

@@ -186,5 +186,49 @@
  {
   "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85=1 exit=0.65 cap_s=none refractory_s=0.5",
   "ok": false
+ },
+ {
+  "text": "set=mfe40f200 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": true,
+  "set": "mfe40f200",
+  "kind": "cnn",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "hard_negative": false,
+  "post": "hyst",
+  "threshold": null,
+  "enter": 0.85,
+  "exit": 0.65,
+  "cap_s": null,
+  "refractory_s": 0.5
+ },
+ {
+  "text": "set=mfe40f500 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": true,
+  "set": "mfe40f500",
+  "kind": "cnn",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "hard_negative": false,
+  "post": "hyst",
+  "threshold": null,
+  "enter": 0.85,
+  "exit": 0.65,
+  "cap_s": null,
+  "refractory_s": 0.5
+ },
+ {
+  "text": "set=mfe40f100 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40f200 classifier=lr seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": false
  }
 ]

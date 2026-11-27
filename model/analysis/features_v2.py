@@ -100,6 +100,9 @@ WINDOW_SAMPLES = features.WINDOW_SAMPLES  # 16000（判定の窓 1.0 秒）
 MW_LENGTHS_S = (0.5, 1.0, 2.0)
 FEATURE_SETS = ("base15", "a52", "base15_mw", "a52_mw")
 CNN_SET = "mfe40"
+# CNN sets: mfe40 and the experimental variants with a higher lower mel edge
+# (features_np.CNN_FMIN_HZ)
+CNN_SETS = features_np.CNN_SETS
 # 判定の窓の終端より後に要る音（秒）。装置で結果が出るまでの追加の待ち時間
 EXTRA_LATENCY_S = {
     "base15": 0.0,
@@ -211,10 +214,13 @@ def a52_segment(x: np.ndarray) -> np.ndarray:
     return a_stats(features_np.mfcc_a(x))
 
 
-def mfe_one(seg: np.ndarray) -> np.ndarray:
+def mfe_one(seg: np.ndarray, feature_set: str = CNN_SET) -> np.ndarray:
     """判定の窓の波形（16000 サンプル）→ 対数メル 40 本 (98, 40) float32。
-    16000 に満たなければ全部 0（features_np.mfe40）。"""
-    return features_np.mfe40(seg)
+    16000 に満たなければ全部 0（features_np.mfe40）。feature_set picks the CNN
+    set (features_np.mfe); the default is mfe40."""
+    if feature_set == CNN_SET:
+        return features_np.mfe40(seg)
+    return features_np.mfe(seg, feature_set)
 
 
 def logmel_frames(x: np.ndarray) -> np.ndarray:
@@ -300,17 +306,28 @@ def extract(session_dir: Path, feature_set: str) -> features.WindowFeatures:
     )
 
 
-def extract_mfe(session_dir: Path) -> tuple:
-    """CNN の入力: (t_start_s, M (n, 98, 40) float32, valid)。"""
+def extract_mfe(session_dir: Path, feature_set: str = CNN_SET) -> tuple:
+    """CNN の入力: (t_start_s, M (n, 98, 40) float32, valid)。feature_set is
+    one of CNN_SETS (default mfe40)."""
+    if feature_set not in CNN_SETS:
+        raise ValueError(f"CNN の特徴量の組ではありません: {feature_set!r}")
     x, sample_t, t_start, start_idx, valid, _, t1 = features._throat_windows(
         Path(session_dir)
     )
-    lo, hi = _session_bounds(x, sample_t, start_idx, t1)
-    M = np.zeros((len(t_start), 98, N_MEL_CNN), dtype=np.float32)
+    M = mfe_windows(x, sample_t, start_idx, t1, feature_set)
+    return t_start, M, valid
+
+
+def mfe_windows(x, sample_t, start_idx, t1_s, feature_set: str = CNN_SET):
+    """The CNN input M (n, 98, 40) float32 of the windows start_idx of an
+    in-memory 16 kHz signal x (the session's, from features._throat_windows),
+    with the same bounds as extract_mfe."""
+    lo, hi = _session_bounds(x, sample_t, start_idx, t1_s)
+    M = np.zeros((len(start_idx), 98, N_MEL_CNN), dtype=np.float32)
     for k, i in enumerate(start_idx):
         a, b = segment_bounds(i, 1.0, lo, hi)
-        M[k] = mfe_one(x[a:b])
-    return t_start, M, valid
+        M[k] = mfe_one(x[a:b], feature_set)
+    return M
 
 
 # --- 小さな CNN の numpy の順伝播（docs/decisions/0033。学習は compare.py） ---

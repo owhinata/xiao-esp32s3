@@ -25,6 +25,18 @@ public sealed record M4Config(
     public static readonly string[] Keys =
         ["set", "classifier", "seeds", "hard_negative", "post", "threshold", "enter", "exit", "cap_s", "refractory_s"];
 
+    /// <summary>
+    /// The CNN feature sets and the lower edge (Hz) of their 40 mel bands
+    /// (features_np.CNN_FMIN_HZ): <c>mfe40</c>, the recorded detector's, and
+    /// the experimental variants that leave the mains hum below their lower edge out. They
+    /// differ only in the mel matrix; the upper edge is 4000 Hz for all.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, int> CnnSets =
+        new Dictionary<string, int> { ["mfe40"] = 0, ["mfe40f200"] = 200, ["mfe40f500"] = 500 };
+
+    /// <summary>The lower edge (Hz) of the mel bands of a CNN configuration's set.</summary>
+    public int MelLowHz => CnnSets[Set];
+
     /// <summary>The only refractory period the configuration allows (postprocess.REFRACTORY_S).</summary>
     public const double RefractoryChoice = 0.5;
     /// <summary>The caps of a run the configuration allows (postprocess.CAP_GRID_S).</summary>
@@ -41,7 +53,7 @@ public sealed record M4Config(
         Dictionary<string, string> c = kv.ToDictionary(k => k[0], k => k[1]);
         bool lr = c["classifier"] == "lr";
         bool ok =
-            ((c["set"], c["classifier"]) is ("a52", "lr") or ("mfe40", "cnn"))
+            ((c["set"], c["classifier"]) is ("a52", "lr") || (CnnSets.ContainsKey(c["set"]) && c["classifier"] == "cnn"))
             && (lr ? c["seeds"] == "-" : c["seeds"] is "0" or "0,1,2")
             && (lr ? c["hard_negative"] == "none" : c["hard_negative"] is "none" or "w3.0")
             && c["post"] is "none" or "hyst"

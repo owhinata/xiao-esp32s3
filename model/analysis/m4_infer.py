@@ -29,6 +29,10 @@ import features_np, led_rule, postprocess
 
 HN_WEIGHT = 3.0  # hard negative の窓の損失の重み（探索しない）
 CNN_SET = "mfe40"
+# CNN sets a configuration may name: mfe40 (0038) and the experimental
+# variants with a higher lower mel edge (features_np.CNN_FMIN_HZ). The model's
+# config string names its set, so inference uses that set's mel matrix.
+CNN_SETS = features_np.CNN_SETS
 LR_SET = "a52"
 # 1 ホップ（窓の開始の間隔）。evaluate.HOP_S と同じ値
 HOP_S = postprocess.HOP_S
@@ -71,7 +75,10 @@ def parse_config(text: str) -> dict:
     c = dict(kv)
     lr = c["classifier"] == "lr"
     ok = (
-        (c["set"], c["classifier"]) in ((LR_SET, "lr"), (CNN_SET, "cnn"))
+        (
+            (c["set"], c["classifier"]) == (LR_SET, "lr")
+            or (c["set"] in CNN_SETS and c["classifier"] == "cnn")
+        )
         and c["seeds"] in (("-",) if lr else ("0", "0,1,2"))
         and c["hard_negative"]
         in (("none",) if lr else ("none", f"w{HN_WEIGHT:.1f}"))
@@ -246,6 +253,8 @@ class Detector:
     step(seg16k, window_t_ms) -> (prob, positive, led, feat | None)
       seg16k: 16 kHz の 1 窓（16000 サンプル、/ 32768 の後の float32）。
       mfe40（feat=True のときは features_np.mfe_and_feat で FEAT の 82 次元も）
+      -- or, for a model of an experimental CNN set, features_np.mfe of that
+      set (FEAT is defined on mfe40 only, so feat=True needs mfe40)
       → model_prob（B = 1。種ごとの正規化・cnn_forward・ensemble_mean）
       → PostStepper（0038 の enter・exit・cap_s・refractory_s。t = k × 0.25）
       → LedStepper（0018）。窓 k は step を呼んだ順の番号。
@@ -256,9 +265,11 @@ class Detector:
     ):
         self.model = model
         self.cfg = model["cfg"] if cfg is None else cfg
-        if self.cfg["kind"] != "cnn" or self.cfg["set"] != CNN_SET:
-            raise ValueError("Detector は mfe40 の CNN の構成だけを受けます")
+        if self.cfg["kind"] != "cnn" or self.cfg["set"] not in CNN_SETS:
+            raise ValueError("Detector は CNN（CNN_SETS）の構成だけを受けます")
         self.feat = bool(feat)
+        if self.feat and self.cfg["set"] != CNN_SET:
+            raise ValueError("FEAT (feat=True) is defined on mfe40 only")
         if self.cfg["post"] == "none":
             self.post = None
         else:
@@ -275,6 +286,8 @@ class Detector:
         """(mfe40, FEAT | None)。状態を進めない。"""
         if self.feat:
             return features_np.mfe_and_feat(seg16k)
+        if self.cfg["set"] != CNN_SET:
+            return features_np.mfe(seg16k, self.cfg["set"]), None
         return features_np.mfe40(seg16k), None
 
     def prob(self, M) -> float:

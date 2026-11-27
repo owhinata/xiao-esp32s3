@@ -60,12 +60,14 @@ License, as this repository.
 |---|---|---|
 | `models/m4-0038.npz` | `analysis/models/m4-0038.npz` (unchanged, SHA-256 `c786086f069c55c5...`) | The weights of the "M4" detector: three seeds of a small CNN with their normalisation, and its configuration string. Trained on the author's own throat-microphone recordings, as that repository's README and `docs/decisions/0038-m4-detector-config.md` describe. |
 | `models/mel40_htk_0_4000.npy` | `analysis/mel40_htk_0_4000.npy` (unchanged, SHA-256 `3afb1f205d69ab4c...`) | The mel matrix (40 bands, 0 to 4000 Hz, for an FFT of 512 at 16 kHz) that its features use. |
+| `models/m4-f200.npz`, `models/m4-f500.npz` | this repository's `model/analysis/models/` (SHA-256 `039521eb85bf8107...`, `b8cbf2d24cbef191...`) | Experimental variants trained here with `model/analysis/m4_variant.py`: the same configuration and training sessions with the feature sets `mfe40f200` / `mfe40f500` (mel bands from 200 / 500 Hz). Not the recorded M4 detector. |
+| `models/mel40_htk_200_4000.npy`, `models/mel40_htk_500_4000.npy` | this repository's `model/analysis/` (SHA-256 `e95cec159ef25394...`, `52815dbff587548d...`) | The variants' mel matrices (`make_features_np_consts.py`). |
 
 The C# code of the detector (`src/AudioStudio.Core/Model/M4Config.cs`,
 `M4Model.cs`, `M4Steppers.cs`) is written for AudioStudio after that
 repository's Python code: `parse_config`, `_check_arrays`, `model_prob` and
-`Detector` of `analysis/m4_infer.py`, `mfe40` and `cnn_forward` of
-`analysis/features_np.py`, `PostStepper` of `analysis/postprocess.py`, and
+`Detector` of `analysis/m4_infer.py`, `mfe40`, `mfe` (the variants'
+feature sets) and `cnn_forward` of `analysis/features_np.py`, `PostStepper` of `analysis/postprocess.py`, and
 `LedStepper` of `analysis/led_rule.py`. The fixtures in
 `tests/AudioStudio.Core.Tests/Fixtures/` are the values that Python code
 gives for synthetic signals, written by `tools/make_m4_fixtures.py`.

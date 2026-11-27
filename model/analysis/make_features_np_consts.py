@@ -5,6 +5,10 @@
   analysis/mel40_htk_0_4000.npy  メル 40 本（0〜4000 Hz、HTK、面積の正規化なし）
                                  (40, 257) float64。librosa.filters.mel の値。
   analysis/mel26_htk_0_4000.npy  メル 26 本（同じ。a52 用）(26, 257) float64。
+  analysis/mel40_htk_200_4000.npy, mel40_htk_500_4000.npy
+                                 the 40-band matrices of the experimental CNN
+                                 sets mfe40f200 / mfe40f500 (same construction,
+                                 lower edge 200 / 500 Hz; features_np.CNN_FMIN_HZ).
   analysis/features_np_ref.npz   照合用の参照: 間引きのタップ（scipy の firwin、
                                  61）、決定的な合成入力（features_np.reference_*。
                                  入力の信号そのものは入れない）に対する librosa 版
@@ -13,7 +17,7 @@
 
 使い方: python analysis/make_features_np_consts.py [--write]
 既定は作り直した値と既にあるファイルを比べるだけ（違えば 1 で止まる）。--write の
-ときだけ上の 3 つのパスに書く。features_v2 は import の時点でメル行列の .npy を
+ときだけ上のパスに書く。features_v2 は import の時点でメル行列の .npy を
 読むので、.npy が消えたときは git から戻す（生成物はコミット済み）。
 """
 
@@ -30,16 +34,25 @@ import librosa  # noqa: E402
 import scipy.fft  # noqa: E402
 import scipy.signal  # noqa: E402
 
-MEL_SPECS = {fnp.MEL40_PATH: fnp.N_MEL_CNN, fnp.MEL26_PATH: fnp.N_MEL_A}
+# path -> (number of bands, lower edge in Hz)
+MEL_SPECS = {
+    fnp.MEL40_PATH: (fnp.N_MEL_CNN, 0.0),
+    fnp.MEL26_PATH: (fnp.N_MEL_A, 0.0),
+    **{
+        fnp.mel40_path(f): (fnp.N_MEL_CNN, f)
+        for s, f in fnp.CNN_FMIN_HZ.items()
+        if s != "mfe40"
+    },
+}
 REF_KEYS = ("taps", "mfe40", "a52", "cnn")
 
 
-def librosa_mel(n_mels: int) -> np.ndarray:
+def librosa_mel(n_mels: int, fmin: float = 0.0) -> np.ndarray:
     return librosa.filters.mel(
         sr=fnp.SR,
         n_fft=fnp.N_FFT,
         n_mels=n_mels,
-        fmin=0.0,
+        fmin=fmin,
         fmax=fnp.A_FMAX_HZ,
         htk=True,
         norm=None,
@@ -80,7 +93,7 @@ def ref_a52(x: np.ndarray, mel26: np.ndarray) -> np.ndarray:
 
 def build() -> tuple[dict, dict]:
     """(パス → メル行列, 参照の dict)。ファイルは書かない。"""
-    mels = {p: librosa_mel(n) for p, n in MEL_SPECS.items()}
+    mels = {p: librosa_mel(n, f) for p, (n, f) in MEL_SPECS.items()}
     mel40, mel26 = mels[fnp.MEL40_PATH], mels[fnp.MEL26_PATH]
     x = fnp.reference_signal()
     params, M = fnp.reference_cnn()
@@ -120,7 +133,7 @@ def differences(mels: dict, ref: dict) -> list[str]:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--write", action="store_true", help="3 つのパスに書く")
+    ap.add_argument("--write", action="store_true", help="上のパスに書く")
     a = ap.parse_args(argv)
     mels, ref = build()
     if a.write:

@@ -329,6 +329,117 @@ public sealed class M4Tests(ITestOutputHelper output)
         }
     }
 
+    // ---- the experimental variants (a higher lower edge of the mel bands) ----
+
+    private static readonly Dictionary<string, Lazy<M4Model>> s_variants = new()
+    {
+        ["mfe40f200"] = new(() => M4Model.Load(Path.Combine(AppContext.BaseDirectory, "models", "m4-f200.npz"))),
+        ["mfe40f500"] = new(() => M4Model.Load(Path.Combine(AppContext.BaseDirectory, "models", "m4-f500.npz"))),
+    };
+
+    [Theory]
+    [InlineData("mfe40f200", 200)]
+    [InlineData("mfe40f500", 500)]
+    public void A_variant_model_loads_with_the_mel_matrix_of_its_set(string set, int low)
+    {
+        M4Model model = s_variants[set].Value;
+        model.Config.Set.Should().Be(set);
+        model.Config.MelLowHz.Should().Be(low);
+        model.Config.Text.Should().Be(s_model.Value.Config.Text.Replace("set=mfe40 ", $"set={set} "),
+            "only the feature set differs from the recorded configuration");
+        Path.GetFileName(model.MelPath).Should().Be($"mel40_htk_{low}_4000.npy");
+        M4Model.MelFileNameOf("mfe40").Should().Be(M4Model.MelFileName);
+
+        Dictionary<string, NpyArray> f = Npy.ReadNpz(Fixture($"m4_variant_{set}.npz"));
+        f["config"].ToStrings()[0].Should().Be(model.Config.Text);
+        double[] signal = Npy.ReadNpz(Fixture("m4_reference.npz"))["signal"].ToFloat64();
+        float[] mfe = model.Mfe40(signal);
+        MaxDifference(mfe, s_model.Value.Mfe40(signal)).Should().BeGreaterThan(0.1, "the bands are not those of mfe40");
+    }
+
+    [Theory]
+    [InlineData("mfe40f200")]
+    [InlineData("mfe40f500")]
+    public void A_variant_gives_the_values_of_the_Python_code(string set)
+    {
+        M4Model model = s_variants[set].Value;
+        Dictionary<string, NpyArray> f = Npy.ReadNpz(Fixture($"m4_variant_{set}.npz"));
+
+        float[] mfe = model.Mfe40(Npy.ReadNpz(Fixture("m4_reference.npz"))["signal"].ToFloat64());
+        double d = MaxDifference(mfe, f["ref_mfe"].ToFloat32());
+        Report($"{set} reference features, largest difference", d);
+        d.Should().BeLessThanOrEqualTo(MfeTolerance);
+        double[] refSeeds = f["ref_seed_prob"].ToFloat64();
+        for (int i = 0; i < refSeeds.Length; i++)
+        {
+            Math.Abs(model.SeedProbability(i, mfe) - refSeeds[i]).Should().BeLessThanOrEqualTo(ProbabilityTolerance);
+        }
+        model.Probability(mfe).Should().BeApproximately(f["ref_prob"].ToFloat64()[0], ProbabilityTolerance);
+
+        Dictionary<string, NpyArray> w = Npy.ReadNpz(Fixture("m4_windows.npz"));
+        string[] names = w["names"].ToStrings();
+        short[] windows = w["windows"].ToInt16();
+        float[] mfeAll = f["win_mfe"].ToFloat32();
+        double[] prob = f["win_prob"].ToFloat64(), seedProb = f["win_seed_prob"].ToFloat64();
+        int n = M4Model.Frames * M4Model.Mels, seeds = model.Seeds.Count;
+        double worstMfe = 0, worstP = 0;
+        for (int k = 0; k < names.Length; k++)
+        {
+            float[] m = model.Mfe40(windows.AsSpan(k * M4Model.WindowSamples, M4Model.WindowSamples));
+            double dm = MaxDifference(m, mfeAll[(k * n)..((k + 1) * n)]);
+            double dp = Math.Abs(model.Probability(m) - prob[k]);
+            dm.Should().BeLessThanOrEqualTo(MfeTolerance, names[k]);
+            dp.Should().BeLessThanOrEqualTo(ProbabilityTolerance, names[k]);
+            for (int s = 0; s < seeds; s++)
+            {
+                Math.Abs(model.SeedProbability(s, m) - seedProb[k * seeds + s]).Should().BeLessThanOrEqualTo(ProbabilityTolerance, names[k]);
+            }
+            worstMfe = Math.Max(worstMfe, dm);
+            worstP = Math.Max(worstP, dp);
+        }
+        Report($"{set} synthetic windows features, largest difference", worstMfe);
+        Report($"{set} synthetic windows probability, largest difference", worstP);
+
+        short[] stream = StreamSignal();
+        double[] streamProb = f["stream_prob"].ToFloat64();
+        long[] positive = f["stream_positive"].ToInt64(), led = f["stream_led"].ToInt64();
+        M4Detector detector = new(model);
+        float[] window = new float[M4Model.WindowSamples];
+        double worst = 0;
+        for (int k = 0; k < streamProb.Length; k++)
+        {
+            for (int i = 0; i < window.Length; i++)
+            {
+                window[i] = stream[k * M4Model.HopSamples + i] / 32768f;
+            }
+            M4Step s = detector.Step(window);
+            worst = Math.Max(worst, Math.Abs(s.Probability - streamProb[k]));
+            s.Positive.Should().Be(positive[k] == 1, $"window {k}");
+            s.Led.Should().Be((int)led[k], $"window {k}");
+        }
+        Report($"{set} stream probability, largest difference", worst);
+        worst.Should().BeLessThanOrEqualTo(ProbabilityTolerance);
+    }
+
+    [Fact]
+    public void A_variant_without_its_mel_matrix_is_refused()
+    {
+        string dir = Directory.CreateTempSubdirectory("audiostudio-m4-").FullName;
+        try
+        {
+            string path = Path.Combine(dir, "m4-f200.npz");
+            File.Copy(s_variants["mfe40f200"].Value.Path, path);
+            // the mfe40 matrix beside it is not the one the set needs
+            File.Copy(Path.Combine(AppContext.BaseDirectory, "models", M4Model.MelFileName), Path.Combine(dir, M4Model.MelFileName));
+            Action load = () => M4Model.Load(path);
+            load.Should().Throw<ModelContractException>().WithMessage("*mel40_htk_200_4000.npy*");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     // ---- the runner: windows, gaps and new streams -------------------------
 
     private static short[] StreamSignal() => Npy.ReadNpz(Fixture("m4_stream.npz"))["signal"].ToInt16();

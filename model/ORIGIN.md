@@ -10,12 +10,42 @@ The directory layout of the source is kept (`analysis/`, `tools/`, `docs/`,
 `data/`), because the scripts find the repository root as
 `Path(__file__).resolve().parent.parent` and refer to `docs/decisions/...`,
 `docs/log/...`, `analysis/models/...` and `tools/throat_check.py` relative to
-it. With the same layout, no file needed an edit.
+it. With the same layout, no file needed an edit to run.
 
 All files were copied with `cp -p` (code, constants, documents) or `cp -a`
-(data). **Every copied file is an unchanged copy.** No file was edited.
+(data). The scripts are now this repository's own code: the files listed
+under "Edited" below were changed here, and the files under "Added" are new;
+every other file is an unchanged copy.
 
-## Code, constants, model, tests (unchanged)
+## Edited (the experimental CNN feature sets)
+
+The lower edge of the 40 mel bands of the CNN input became a parameter of
+the feature set: `mfe40` (0-4000 Hz, the recorded M4 set, unchanged) and the
+experimental `mfe40f200` (200-4000 Hz) and `mfe40f500` (500-4000 Hz), which
+leave the mains hum below their lower edge out. The recorded M4 configuration, its guards
+(`fixed_eval.py`, the 0037 / 0038 lines) and `m4-0038.npz` are unchanged.
+
+| File | Change |
+|---|---|
+| `analysis/features_np.py` | `CNN_FMIN_HZ` / `CNN_SETS` (set -> lower edge), `mel40_path`, `cnn_mel` (the variants' matrices are read on first use), `mfe(seg, set)`; `mfe40` is `mfe(seg, "mfe40")` with the same values |
+| `analysis/features_v2.py` | `CNN_SETS`; `mfe_one` and `extract_mfe` take the set (default `mfe40`); `mfe_windows` (the CNN input of an in-memory signal, the body of `extract_mfe`) |
+| `analysis/compare.py` | `_extract_fn` reads any of `CNN_SETS` with `extract_mfe` |
+| `analysis/m4_infer.py` | `CNN_SETS`; `parse_config` accepts `set=` any of them for `classifier=cnn`; `Detector` computes the features of the model's set (FEAT, `feat=True`, stays mfe40-only) |
+| `analysis/m4_compare.py` | `load_all` takes `cnn_set`; the body of `final_model` after its checks is `train_final(root, out, config, ...)` (used by `m4_variant.py`); the read-back message no longer names `M4_CONFIG` |
+| `analysis/make_features_np_consts.py` | `MEL_SPECS` holds the lower edge; it also builds and checks the two variant matrices |
+| `analysis/test_features_np.py` | `ref_mel` takes the lower edge; `MelTest.test_variant_sets` |
+| `analysis/test_m4_infer.py` | `DetectorTest.test_variant_sets_use_their_mel_matrix` |
+
+## Added
+
+| File | What |
+|---|---|
+| `analysis/m4_variant.py` | The experimental entry point: the C4 x P2 cross-validation (`--cv`) and the final model (`--final-model`) of a variant with the otherwise identical 0038 configuration on the training side only, and the hum sensitivity check (`--hum`); `--allow-dirty` |
+| `analysis/test_m4_variant.py` | its tests (synthetic data) |
+| `analysis/mel40_htk_200_4000.npy`, `analysis/mel40_htk_500_4000.npy` | the variants' mel matrices (`make_features_np_consts.py`) |
+| `analysis/models/m4-f200.npz`, `analysis/models/m4-f500.npz` | the variants' final models (sha256 below) |
+
+## Code, constants, model, tests (copied; edited ones above)
 
 `analysis/`:
 

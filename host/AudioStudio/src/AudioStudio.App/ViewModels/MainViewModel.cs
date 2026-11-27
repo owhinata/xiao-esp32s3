@@ -1968,6 +1968,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         ModelText = string.Create(CultureInfo.InvariantCulture, $"""
             {Path.GetFileName(model.Path)} (M4 swallow detector)
             {c.Text}
+            features {c.Set}: 40 mel bands, {c.MelLowHz} to 4000 Hz ({Path.GetFileName(model.MelPath)})
             seeds    {string.Join(", ", c.Seeds)}
             post     {post}
             runs     {runner.Runs}{behind}{lagged}

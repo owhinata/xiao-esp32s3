@@ -33,12 +33,12 @@ REF_HAMMING = np.hamming(REF_FRAME_LEN)
 REF_FFT_FREQS = librosa.fft_frequencies(sr=REF_SR, n_fft=REF_N_FFT)
 
 
-def ref_mel(n_mels: int, fmax: float) -> np.ndarray:
+def ref_mel(n_mels: int, fmax: float, fmin: float = 0.0) -> np.ndarray:
     return librosa.filters.mel(
         sr=REF_SR,
         n_fft=REF_N_FFT,
         n_mels=n_mels,
-        fmin=0.0,
+        fmin=fmin,
         fmax=fmax,
         htk=True,
         norm=None,
@@ -278,6 +278,32 @@ class MelTest(unittest.TestCase):
                 np.testing.assert_array_equal(M, ref_mel(n, 4000.0))
         self.assertIs(v2._MEL_CNN, fnp.MEL40)
         self.assertIs(v2._MEL_A, fnp.MEL26)
+
+    def test_variant_sets(self):
+        """The experimental CNN sets: the same construction with a higher
+        lower edge; mfe(x, "mfe40") is mfe40(x)."""
+        self.assertEqual(
+            fnp.CNN_FMIN_HZ,
+            {"mfe40": 0.0, "mfe40f200": 200.0, "mfe40f500": 500.0},
+        )
+        self.assertEqual(fnp.CNN_SETS, v2.CNN_SETS)
+        self.assertIs(fnp.cnn_mel("mfe40"), fnp.MEL40)
+        self.assertEqual(fnp.mel40_path(0.0), fnp.MEL40_PATH)
+        x = fnp.reference_signal()
+        np.testing.assert_array_equal(fnp.mfe(x, "mfe40"), fnp.mfe40(x))
+        for s, f in fnp.CNN_FMIN_HZ.items():
+            with self.subTest(s):
+                M = fnp.cnn_mel(s)
+                self.assertEqual(M.shape, (40, 257))
+                np.testing.assert_array_equal(M, ref_mel(40, 4000.0, f))
+                self.assertTrue((M.sum(axis=1) > 0).all())
+                # no weight below the lower edge
+                freqs = np.arange(257) * REF_SR / REF_N_FFT
+                self.assertEqual(M[:, freqs < f].sum(), 0.0)
+                self.assertEqual(fnp.mfe(x, s).shape, (98, 40))
+                self.assertEqual(fnp.mfe(x[:100], s).sum(), 0.0)
+        with self.assertRaises(ValueError):
+            fnp.cnn_mel("mfe40f100")
 
 
 class DecimateTest(unittest.TestCase):

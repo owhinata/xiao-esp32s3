@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: MIT
 """Writes the test fixtures of the M4 swallow detector from its Python code.
 
-Run with the interpreter of the zaitaku-mealpace checkout (numpy only):
+Run with the interpreter of the model directory (numpy only); --mealpace is
+this repository's model/ (or a zaitaku-mealpace checkout, which has no
+variant models):
 
-    <mealpace>/.venv/bin/python tools/make_m4_fixtures.py \
-        --mealpace <mealpace> --out tests/AudioStudio.Core.Tests/Fixtures
+    ../../model/.venv/bin/python tools/make_m4_fixtures.py \
+        --mealpace ../../model --out tests/AudioStudio.Core.Tests/Fixtures
 
 It imports features_np, m4_infer, postprocess and led_rule from
-<mealpace>/analysis and reads the weights analysis/models/m4-0038.npz. It
-writes nothing into that checkout (no bytecode either). All signals are
+<mealpace>/analysis and reads the weights analysis/models/m4-0038.npz and,
+when they are there, the experimental variants' weights (VARIANTS). It
+writes nothing into that directory (no bytecode either). All signals are
 synthetic: formulas and a fixed-seed generator, written out as the samples
 the C# tests read.
 
@@ -24,6 +27,11 @@ Files written to --out:
   m4_post.npz       probability sequences through PostStepper with several
                     settings, and window sequences through LedStepper.
   m4_configs.json   configuration strings and what parse_config makes of them.
+  m4_variant_<set>.npz  for each variant model: the reference signal's and
+                    the synthetic windows' (those of m4_windows.npz) features
+                    and probabilities, and the probability, positive and LED
+                    of every window of the stream of m4_stream.npz through
+                    its Detector.
 """
 
 import argparse
@@ -36,6 +44,9 @@ sys.dont_write_bytecode = True
 SR = 16000
 WINDOW = 16000
 HOP = 4000
+# The experimental CNN sets (features_np.CNN_FMIN_HZ) and their weights in
+# analysis/models/ (model/analysis/m4_variant.py).
+VARIANTS = (("mfe40f200", "m4-f200.npz"), ("mfe40f500", "m4-f500.npz"))
 
 
 def load(mealpace: Path):
@@ -294,6 +305,10 @@ def main():
         base.replace(" ", "  ", 1),
         base + " extra=1",
         base.replace("enter=0.85", "enter=0.85=1"),
+        base.replace("set=mfe40", "set=mfe40f200"),
+        base.replace("set=mfe40", "set=mfe40f500"),
+        base.replace("set=mfe40", "set=mfe40f100"),
+        base.replace("set=mfe40", "set=mfe40f200").replace("classifier=cnn", "classifier=lr"),
     ]
     rows = []
     for text in texts:
@@ -318,6 +333,47 @@ def main():
         })
     (out / "m4_configs.json").write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
 
+    # (e) the variant models, on the same signals.
+    written = []
+    for set_name, file_name in VARIANTS:
+        path = mealpace / "analysis" / "models" / file_name
+        if not path.exists():
+            continue
+        vm = m4.load_model(path)
+        if vm["cfg"]["set"] != set_name:
+            raise SystemExit(f"{file_name}: set {vm['cfg']['set']}, not {set_name}")
+        vd = m4.Detector(vm)
+        rM = fnp.mfe(sig, set_name)
+        r_seeds, r_p = seed_probs(np, m4, vm, rM)
+        w_mfe, w_prob, w_sp = [], [], []
+        for w in W:
+            Mw = fnp.mfe((w / 32768.0).astype(np.float32), set_name)
+            s_, p_ = seed_probs(np, m4, vm, Mw)
+            w_mfe.append(Mw)
+            w_prob.append(p_)
+            w_sp.append(s_)
+        rows_v = []
+        for k in range(k_n):
+            seg = (stream[k * HOP : k * HOP + WINDOW] / 32768.0).astype(np.float32)
+            p_, pos, led_, _ = vd.step(seg, k * 250)
+            rows_v.append((p_, pos, led_))
+        np.savez_compressed(
+            out / f"m4_variant_{set_name}.npz",
+            config=np.array(vm["config"]),
+            ref_mfe=rM,
+            ref_seed_prob=np.array(r_seeds, dtype=np.float64),
+            ref_prob=np.float64(r_p),
+            win_mfe=np.stack(w_mfe),
+            win_prob=np.array(w_prob),
+            win_seed_prob=np.array(w_sp),
+            stream_prob=np.array([r[0] for r in rows_v], dtype=np.float64),
+            stream_positive=np.array([r[1] for r in rows_v], dtype=np.int64),
+            stream_led=np.array([r[2] for r in rows_v], dtype=np.int64),
+        )
+        written.append(f"{set_name} ({sum(r[1] for r in rows_v)} positive stream windows)")
+
+    print(
+        f"variants: {', '.join(written) or 'none'}", file=sys.stderr)
     print(
         f"stream: {k_n} windows, {sum(pos_ok for _, pos_ok, _ in stream_rows)} positive, "
         f"{sum(pos_inv)} positive with the invalid windows; written to {out}",

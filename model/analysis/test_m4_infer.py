@@ -237,6 +237,28 @@ class DetectorTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             m4_infer.Detector({"cfg": lr, "arrays": {}})
 
+    def test_variant_sets_use_their_mel_matrix(self):
+        """A model of an experimental set (mfe40f200 / mfe40f500) runs on that
+        set's features (features_np.mfe), stepwise as in a batch; FEAT stays
+        mfe40-only."""
+        X = windows(20, 6)
+        for s in ("mfe40f200", "mfe40f500"):
+            with self.subTest(s):
+                model = synthetic_model(CFG.replace("set=mfe40", f"set={s}"))
+                self.assertEqual(model["cfg"]["set"], s)
+                det = m4_infer.Detector(model)
+                got = [det.step(x, 1000 + 250 * k)[0] for k, x in enumerate(X)]
+                M = np.stack([fnp.mfe(x, s) for x in X])
+                np.testing.assert_allclose(
+                    got, m4_infer.model_prob(model, M), rtol=0, atol=1e-6
+                )
+                self.assertFalse(np.array_equal(M[0], fnp.mfe40(X[0])))
+                with self.assertRaises(ValueError):
+                    m4_infer.Detector(model, feat=True)
+        for bad in ("mfe40f100", "mfe26", "a52"):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                m4_infer.parse_config(CFG.replace("set=mfe40", f"set={bad}"))
+
     def test_window_order_is_checked(self):
         det = m4_infer.Detector(synthetic_model())
         X = windows(2, 4)

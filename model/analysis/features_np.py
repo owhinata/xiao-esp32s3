@@ -11,6 +11,8 @@
              つなぐと decimate3 の出力の先頭と一致する（遅れは入力 30 サンプル）。
 特徴量（1 窓 = 16000 サンプル、16 kHz）:
   mfe40  対数メル 40 本（0〜4000 Hz）の (98, 40) float32（features_v2.mfe_one）。
+  mfe    CNN の特徴量の組（CNN_FMIN_HZ）ごとの (98, 40) float32。mfe40 と同じ式で、
+         メルの下端だけが組で違う（"mfe40" は mfe40 と同じ値）。
   mfe_and_feat  mfe40 と、FEAT の 82 次元（窓ごとの要約。#47、0037 の 4）。
   a52    MFCC 13（メル 26 本、0〜4000 Hz）の平均・最大・標準偏差・デルタの絶対値の
          平均（52 次元。features_v2.a52_segment）。
@@ -49,8 +51,22 @@ N_FRAMES = 1 + (WINDOW_SAMPLES - FRAME_LEN) // FRAME_HOP  # 98
 # (入力チャンネル, 出力チャンネル)。3×3、pad 1。1・2 層目の後に 2×2 の最大値
 CNN_CONV = ((1, 8), (8, 16), (16, 32))
 
+# CNN feature sets: name -> lower edge of the 40 mel bands (Hz). Everything
+# else (framing, pre-emphasis, window, FFT, HTK scale, 40 bands, upper edge
+# A_FMAX_HZ, log) is the same. "mfe40" is the recorded M4 set (0038); the
+# others are experimental variants that leave the hum below their lower edge out.
+CNN_FMIN_HZ = {"mfe40": 0.0, "mfe40f200": 200.0, "mfe40f500": 500.0}
+CNN_SETS = tuple(CNN_FMIN_HZ)
+
 _HERE = Path(__file__).parent
-MEL40_PATH = _HERE / "mel40_htk_0_4000.npy"
+
+
+def mel40_path(fmin_hz: float) -> Path:
+    """The .npy of the 40-band mel matrix from fmin_hz to A_FMAX_HZ."""
+    return _HERE / f"mel40_htk_{int(fmin_hz)}_{int(A_FMAX_HZ)}.npy"
+
+
+MEL40_PATH = mel40_path(0.0)
 MEL26_PATH = _HERE / "mel26_htk_0_4000.npy"
 REF_PATH = _HERE / "features_np_ref.npz"
 
@@ -147,6 +163,23 @@ def power(x: np.ndarray) -> np.ndarray:
 
 MEL40 = np.load(MEL40_PATH, allow_pickle=False)  # (40, 257)
 MEL26 = np.load(MEL26_PATH, allow_pickle=False)  # (26, 257)
+_MEL_BY_SET = {"mfe40": MEL40}
+
+
+def cnn_mel(feature_set: str) -> np.ndarray:
+    """The (40, 257) mel matrix of a CNN feature set. The variants' matrices
+    are read on first use (a device that only runs mfe40 needs only MEL40)."""
+    if feature_set not in CNN_FMIN_HZ:
+        raise ValueError(
+            f"CNN の特徴量の組は {' / '.join(CNN_SETS)} のどれかです: {feature_set!r}"
+        )
+    m = _MEL_BY_SET.get(feature_set)
+    if m is None:
+        m = np.load(mel40_path(CNN_FMIN_HZ[feature_set]), allow_pickle=False)
+        if m.shape != (N_MEL_CNN, N_FFT // 2 + 1) or m.dtype != np.float64:
+            raise ValueError(f"メル行列の形・型が違います: {feature_set}")
+        _MEL_BY_SET[feature_set] = m
+    return m
 
 
 def _dct_matrix(n_out: int, n_in: int) -> np.ndarray:
@@ -178,10 +211,18 @@ def mfcc_a(x: np.ndarray) -> np.ndarray:
 def mfe40(seg: np.ndarray) -> np.ndarray:
     """1 窓の波形（16000 サンプル）→ 対数メル 40 本 (98, 40) float32。
     16000 に満たなければ全部 0。"""
+    return mfe(seg, "mfe40")
+
+
+def mfe(seg: np.ndarray, feature_set: str) -> np.ndarray:
+    """One window (16000 samples) -> the (98, 40) float32 log-mel values of
+    the CNN feature set (its mel matrix, cnn_mel). All zeros for fewer than
+    16000 samples. mfe(seg, "mfe40") is mfe40(seg)."""
+    mel = cnn_mel(feature_set)
     if len(seg) < WINDOW_SAMPLES:
         return np.zeros((N_FRAMES, N_MEL_CNN), dtype=np.float32)
     x = np.asarray(seg[:WINDOW_SAMPLES], dtype=np.float64)
-    return logmel(x, MEL40).astype(np.float32)
+    return logmel(x, mel).astype(np.float32)
 
 
 # FEAT の 82 次元（docs/decisions/0037 の 4、plan #47 の 5 節。feature_set

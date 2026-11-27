@@ -6,8 +6,8 @@ namespace AudioStudio.Core.Model;
 /// <summary>
 /// The M4 swallow detector of zaitaku-mealpace (<c>analysis/m4_infer.py</c>,
 /// <c>analysis/features_np.py</c>): a weights file (<c>.npz</c>) of one to
-/// three seeds of a small CNN over 40 log-mel bands, and the mel matrix
-/// <see cref="MelFileName"/> beside it. The arithmetic follows the Python
+/// three seeds of a small CNN over 40 log-mel bands, and the mel matrix of
+/// its configuration's feature set beside it (<see cref="MelFileNameOf"/>). The arithmetic follows the Python
 /// code: float64 up to the log-mel values, which are rounded to float32;
 /// normalised in float64 and rounded to float32; the CNN in float32 (sums
 /// accumulated in float64 and rounded once); the sigmoid in float64; the
@@ -32,8 +32,12 @@ public sealed class M4Model
     public const double Preemphasis = 0.97;
     public const double LogFloor = 1e-10;
     public const int Format = 1;
-    /// <summary>The mel matrix (40 x 257, float64), looked up in the directory of the weights file.</summary>
+    /// <summary>The mel matrix of the set mfe40 (40 x 257, float64, 0 to 4000 Hz), looked up in the directory of the weights file.</summary>
     public const string MelFileName = "mel40_htk_0_4000.npy";
+
+    /// <summary>The file name of a CNN set's mel matrix: <c>mel40_htk_&lt;low&gt;_4000.npy</c> (features_np.mel40_path).</summary>
+    public static string MelFileNameOf(string set) =>
+        string.Create(CultureInfo.InvariantCulture, $"mel40_htk_{M4Config.CnnSets[set]}_4000.npy");
 
     private static readonly (string Name, int[] Shape)[] s_cnnShapes =
     [
@@ -64,7 +68,8 @@ public sealed class M4Model
 
     /// <summary>
     /// Reads the weights file and the mel matrix beside it, with the checks
-    /// of <c>_check_arrays</c>: a configuration of the mfe40 CNN, exactly
+    /// of <c>_check_arrays</c>: a configuration of a CNN (mfe40 or one of its
+    /// variants, <see cref="M4Config.CnnSets"/>), exactly
     /// the keys it needs, each with its shape and dtype, and format 1.
     /// </summary>
     public static M4Model Load(string path)
@@ -92,9 +97,10 @@ public sealed class M4Model
         {
             throw new ModelContractException($"{name}: {e.Message}");
         }
-        if (config.Kind != "cnn" || config.Set != "mfe40")
+        if (config.Kind != "cnn" || !M4Config.CnnSets.ContainsKey(config.Set))
         {
-            throw new ModelContractException($"{name}: only the configuration of the mfe40 CNN is supported, not {config.Set} / {config.Kind}.");
+            throw new ModelContractException(
+                $"{name}: only the configurations of the CNN ({string.Join(", ", M4Config.CnnSets.Keys)}) are supported, not {config.Set} / {config.Kind}.");
         }
 
         Dictionary<string, (int[] Shape, string Dtype)> want = new()
@@ -139,7 +145,8 @@ public sealed class M4Model
             }
         }
 
-        string melPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, MelFileName);
+        string melName = MelFileNameOf(config.Set);
+        string melPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, melName);
         double[] mel;
         try
         {
@@ -147,13 +154,13 @@ public sealed class M4Model
             if (!m.HasShape(Mels, Bins) || m.Descr != "<f8")
             {
                 throw new ModelContractException(
-                    $"{MelFileName} is of {m.Descr} ({string.Join(", ", m.Shape)}); it needs <f8 ({Mels}, {Bins}).");
+                    $"{melName} is of {m.Descr} ({string.Join(", ", m.Shape)}); it needs <f8 ({Mels}, {Bins}).");
             }
             mel = m.ToFloat64();
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new ModelContractException($"The mel matrix {MelFileName} beside {name} cannot be read: {e.Message}");
+            throw new ModelContractException($"The mel matrix {melName} beside {name} cannot be read: {e.Message}");
         }
         catch (NpyFormatException e)
         {
@@ -174,7 +181,7 @@ public sealed class M4Model
     /// <summary>The seeds of the ensemble, in the configuration's order.</summary>
     public IReadOnlyList<int> Seeds => Config.Seeds;
 
-    // ---- features (features_np.mfe40) ------------------------------------
+    // ---- features (features_np.mfe40, features_np.mfe for the variants) ----
 
     /// <summary>numpy's symmetric Hamming window: 0.54 + 0.46 cos(pi n / (M - 1)), n = 1 - M, 3 - M, ..., M - 1.</summary>
     private static double[] Hamming(int m)
@@ -215,7 +222,9 @@ public sealed class M4Model
     /// 0.97 over the whole window, frames of 400 every 160 samples, the
     /// symmetric Hamming window, |rfft(512)|^2 / 512, the mel matrix,
     /// log(x + 1e-10), rounded to float32. All zeros for fewer than 16000
-    /// samples, as features_np.mfe40.
+    /// samples, as features_np.mfe40. The mel matrix is the one of the
+    /// configuration's set (features_np.mfe), so a variant's bands start at
+    /// its lower edge.
     /// </summary>
     public float[] Mfe40(ReadOnlySpan<double> samples)
     {
