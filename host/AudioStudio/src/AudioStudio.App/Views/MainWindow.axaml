@@ -1,0 +1,237 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AudioStudio.App.ViewModels"
+        xmlns:controls="using:AudioStudio.App.Controls"
+        x:Class="AudioStudio.App.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="AudioStudio" Icon="/Assets/icon.png" Width="1280" Height="860" MinWidth="900" MinHeight="560">
+  <Window.Styles>
+    <Style Selector="TextBlock.label">
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Opacity" Value="0.7" />
+    </Style>
+    <Style Selector="TextBlock.heading">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Margin" Value="0,8,0,2" />
+    </Style>
+    <Style Selector="Border.group">
+      <Setter Property="BorderBrush" Value="#40808080" />
+      <Setter Property="BorderThickness" Value="0,0,1,0" />
+      <Setter Property="Padding" Value="0,0,12,0" />
+      <Setter Property="Margin" Value="0,0,12,4" />
+    </Style>
+    <!-- Tab names in the size of the other labels; the theme's default is a headline size -->
+    <Style Selector="TabItem">
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="MinHeight" Value="32" />
+      <Setter Property="Padding" Value="10,4" />
+    </Style>
+  </Window.Styles>
+
+  <DockPanel>
+    <!-- The board: address, the audio stream, the shell and its commands, recording, files -->
+    <WrapPanel DockPanel.Dock="Top" Margin="10,8,10,4" Orientation="Horizontal">
+      <Border Classes="group">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Classes="label" Text="Board" />
+          <TextBox Width="130" Watermark="address" Text="{Binding BoardAddress}"
+                   IsEnabled="{Binding !IsStreamConnected}" />
+          <Button Content="Find" Command="{Binding FindBoardCommand}" IsEnabled="{Binding !IsStreamConnected}" />
+          <controls:StateButton Content="Stream" IsChecked="{Binding IsStreamConnected, Mode=OneWay}"
+                        Command="{Binding ToggleStreamCommand}"
+                        ToolTip.Tip="Connect or disconnect the audio stream (TCP port 3233)" />
+          <TextBlock Classes="label" Text="{Binding StreamState}" MinWidth="80" />
+        </StackPanel>
+      </Border>
+      <Border Classes="group">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <controls:StateButton Content="Shell" IsChecked="{Binding IsShellConnected, Mode=OneWay}"
+                        Command="{Binding ToggleShellCommand}"
+                        ToolTip.Tip="Connect or disconnect the Telnet shell (the board has one Telnet session)" />
+          <controls:StateButton Content="USB host" IsChecked="{Binding IsUsbHostOn, Mode=OneWay}"
+                        Command="{Binding ToggleUsbHostCommand}" IsEnabled="{Binding IsShellConnected}"
+                        ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="Start or stop the board's USB host on USB-C (usb host start, usb host stop); needs the shell" />
+          <controls:StateButton Content="Microphone" IsChecked="{Binding IsMicrophoneOn, Mode=OneWay}"
+                        Command="{Binding ToggleMicrophoneCommand}" IsEnabled="{Binding CanToggleMicrophone}"
+                        ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding MicrophoneTip}" />
+        </StackPanel>
+      </Border>
+      <Border Classes="group">
+        <StackPanel Orientation="Horizontal" Spacing="6" IsEnabled="{Binding IsShellConnected}">
+          <TextBlock Classes="label" Text="Volume" />
+          <NumericUpDown Width="110" Minimum="0" Maximum="100" Increment="5" FormatString="0"
+                         Value="{Binding Volume}" />
+          <Button Content="Set" Command="{Binding SetVolumeCommand}" ToolTip.Tip="uac volume &lt;0..100&gt;" />
+          <controls:StateButton Content="Mute" IsChecked="{Binding IsMuted, Mode=OneWay}" Command="{Binding ToggleMuteCommand}"
+                        ToolTip.Tip="uac mute on|off" />
+          <TextBlock Classes="label" Text="Hum" />
+          <ComboBox ItemsSource="{Binding HumOptions}" SelectedItem="{Binding Hum}" Width="80"
+                    PlaceholderText="set" ToolTip.Tip="uac hum 50|60|off: the hum filter's mains frequency" />
+        </StackPanel>
+      </Border>
+      <Border Classes="group">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <controls:StateButton Content="Record" IsChecked="{Binding IsRecording, Mode=OneWay}"
+                        Command="{Binding ToggleRecordCommand}"
+                        ToolTip.Tip="Record the live stream to a WAV file in the recordings directory" />
+          <TextBox Width="120" Watermark="label" Text="{Binding RecordingLabel}" IsEnabled="{Binding !IsRecording}"
+                   ToolTip.Tip="Goes into the file name: yyyyMMdd-HHmmss_label.wav" />
+          <TextBlock Classes="label" Text="{Binding RecordingText}" FontFamily="monospace" FontSize="12" />
+        </StackPanel>
+      </Border>
+      <StackPanel Orientation="Horizontal" Spacing="6">
+        <Button Content="Open WAV…" Click="OnOpenWavClick" />
+        <Button Content="Live" Command="{Binding ShowLiveCommand}" IsVisible="{Binding IsFileShown}"
+                ToolTip.Tip="Back to the live stream" />
+      </StackPanel>
+    </WrapPanel>
+
+    <!-- State of the stream -->
+    <Border DockPanel.Dock="Bottom" Background="#20808080" Padding="10,4">
+      <DockPanel>
+        <ToggleButton DockPanel.Dock="Right" Content="Shell pane" FontSize="12" Padding="8,2" Margin="8,0,0,0"
+                      VerticalAlignment="Center" IsChecked="{Binding IsShellPaneVisible}"
+                      ToolTip.Tip="Show or hide the shell pane" />
+        <StackPanel Spacing="2">
+          <TextBlock Text="{Binding StreamStatus}" FontSize="12" TextTrimming="CharacterEllipsis" />
+          <TextBlock Text="{Binding Message}" FontSize="12" Opacity="0.7" TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <!-- The views above, the board shell below; the bar between them sets the shell's height -->
+    <Grid x:Name="WorkArea" RowDefinitions="*,6,190">
+      <TabControl Grid.Row="0" Margin="10,0,10,0" SelectedIndex="{Binding SelectedView}">
+        <TabItem Header="Audio">
+          <Grid ColumnDefinitions="*,300">
+            <DockPanel Grid.Column="0">
+              <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4">
+                <TextBlock Classes="label" Text="{Binding SourceText}" FontFamily="monospace" FontSize="12" />
+              </DockPanel>
+              <ScrollBar x:Name="FileScroll" DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="46,4,76,0"
+                         Minimum="0" Maximum="{Binding PositionMaximum}" Value="{Binding Position}"
+                         ViewportSize="{Binding SpanSeconds}" LargeChange="{Binding SpanSeconds}" SmallChange="0.1"
+                         IsVisible="{Binding IsFileShown}" AllowAutoHide="False" />
+              <Grid x:Name="ViewsGrid" RowDefinitions="2*,3,3*,3,34" Background="Transparent">
+                <controls:WaveformControl x:Name="Waveform" Grid.Row="0" />
+                <controls:SpectrogramControl x:Name="Spectrogram" Grid.Row="2" />
+                <controls:ClassStripControl x:Name="ClassStrip" Grid.Row="4" />
+              </Grid>
+            </DockPanel>
+            <ScrollViewer Grid.Column="1" Margin="12,0,0,0" VerticalScrollBarVisibility="Auto">
+              <StackPanel Spacing="6" Margin="0,0,8,0">
+                <TextBlock Classes="heading" Text="View" Margin="0,0,0,2" />
+                <DockPanel>
+                  <TextBlock Classes="label" Text="Span [s]" Width="100" />
+                  <ComboBox ItemsSource="{Binding Spans}" SelectedItem="{Binding SpanSeconds}" HorizontalAlignment="Stretch" />
+                </DockPanel>
+                <DockPanel>
+                  <TextBlock Classes="label" Text="Amplitude" Width="100" />
+                  <ComboBox ItemsSource="{Binding Zooms}" SelectedItem="{Binding AmplitudeZoom}" HorizontalAlignment="Stretch" />
+                </DockPanel>
+                <DockPanel>
+                  <TextBlock Classes="label" Text="FFT size" Width="100" />
+                  <ComboBox ItemsSource="{Binding FftSizes}" SelectedItem="{Binding FftSize}" HorizontalAlignment="Stretch" />
+                </DockPanel>
+                <DockPanel>
+                  <TextBlock Classes="label" Text="Max freq [Hz]" Width="100" />
+                  <ComboBox ItemsSource="{Binding MaxFrequencies}" SelectedItem="{Binding MaxFrequency}"
+                            HorizontalAlignment="Stretch" />
+                </DockPanel>
+                <CheckBox Content="Logarithmic frequency" IsChecked="{Binding LogFrequency}" />
+                <DockPanel>
+                  <TextBlock Classes="label" Text="Min dB" Width="52" />
+                  <TextBlock DockPanel.Dock="Right" Classes="label" Width="34" TextAlignment="Right"
+                             Text="{Binding MinDb, StringFormat={}{0:F0}}" />
+                  <Slider Minimum="-160" Maximum="0" Value="{Binding MinDb}" Margin="8,0" />
+                </DockPanel>
+                <DockPanel>
+                  <TextBlock Classes="label" Text="Max dB" Width="52" />
+                  <TextBlock DockPanel.Dock="Right" Classes="label" Width="34" TextAlignment="Right"
+                             Text="{Binding MaxDb, StringFormat={}{0:F0}}" />
+                  <Slider Minimum="-120" Maximum="20" Value="{Binding MaxDb}" Margin="8,0" />
+                </DockPanel>
+                <TextBlock Text="{Binding LevelText}" FontFamily="monospace" FontSize="12" Margin="0,4,0,0" />
+
+                <TextBlock Classes="heading" Text="Model" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <Button Content="Load…" Click="OnLoadModelClick" />
+                  <Button Content="Unload" Command="{Binding UnloadModelCommand}" />
+                </StackPanel>
+                <DockPanel>
+                  <TextBlock Classes="label" Text="Step" Width="100"
+                             ToolTip.Tip="Samples between windows; 0 for half a window" />
+                  <NumericUpDown Minimum="0" Maximum="160000" Increment="800" FormatString="0" Value="{Binding ModelHop}" />
+                </DockPanel>
+                <DockPanel>
+                  <TextBlock Classes="label" Text="Open window" Width="100"
+                             ToolTip.Tip="Samples per window for a model whose input length is not fixed" />
+                  <NumericUpDown Minimum="1" Maximum="480000" Increment="1600" FormatString="0" Value="{Binding ModelWindow}" />
+                </DockPanel>
+                <Button Content="Apply" Command="{Binding ApplyModelSettingsCommand}"
+                        ToolTip.Tip="Load the model again with the step and window above" />
+                <TextBlock Text="{Binding TopClass}" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,0" />
+                <ItemsControl ItemsSource="{Binding Scores}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:ScoreItem">
+                      <Grid ColumnDefinitions="100,*,48" Margin="0,1">
+                        <TextBlock Grid.Column="0" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" />
+                        <ProgressBar Grid.Column="1" Minimum="0" Maximum="1" Value="{Binding Value}"
+                                     Foreground="{Binding Brush}" MinWidth="0" Height="12" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="2" Text="{Binding Text}" FontFamily="monospace" FontSize="12"
+                                   TextAlignment="Right" VerticalAlignment="Center" />
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock Text="{Binding ModelText}" FontFamily="monospace" FontSize="11" TextWrapping="Wrap" />
+              </StackPanel>
+            </ScrollViewer>
+          </Grid>
+        </TabItem>
+        <TabItem Header="Firmware">
+          <DockPanel Margin="0,4,0,0">
+            <StackPanel DockPanel.Dock="Top" Spacing="6">
+              <DockPanel>
+                <TextBlock Classes="label" Text="Image" Width="60" />
+                <Button DockPanel.Dock="Right" Content="Repository build" Margin="6,0,0,0" Command="{Binding DefaultImageCommand}"
+                        ToolTip.Tip="build/xiao_esp32s3_threadx.bin of the firmware repository" />
+                <Button DockPanel.Dock="Right" Content="Choose…" Margin="6,0,0,0" Click="OnChooseImageClick" />
+                <TextBox Text="{Binding ImagePath}" FontFamily="monospace" IsEnabled="{Binding !IsUpdating}" />
+              </DockPanel>
+              <TextBlock Text="{Binding ImageText}" FontFamily="monospace" FontSize="12" Margin="60,0,0,0" />
+              <DockPanel Margin="60,4,0,0">
+                <controls:StateButton DockPanel.Dock="Left" Content="Update" Width="90" HorizontalContentAlignment="Center"
+                              IsChecked="{Binding IsUpdating, Mode=OneWay}" Command="{Binding UpdateFirmwareCommand}"
+                              ToolTip.Tip="Send the image to the board's OTA service (TCP port 3232), restart and confirm; press again to cancel" />
+                <ProgressBar Minimum="0" Maximum="100" Value="{Binding UpdateProgress}" Margin="12,0,0,0"
+                             VerticalAlignment="Center" ShowProgressText="True" />
+              </DockPanel>
+            </StackPanel>
+            <TextBox Margin="0,8,0,0" Text="{Binding OtaText, Mode=OneWay}" IsReadOnly="True" FontFamily="monospace"
+                     FontSize="12" AcceptsReturn="True" TextWrapping="Wrap" x:Name="OtaLogBox"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto" />
+          </DockPanel>
+        </TabItem>
+      </TabControl>
+
+      <GridSplitter x:Name="ShellSplitter" Grid.Row="1" ResizeDirection="Rows" Background="#30808080"
+                    Margin="10,2" CornerRadius="2" />
+
+      <DockPanel x:Name="ShellPane" Grid.Row="2" Margin="10,0,10,6">
+        <DockPanel DockPanel.Dock="Bottom" Margin="0,4,0,0">
+          <Button DockPanel.Dock="Right" Content="Send" Margin="6,0,0,0" Command="{Binding SendShellCommand}"
+                  IsEnabled="{Binding IsShellConnected}" />
+          <TextBox x:Name="ShellInputBox" Text="{Binding ShellInput}" FontFamily="monospace"
+                   Watermark="command (Enter to send, Up/Down for history)"
+                   IsEnabled="{Binding IsShellConnected}" KeyDown="OnShellInputKeyDown" />
+        </DockPanel>
+        <TextBox x:Name="ShellLogBox" Text="{Binding ShellText, Mode=OneWay}" IsReadOnly="True"
+                 FontFamily="monospace" FontSize="12" AcceptsReturn="True" TextWrapping="Wrap"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto" />
+      </DockPanel>
+    </Grid>
+  </DockPanel>
+</Window>

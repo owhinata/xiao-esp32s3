@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>AudioStudio.Core.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AudioStudio.Core\AudioStudio.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="FluentAssertions" Version="6.12.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The model the contract tests run: written by tools/make_test_model.py at test time -->
+    <None Include="..\..\tools\make_test_model.py" Link="make_test_model.py" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

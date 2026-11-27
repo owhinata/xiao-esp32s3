@@ -3,3 +3,6 @@
 /lib/
 /.venv/
 /backup/
+/host/**/bin/
+/host/**/obj/
+/host/AudioStudio/recordings/
