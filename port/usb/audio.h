@@ -6,7 +6,9 @@
  * channel, decimated by 3 (to 16 kHz from a 48 kHz stream; a 16 kHz stream
  * is taken as it is), freed of their DC offset (a 30 Hz high-pass) and of
  * mains hum (notches at 50 or 60 Hz and its harmonics up to 420 Hz), into
- * a ring that a consumer reads with usbaudio_read_16k().  This
+ * a ring that a consumer reads with usbaudio_read_16k().  Either filter
+ * can be switched off (usbaudio_hpf_set(), usbaudio_hum_set()); with the
+ * high-pass off the samples keep the input's DC offset.  This
  * header does not include esp-usb's or ESP-IDF's: its users see only
  * these types.
  *
@@ -169,6 +171,15 @@ int usbaudio_mute_set(bool mute);
 int usbaudio_hum_set(unsigned int hz);
 unsigned int usbaudio_hum_get(void);
 
+/*
+ * The 30 Hz high-pass that removes the DC offset: on (true) until set.
+ * Kept for the session, in RAM; a running stream takes it from the next
+ * sample on (switched on, the DC decays in about 5 ms; switched off, the
+ * output steps by the DC offset).  0, -ETIMEDOUT, -EIO.
+ */
+int usbaudio_hpf_set(bool on);
+bool usbaudio_hpf_get(void);
+
 /* What the stream has delivered since it started; kept after it stops. */
 struct usbaudio_stats {
     bool streaming;
@@ -182,7 +193,7 @@ struct usbaudio_stats {
     uint64_t out_samples;       /* decimated samples */
     bool dc_valid;              /* a second of input has come */
     int32_t dc;                 /* the mean of the raw input samples (the channels' mix) over
-                                   the last whole second, LSB */
+                                   the last whole second, LSB; before the high-pass */
     uint64_t clipped;           /* input samples (of every channel) at full scale, -32768 or 32767 */
     uint32_t reads;             /* uac_host_device_read() calls */
     uint32_t short_reads;       /* returned less than asked: the buffer emptied */
@@ -204,7 +215,8 @@ struct usbaudio_stats {
 int usbaudio_stats(struct usbaudio_stats *stats);
 
 /*
- * The level of the decimated samples over the last complete window of
+ * The level of the output samples (decimated and filtered; with the
+ * high-pass off, their DC offset included) over the last complete window of
  * about 100 ms (out_rate / 10 samples).  seq counts the windows since the
  * stream started (0: none yet).
  */

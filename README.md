@@ -188,6 +188,9 @@ service's: whether a client is connected, the blocks and samples sent to it
 and the samples it lost, and the clients dropped.
 `uac hum [50|60|off]` sets the mains frequency of the hum filter (50 by
 default).
+`uac hpf [on|off]` switches the 30 Hz high-pass that removes the DC offset
+(on by default); with it off the samples, and the level of `uac level`, keep
+the input's DC offset.
 `uac volume [<0..100>]` shows the microphone's volume (percent of its
 range and dB) and mute, or sets the volume; `uac mute on|off` sets the
 mute.  Both work while the stream runs, and what was set last is set again

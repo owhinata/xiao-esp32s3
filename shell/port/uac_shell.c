@@ -16,12 +16,15 @@
  *                                 and dB) and mute, or set the volume; while
  *                                 the stream runs, set again at every start
  *   uac mute on|off               set the mute, the same way
- *   uac level [<seconds>]         the peak and RMS level of the decimated
- *                                 samples, in dBFS, four times a second for
- *                                 the time given (default 5 s)
+ *   uac level [<seconds>]         the peak and RMS level of the output
+ *                                 samples (with the high-pass off, their DC
+ *                                 offset included), in dBFS, four times a
+ *                                 second for the time given (default 5 s)
  *   uac hum [50|60|off]           the mains hum filter (notches at the mains
  *                                 frequency and its harmonics up to 420 Hz),
  *                                 50 until set
+ *   uac hpf [on|off]              the 30 Hz high-pass filter that removes the
+ *                                 DC offset, on until set
  *   uac stats                     what the stream has delivered: counters,
  *                                 the measured rate against the nominal one;
  *                                 and the audio stream service's client and
@@ -421,6 +424,36 @@ static int cmd_uac_hum(const struct shell *sh, size_t argc, char **argv)
     return 0;
 }
 
+/* ---- uac hpf ------------------------------------------------------------- */
+
+static void print_hpf(const struct shell *sh)
+{
+    shell_print(sh, "high-pass filter: %s", usbaudio_hpf_get() ? "30 Hz" : "off");
+}
+
+static int cmd_uac_hpf(const struct shell *sh, size_t argc, char **argv)
+{
+    bool on;
+    int ret;
+
+    if (argc > 1) {
+        if (strcmp(argv[1], "on") == 0) {
+            on = true;
+        } else if (strcmp(argv[1], "off") == 0) {
+            on = false;
+        } else {
+            shell_error(sh, "Not on or off: %s", argv[1]);
+            return -EINVAL;
+        }
+        ret = usbaudio_hpf_set(on);
+        if (ret != 0) {
+            return report(sh, ret);
+        }
+    }
+    print_hpf(sh);
+    return 0;
+}
+
 /* ---- uac level ----------------------------------------------------------- */
 
 static int cmd_uac_level(const struct shell *sh, size_t argc, char **argv)
@@ -512,8 +545,8 @@ static int cmd_uac_stats(const struct shell *sh, size_t argc, char **argv)
     shell_print(sh, "bytes: %" PRIu64 ", frames: %" PRIu64 ", decimated samples: %" PRIu64,
                 st.bytes, st.frames, st.out_samples);
     if (st.dc_valid) {
-        shell_print(sh, "input DC: %d LSB (mean over the last second, before the 30 Hz high-pass)",
-                    (int) st.dc);
+        shell_print(sh, "input DC: %d LSB (mean over the last second, %s)", (int) st.dc,
+                    usbaudio_hpf_get() ? "before the 30 Hz high-pass" : "kept: the high-pass is off");
     } else {
         shell_print(sh, "input DC: not yet (a second of input)");
     }
@@ -547,6 +580,8 @@ static int cmd_uac_stats(const struct shell *sh, size_t argc, char **argv)
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_uac,
+    SHELL_CMD_ARG(hpf, NULL, "Show or set the high-pass filter (DC removal): hpf [on|off] (default on)",
+                  cmd_uac_hpf, 1, 1),
     SHELL_CMD_ARG(hum, NULL, "Show or set the mains hum filter: hum [50|60|off] (default 50)",
                   cmd_uac_hum, 1, 1),
     SHELL_CMD(info, NULL, "Show the microphone and its formats", cmd_uac_info),

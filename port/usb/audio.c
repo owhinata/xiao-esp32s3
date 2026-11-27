@@ -30,8 +30,9 @@
  *                   usbaudio_stop(), and reads the samples: woken when the
  *                   buffer passed a quarter, it drains it without waiting,
  *                   mixes the channels to one, decimates by 3 (not a 16 kHz
- *                   stream), removes the DC (a 30 Hz high-pass) and the
- *                   mains hum (notches), keeps the level and the ring of
+ *                   stream), removes the DC (a 30 Hz high-pass, unless
+ *                   switched off) and the mains hum (notches, unless
+ *                   switched off), keeps the level and the ring of
  *                   usbaudio_read_16k().
  *
  * The callbacks run in the clients' tasks and must not block: they only
@@ -115,6 +116,7 @@ enum audio_request {
     REQUEST_VOLUME_SET,
     REQUEST_MUTE_SET,
     REQUEST_HUM_SET,
+    REQUEST_HPF_SET,
     REQUEST_QUIT,
 };
 
@@ -125,6 +127,7 @@ struct request_args {
     uint8_t percent;
     bool mute;
     uint8_t hum_hz;
+    bool hpf_on;
     void *result;               /* this file's storage for the result (request()) */
 };
 
@@ -174,6 +177,13 @@ struct decimator {
  * x[n-1], so a DC offset gives no step at the start; the decimator's empty
  * history still ramps in over its 51 taps, which decays below 1 LSB in
  * ln(1000) / (1 - a) = about 590 samples (37 ms at 16 kHz).
+ *
+ * Switched off, the samples pass unchanged (DC included) and the state
+ * follows them as if the filter's output were the input (x[n-1] = y = x):
+ * switched on again, the output goes on from the raw sample and its DC
+ * decays with the filter's time constant, 1 / (1 - a) = 85 samples
+ * (5.3 ms at 16 kHz), instead of stepping by the DC offset.  Switching it
+ * off steps the output by the DC offset at once.
  */
 #define DC_BLOCK_A_Q15          32382
 
@@ -266,6 +276,8 @@ static struct {
     bool want_mute;
     /* The mains frequency of the hum filter, Hz, 0: off; for the session. */
     uint8_t hum_hz;
+    /* The 30 Hz high-pass (the DC blocker) is on; for the session. */
+    bool hpf_on;
     int result;
 
     /* Written by the drivers' callbacks (their tasks), read by "uac". */
@@ -376,6 +388,15 @@ static int16_t dc_block(struct dc_block *f, int16_t x)
         out = INT16_MIN;
     }
     return (int16_t) out;
+}
+
+/* The high-pass switched off: x passes, the state follows it (see above). */
+static int16_t dc_block_bypass(struct dc_block *f, int16_t x)
+{
+    f->primed = true;
+    f->x1 = x;
+    f->y = (int64_t) x * 32768;
+    return x;
 }
 
 /* The notches for the mains frequency at the output rate, their state cleared. */
@@ -498,7 +519,8 @@ static void process(size_t got)
         } else if (!decimate(&audio.dec, (int16_t) s, &out)) {
             continue;
         }
-        out = hum_filter(dc_block(&audio.dc_block, out));
+        out = audio.hpf_on ? dc_block(&audio.dc_block, out) : dc_block_bypass(&audio.dc_block, out);
+        out = hum_filter(out);
         level_add(out);
         if (audio.ring != NULL) {
             audio.ring[audio.written & RING_MASK] = out;
@@ -1315,7 +1337,7 @@ static int serve_start(void)
 
     audio.rate = audio.arg.rate;
     audio.channels = audio.arg.channels;
-    /* A 16 kHz stream is already at the output rate: only the DC blocker. */
+    /* A 16 kHz stream is already at the output rate: only the DC blocker and the notches. */
     audio.factor = audio.rate == 16000u ? 1u : 3u;
     audio.urb_bytes = (audio.rate / 1000u + 1u) * frame * CONFIG_UAC_NUM_PACKETS_PER_URB;
     audio.carry_len = 0;
@@ -1524,6 +1546,11 @@ static void audio_task(void *arg)
             }
             answer(0);
             break;
+        case REQUEST_HPF_SET:
+            /* From the next sample on; the state is kept (see struct dc_block). */
+            audio.hpf_on = audio.arg.hpf_on;
+            answer(0);
+            break;
         case REQUEST_QUIT:
             ret = serve_quit();
 
@@ -1612,7 +1639,7 @@ static int objects_create_once(void);
 
 /*
  * Once, by the first caller (usbaudio_start() from "usb host start", or
- * usbaudio_hum_set(), from either console): a second caller meanwhile
+ * usbaudio_hum_set() or usbaudio_hpf_set(), from either console): a second caller meanwhile
  * waits until the first is done.
  */
 static int objects_create(void)
@@ -1644,6 +1671,7 @@ static int objects_create(void)
 static int objects_create_once(void)
 {
     audio.hum_hz = 50;
+    audio.hpf_on = true;
     if (tx_mutex_create(&audio.request_lock, "uac_req", TX_INHERIT) != TX_SUCCESS) {
         return -ENOMEM;
     }
@@ -1829,6 +1857,31 @@ int usbaudio_hum_set(unsigned int hz)
 unsigned int usbaudio_hum_get(void)
 {
     return audio.created ? audio.hum_hz : 50u;
+}
+
+int usbaudio_hpf_set(bool on)
+{
+    const struct request_args args = { .hpf_on = on };
+    int ret;
+
+    ret = objects_create();
+    if (ret != 0) {
+        return ret;
+    }
+    ret = request(REQUEST_HPF_SET, &args, NULL, 0);
+    if (ret == -EALREADY) {
+        /* No task: taken at the next stream start. */
+        (void) tx_mutex_get(&audio.request_lock, TX_WAIT_FOREVER);
+        audio.hpf_on = on;
+        (void) tx_mutex_put(&audio.request_lock);
+        ret = 0;
+    }
+    return ret;
+}
+
+bool usbaudio_hpf_get(void)
+{
+    return audio.created ? audio.hpf_on : true;
 }
 
 int usbaudio_stats(struct usbaudio_stats *stats)
