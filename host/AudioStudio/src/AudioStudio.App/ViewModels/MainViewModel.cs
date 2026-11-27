@@ -9,7 +9,9 @@ using AudioStudio.Core.Dsp;
 using AudioStudio.Core.Model;
 using AudioStudio.Core.Ota;
 using AudioStudio.Core.Settings;
+using AudioStudio.Core.Ssh;
 using AudioStudio.Core.Stream;
+using AudioStudio.Core.Targets;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -41,6 +43,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private readonly StringBuilder _shellLog = new();
     private readonly StringBuilder _otaLog = new();
     private readonly object _recordLock = new();
+    private TargetProfile _profile;
+    /// <summary>The ssh connection of an ssh target, for its address; shared by the shell and the stream.</summary>
+    private SshConnection? _ssh;
     private AudioStreamClient? _stream;
     private volatile LiveSource _live = new(16000);
     private BoardShell? _shell;
@@ -63,13 +68,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public const int FirmwareView = 1;
 
     [ObservableProperty] private int _selectedView;
+    /// <summary>The target profile chosen: a name in <c>targets/</c>, or the path of a profile.</summary>
+    [ObservableProperty] private string _target;
     [ObservableProperty] private string _boardAddress;
-    [ObservableProperty] private bool _isStreamConnected;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanChangeTarget), nameof(CanEditAddress))]
+    private bool _isStreamConnected;
     [ObservableProperty] private string _streamState = "not connected";
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanToggleMicrophone), nameof(MicrophoneTip), nameof(CanSetVolume),
                               nameof(VolumeTip), nameof(CanToggleMute), nameof(MuteTip), nameof(HumTip),
-                              nameof(CanToggleHighPass), nameof(HighPassTip))]
+                              nameof(CanToggleHighPass), nameof(HighPassTip), nameof(CanChangeTarget),
+                              nameof(CanEditAddress))]
     private bool _isShellConnected;
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsUsbHostOn), nameof(CanToggleMicrophone), nameof(MicrophoneTip))]
@@ -131,7 +141,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public IReadOnlyList<int> Zooms { get; } = [1, 2, 4, 8, 16, 32, 64, 128];
     public IReadOnlyList<int> FftSizes { get; } = Spectrogram.Sizes;
     public IReadOnlyList<string> MaxFrequencies { get; } = ["Nyquist", "4000", "2000", "1000", "500"];
-    public IReadOnlyList<string> HumOptions { get; } = ["50", "60", "off"];
+    /// <summary>The target profiles to choose from: those beside the application, and one given by its path.</summary>
+    public ObservableCollection<string> Targets { get; } = new();
     public ObservableCollection<ScoreItem> Scores { get; } = new();
     /// <summary>The swallow indications of the file in view.</summary>
     public ObservableCollection<IndicationItem> Indications { get; } = new();
@@ -144,9 +155,29 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     /// <param name="board">Board address to connect the audio stream to at once.</param>
     /// <param name="shell">Connect the shell at once too.</param>
-    public MainViewModel(string? board = null, bool shell = false, string? image = null)
+    /// <param name="target">The target profile (a name or a path); otherwise the one of the settings.</param>
+    public MainViewModel(string? board = null, bool shell = false, string? image = null, string? target = null)
     {
-        _boardAddress = board ?? _settings.BoardAddress;
+        foreach (string name in TargetProfile.Available())
+        {
+            Targets.Add(name);
+        }
+        string wanted = target ?? _settings.Target;
+        TargetProfile? profile = LoadProfile(wanted);
+        if (profile is null && wanted != TargetProfile.DefaultName)
+        {
+            string why = Message;
+            profile = LoadProfile(TargetProfile.DefaultName);
+            Message = $"{why}; using {TargetProfile.DefaultName}";
+        }
+        _profile = profile ?? throw new InvalidOperationException(Message);
+        _target = NameOf(profile);
+        if (!Targets.Contains(_target))
+        {
+            Targets.Add(_target);
+        }
+        _settings.Target = _target;
+        _boardAddress = board ?? AddressOf(_profile);
         _isShellPaneVisible = _settings.ShellPaneVisible;
         _spanSeconds = Spans.Contains(_settings.SpanSeconds) ? _settings.SpanSeconds : 5;
         _amplitudeZoom = Zooms.Contains(_settings.AmplitudeZoom) ? _settings.AmplitudeZoom : 1;
@@ -279,6 +310,130 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         set => _settings.ShellPaneHeight = value;
     }
 
+    // ---- the target --------------------------------------------------------
+
+    /// <summary>The profile of a name or path; null (and the reason in <see cref="Message"/>) when it cannot be read.</summary>
+    private TargetProfile? LoadProfile(string nameOrPath)
+    {
+        try
+        {
+            return TargetProfile.Resolve(nameOrPath);
+        }
+        catch (TargetProfileException e)
+        {
+            Message = e.Message;
+            return null;
+        }
+    }
+
+    /// <summary>How the selector names a profile: its name when it is the one beside the application, else its path.</summary>
+    private static string NameOf(TargetProfile profile) =>
+        Path.GetFullPath(Path.Combine(TargetProfile.DefaultDirectory, profile.Name + ".json")) == profile.FilePath
+            ? profile.Name : profile.FilePath;
+
+    /// <summary>The address entered for a target before, else its profile's default.</summary>
+    private string AddressOf(TargetProfile profile) =>
+        _settings.Addresses.TryGetValue(profile.Name, out string? address) ? address : profile.Address.Default;
+
+    /// <summary>The target can be changed while nothing is connected to it.</summary>
+    public bool CanChangeTarget => !IsStreamConnected && !IsShellConnected;
+
+    /// <summary>The address is fixed while the stream runs, and while an ssh shell runs (it uses the ssh connection).</summary>
+    public bool CanEditAddress => !IsStreamConnected && !(IsShellConnected && IsSshTarget);
+
+    partial void OnTargetChanged(string value)
+    {
+        if (value is null || NameOf(_profile) == value)
+        {
+            return;
+        }
+        if (!CanChangeTarget || LoadProfile(value) is not TargetProfile profile)
+        {
+            // Back to the target in use, after the selector's own change.
+            string current = NameOf(_profile);
+            Dispatcher.UIThread.Post(() => Target = current);
+            return;
+        }
+        _settings.Addresses[_profile.Name] = BoardAddress.Trim();
+        _profile = profile;
+        _settings.Target = value;
+        _ssh?.Dispose();
+        _ssh = null;
+        BoardAddress = AddressOf(profile);
+        UsbHost = UsbHostState.Unknown;
+        Microphone = MicrophoneState.Unknown;
+        ShowVolume(null, replaceEdit: true);
+        ShowHum(null);
+        HighPass = HighPassState.Unknown;
+        if (!HasOta)
+        {
+            SelectedView = AudioView;
+        }
+        foreach (string name in (string[])[nameof(IsSshTarget), nameof(CanEditAddress), nameof(HasFind),
+                                           nameof(AddressHint), nameof(StreamTip), nameof(ShellTip), nameof(HasUsbHost),
+                                           nameof(UsbHostTip), nameof(HasMicrophone), nameof(CanToggleMicrophone),
+                                           nameof(MicrophoneTip), nameof(HasVolume), nameof(VolumeMinimum),
+                                           nameof(VolumeMaximum), nameof(CanSetVolume), nameof(VolumeTip),
+                                           nameof(HasMute), nameof(CanToggleMute), nameof(MuteTip), nameof(HasHum),
+                                           nameof(HumOptions), nameof(HumTip), nameof(HasHighPass),
+                                           nameof(CanToggleHighPass), nameof(HighPassTip), nameof(HasBoardSettings),
+                                           nameof(HasOta)])
+        {
+            OnPropertyChanged(name);
+        }
+        Message = $"Target: {(profile.Title.Length > 0 ? profile.Title : profile.Name)} ({profile.FilePath})";
+    }
+
+    public bool IsSshTarget => _profile.Shell.Transport == ShellTransport.Ssh;
+    public bool HasFind => _profile.Address.Find;
+    public string AddressHint => _profile.Address.Hint;
+    public bool HasUsbHost => _profile.Controls.UsbHost is not null;
+    public bool HasMicrophone => _profile.Controls.Microphone is not null;
+    public bool HasVolume => _profile.Controls.Volume is not null;
+    public bool HasMute => _profile.Controls.Mute is not null;
+    public bool HasHum => _profile.Controls.Hum is not null;
+    public bool HasHighPass => _profile.Controls.HighPass is not null;
+    public bool HasBoardSettings => HasVolume || HasMute || HasHum || HasHighPass;
+    /// <summary>The target takes firmware updates: the Firmware tab is shown.</summary>
+    public bool HasOta => _profile.Ota is not null;
+
+    public string StreamTip => _profile.Stream.Transport == StreamTransport.Tcp
+        ? string.Create(CultureInfo.InvariantCulture, $"Connect or disconnect the audio stream (TCP port {_profile.Stream.Port})")
+        : $"Connect or disconnect the audio stream: runs \"{_profile.Stream.Command}\" on the target over ssh (connecting starts the capture, disconnecting stops it)";
+
+    public string ShellTip => _profile.Shell.Tip;
+
+    /// <summary>
+    /// The ssh connection to the destination in the address field: the one
+    /// in use, or a new one. Null (and the reason in <see cref="Message"/>)
+    /// when the field is not an ssh destination.
+    /// </summary>
+    private SshConnection? Ssh()
+    {
+        string destination = BoardAddress.Trim();
+        string executable = SshConnection.ResolveExecutable(_settings.SshPath);
+        if (_ssh is not null && _ssh.Destination == destination && _ssh.Executable == executable)
+        {
+            return _ssh;
+        }
+        if (SshConnection.CheckDestination(destination) is string error)
+        {
+            Message = error;
+            return null;
+        }
+        _ssh?.Dispose();
+        try
+        {
+            _ssh = new SshConnection(destination, executable);
+        }
+        catch (Exception e) when (e is SshException or IOException or UnauthorizedAccessException)
+        {
+            _ssh = null;
+            Message = e.Message;
+        }
+        return _ssh;
+    }
+
     // ---- the board's address ---------------------------------------------
 
     [RelayCommand]
@@ -312,7 +467,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             DisconnectStream();
             return;
         }
-        if (string.IsNullOrWhiteSpace(BoardAddress))
+        if (string.IsNullOrWhiteSpace(BoardAddress) && HasFind)
         {
             await FindBoardAsync();
         }
@@ -321,12 +476,27 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     private void ConnectStream()
     {
-        if (Host() is not string host)
+        IAudioStreamSource source;
+        if (_profile.Stream.Transport == StreamTransport.Tcp)
         {
-            Message = "Enter the board's address (or press Find)";
-            return;
+            if (Host() is not string host)
+            {
+                Message = HasFind ? "Enter the board's address (or press Find)" : "Enter the board's address";
+                return;
+            }
+            source = new TcpAudioSource(host, _profile.Stream.Port!.Value);
         }
-        AudioStreamClient client = new(host);
+        else
+        {
+            if (Ssh() is not SshConnection ssh)
+            {
+                return;
+            }
+            SshAudioSource command = new(ssh, _profile.Stream.Command!);
+            command.ErrorLine += line => Dispatcher.UIThread.Post(() => Message = "Audio stream: " + line);
+            source = command;
+        }
+        AudioStreamClient client = new(source);
         client.Connected += OnStreamHeader;
         client.BlockReceived += OnBlock;
         client.Disconnected += reason => Dispatcher.UIThread.Post(() =>
@@ -340,8 +510,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _seenStreamState = null;
         client.Start();
         IsStreamConnected = true;
-        _settings.BoardAddress = BoardAddress.Trim();
-        Message = $"Audio stream: connecting to {host}:{client.Port}";
+        _settings.Addresses[_profile.Name] = BoardAddress.Trim();
+        Message = $"Audio stream: connecting to {source.Name}";
     }
 
     private void DisconnectStream()
@@ -438,24 +608,37 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         try
         {
-            if (string.IsNullOrWhiteSpace(BoardAddress))
+            BoardShell shell;
+            if (_profile.Shell.Transport == ShellTransport.Telnet)
             {
-                BoardAddress = await BoardLocator.FindAsync();
+                if (string.IsNullOrWhiteSpace(BoardAddress) && HasFind)
+                {
+                    BoardAddress = await BoardLocator.FindAsync();
+                }
+                // "address" or "address:port"; the port is for a shell that is not on the profile's Telnet port.
+                string[] parts = BoardAddress.Trim().Split(':');
+                int port = _profile.Shell.Port!.Value;
+                if (parts.Length > 2 || (parts.Length == 2 && (!int.TryParse(parts[1], out port) || port is < 1 or > 65535)))
+                {
+                    Message = "The board address is not of the form address or address:port";
+                    return;
+                }
+                shell = await BoardShell.ConnectAsync(parts[0], port, _profile.Prompt);
             }
-            // "address" or "address:port"; the port is for a shell that is not on the Telnet port.
-            string[] parts = BoardAddress.Trim().Split(':');
-            int port = BoardLocator.TelnetPort;
-            if (parts.Length > 2 || (parts.Length == 2 && (!int.TryParse(parts[1], out port) || port is < 1 or > 65535)))
+            else
             {
-                Message = "The board address is not of the form address or address:port";
-                return;
+                if (Ssh() is not SshConnection ssh)
+                {
+                    return;
+                }
+                Message = $"Shell: connecting to {ssh.Destination} with ssh";
+                shell = await BoardShell.OpenSshAsync(ssh, _profile.Prompt);
             }
-            BoardShell shell = await BoardShell.ConnectAsync(parts[0], port);
             shell.Output += text => Dispatcher.UIThread.Post(() => AppendShell(text));
             shell.Closed += reason => Dispatcher.UIThread.Post(() => OnShellClosed(shell, reason));
             _shell = shell;
             IsShellConnected = true;
-            _settings.BoardAddress = BoardAddress.Trim();
+            _settings.Addresses[_profile.Name] = BoardAddress.Trim();
             Message = $"Shell connected to {shell.Address}";
             await shell.SettleAsync();
             await RefreshBoardStateAsync();
@@ -492,7 +675,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         ShellText = _shellLog.ToString();
     }
 
-    /// <summary>Runs a line on the board and shows it in the shell pane. Null when it could not be sent.</summary>
+    /// <summary>Runs a line typed in the shell pane and shows it there. Null when it could not be sent.</summary>
     private async Task<string?> RunAsync(string line)
     {
         BoardShell? shell = _shell;
@@ -524,11 +707,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         ShellInput = "";
         ShellHistory.Remove(line);
         ShellHistory.Add(line);
-        // A "usb" or "uac" command can change what the buttons show. One that
-        // is still printing after the wait is left alone: a query sent now
-        // would take its output.
-        if (await RunAsync(line) is string output && BoardShell.Finished(output) &&
-            line.Split(' ', 2)[0] is "usb" or "uac")
+        // A command of the profile's "refreshAfter" (the XIAO's "usb" and
+        // "uac") can change what the buttons show. One that is still printing
+        // after the wait is left alone: a query sent now would take its output.
+        if (await RunAsync(line) is string output && _shell?.Prompt.Finished(output) == true &&
+            _profile.Shell.RefreshAfter.Contains(line.Split(' ', 2)[0]))
         {
             _ = RefreshBoardStateAsync();
         }
@@ -539,22 +722,29 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public bool IsUsbHostOn => UsbHost == UsbHostState.Running;
     public bool IsMicrophoneOn => Microphone == MicrophoneState.Running;
 
-    /// <summary>The microphone needs the shell, and the USB host to start it.</summary>
+    /// <summary>The microphone needs the shell, and the USB host to start it where the profile says so.</summary>
     public bool CanToggleMicrophone =>
-        IsShellConnected && (UsbHost == UsbHostState.Running || Microphone == MicrophoneState.Running);
+        IsShellConnected && (_profile.Controls.Microphone?.RequiresUsbHost != true ||
+                             UsbHost == UsbHostState.Running || Microphone == MicrophoneState.Running);
 
-    public string MicrophoneTip =>
-        !IsShellConnected ? "Start or stop the board's microphone stream (uac start, uac stop); needs the shell"
-        : !CanToggleMicrophone ? "The microphone needs the USB host: press USB host first"
-        : "Start or stop the board's microphone stream (uac start, uac stop)";
+    public string UsbHostTip => _profile.Controls.UsbHost?.Tip + "; needs the shell";
+
+    public string MicrophoneTip
+    {
+        get
+        {
+            string what = _profile.Controls.Microphone?.Tip ?? "";
+            return !IsShellConnected ? what + "; needs the shell"
+                : !CanToggleMicrophone ? "The microphone needs the USB host: press USB host first"
+                : what;
+        }
+    }
 
     [RelayCommand]
-    private Task ToggleUsbHostAsync() =>
-        RunStateCommandAsync(IsUsbHostOn ? BoardCommand.UsbHostStop : BoardCommand.UsbHostStart);
+    private Task ToggleUsbHostAsync() => RunStateCommandAsync(_profile.State.UsbHost(!IsUsbHostOn));
 
     [RelayCommand]
-    private Task ToggleMicrophoneAsync() =>
-        RunStateCommandAsync(IsMicrophoneOn ? BoardCommand.UacStop : BoardCommand.UacStart);
+    private Task ToggleMicrophoneAsync() => RunStateCommandAsync(_profile.State.Microphone(!IsMicrophoneOn));
 
     /// <summary>
     /// Runs a button's command, shows the board's answer, and asks the board
@@ -563,21 +753,33 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// </summary>
     private async Task RunStateCommandAsync(BoardCommand command, bool replaceVolumeEdit = false)
     {
-        if (await RunAsync(command.Line) is not string output)
+        BoardShell? shell = _shell;
+        if (shell is null)
         {
+            Message = "The shell is not connected";
             return;
         }
-        List<string> lines = BoardShell.OutputLines(output, command.Line);
+        AppendShell(command.Line);
+        IReadOnlyList<string> lines;
+        try
+        {
+            lines = await shell.CommandAsync(command.Line, CommandWait);
+        }
+        catch (Exception e) when (e is BoardException or ObjectDisposedException)
+        {
+            Message = e.Message;
+            return;
+        }
         Message = $"{command.Line}: " + (command.Failure(lines) ?? string.Join(" ", lines));
         await RefreshBoardStateAsync(replaceVolumeEdit);
     }
 
     /// <summary>
-    /// Asks the board for the USB host's and the microphone's state, the
-    /// microphone's volume and mute (while its stream runs: the board reads
-    /// them only then), the hum filter and the high-pass filter, with queries
-    /// that the shell pane does not show; they wait behind a command that is
-    /// running.
+    /// Asks the board for what its profile has of: the USB host's and the
+    /// microphone's state, the microphone's volume and mute (on the XIAO
+    /// only while its stream runs: the board reads them only then), the hum
+    /// filter and the high-pass filter, with queries that the shell pane
+    /// does not show; over Telnet they wait behind a command that is running.
     /// </summary>
     private async Task RefreshBoardStateAsync(bool replaceVolumeEdit = false)
     {
@@ -586,27 +788,33 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             return;
         }
+        BoardState state = _profile.State;
+        ControlsSpec controls = _profile.Controls;
         try
         {
-            string usb = await shell.QueryAsync(BoardState.UsbStatusLine, CommandWait);
-            UsbHostState host = BoardState.ParseUsbStatus(BoardShell.OutputLines(usb, BoardState.UsbStatusLine));
-            // A host that does not run has no stream.
-            MicrophoneState microphone = MicrophoneState.Stopped;
-            if (host != UsbHostState.Stopped)
+            UsbHostState host = state.UsbHostQuery is string usbQuery
+                ? state.ParseUsbHost(await shell.QueryAsync(usbQuery, CommandWait))
+                : UsbHostState.Unknown;
+            MicrophoneState microphone = MicrophoneFromStream(_stream?.Status().State);
+            if (state.MicrophoneQuery is string micQuery)
             {
-                string uac = await shell.QueryAsync(BoardState.UacStatsLine, CommandWait);
-                microphone = BoardState.ParseUacStats(BoardShell.OutputLines(uac, BoardState.UacStatsLine));
+                // A host that does not run has no stream.
+                microphone = controls.Microphone!.RequiresUsbHost && host == UsbHostState.Stopped
+                    ? MicrophoneState.Stopped
+                    : state.ParseMicrophone(await shell.QueryAsync(micQuery, CommandWait));
             }
             VolumeReading? volume = null;
-            if (microphone == MicrophoneState.Running)
+            if (state.VolumeQuery is string volumeQuery &&
+                (!controls.Volume!.WhileMicrophone || microphone == MicrophoneState.Running))
             {
-                string reply = await shell.QueryAsync(BoardState.UacVolumeLine, CommandWait);
-                volume = BoardState.ParseUacVolume(BoardShell.OutputLines(reply, BoardState.UacVolumeLine));
+                volume = state.ParseVolume(await shell.QueryAsync(volumeQuery, CommandWait));
             }
-            string humReply = await shell.QueryAsync(BoardState.UacHumLine, CommandWait);
-            string? hum = BoardState.ParseUacHum(BoardShell.OutputLines(humReply, BoardState.UacHumLine));
-            string hpfReply = await shell.QueryAsync(BoardState.UacHpfLine, CommandWait);
-            HighPassState highPass = BoardState.ParseUacHpf(BoardShell.OutputLines(hpfReply, BoardState.UacHpfLine));
+            string? hum = state.HumQuery is string humQuery
+                ? state.ParseHum(await shell.QueryAsync(humQuery, CommandWait))
+                : null;
+            HighPassState highPass = state.HighPassQuery is string hpfQuery
+                ? state.ParseHighPass(await shell.QueryAsync(hpfQuery, CommandWait))
+                : HighPassState.Unknown;
             if (_shell != shell)
             {
                 return;
@@ -670,8 +878,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     partial void OnMicrophoneChanged(MicrophoneState value)
     {
-        // The board reads and sets the volume and mute only while the stream runs.
-        if (value != MicrophoneState.Running)
+        // The XIAO reads and sets the volume and mute only while the stream runs.
+        if (value != MicrophoneState.Running && _profile.Controls.Volume?.WhileMicrophone == true)
         {
             ShowVolume(null, replaceEdit: true);
         }
@@ -708,16 +916,22 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    public bool CanSetVolume => IsShellConnected && IsMicrophoneOn && BoardVolume is { HasVolume: true };
-    public bool CanToggleMute => IsShellConnected && IsMicrophoneOn && BoardVolume is { HasMute: true };
+    /// <summary>The volume and mute can be read now: always, or on the XIAO while the microphone stream runs.</summary>
+    private bool VolumeReadable => _profile.Controls.Volume?.WhileMicrophone != true || IsMicrophoneOn;
+
+    public bool CanSetVolume => IsShellConnected && VolumeReadable && BoardVolume is { HasVolume: true };
+    public bool CanToggleMute => IsShellConnected && VolumeReadable && BoardVolume is { HasMute: true };
     public bool IsMuted => BoardVolume?.Muted == true;
     public bool IsHighPassOn => HighPass == HighPassState.On;
     public bool CanToggleHighPass => IsShellConnected && HighPass != HighPassState.Unknown;
+    public int VolumeMinimum => _profile.Controls.Volume?.Minimum ?? 0;
+    public int VolumeMaximum => _profile.Controls.Volume?.Maximum ?? 100;
+    public IReadOnlyList<string> HumOptions => _profile.Controls.Hum?.Options ?? [];
 
     /// <summary>Why the volume or mute cannot be set now; null when it can be.</summary>
     private string? ControlsBlocked() =>
         !IsShellConnected ? "needs the shell"
-        : !IsMicrophoneOn ? "the board reads and sets it only while the microphone runs: press Microphone first"
+        : !VolumeReadable ? "the board reads and sets it only while the microphone runs: press Microphone first"
         : BoardVolume is null ? "not read from the board yet"
         : BoardVolume.Refusal is string refusal ? "the board says: " + refusal
         : null;
@@ -726,7 +940,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         get
         {
-            const string what = "The microphone's volume, percent of its range (uac volume <0..100>)";
+            string what = _profile.Controls.Volume?.Tip ?? "";
             if (ControlsBlocked() is string blocked)
             {
                 return $"{what}; {blocked}";
@@ -747,7 +961,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         get
         {
-            const string what = "The microphone's mute, lit when muted (uac mute on|off)";
+            string what = _profile.Controls.Mute?.Tip ?? "";
             if (ControlsBlocked() is string blocked)
             {
                 return $"{what}; {blocked}";
@@ -756,37 +970,51 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    public string HumTip => IsShellConnected
-        ? "The hum filter's mains frequency (uac hum 50|60|off); 50 after the board starts"
-        : "The hum filter's mains frequency (uac hum 50|60|off); needs the shell";
+    public string HumTip
+    {
+        get
+        {
+            ChoiceSpec? hum = _profile.Controls.Hum;
+            return !IsShellConnected ? hum?.Tip + "; needs the shell"
+                : hum?.Note is string note ? $"{hum.Tip}; {note}"
+                : hum?.Tip ?? "";
+        }
+    }
 
-    public string HighPassTip =>
-        !IsShellConnected ? "The 30 Hz high-pass filter (DC removal), lit when on (uac hpf on|off); needs the shell"
-        : HighPass == HighPassState.Unknown ? "The board's firmware does not have the command uac hpf (or its answer was not understood)"
-        : "The 30 Hz high-pass filter (DC removal), lit when on (uac hpf on|off); on after the board starts";
+    public string HighPassTip
+    {
+        get
+        {
+            ToggleSpec? hpf = _profile.Controls.HighPass;
+            return !IsShellConnected ? hpf?.Tip + "; needs the shell"
+                : HighPass == HighPassState.Unknown ? hpf?.UnknownTip ?? hpf?.Tip ?? ""
+                : hpf?.Note is string note ? $"{hpf.Tip}; {note}"
+                : hpf?.Tip ?? "";
+        }
+    }
 
     [RelayCommand]
     private async Task SetVolumeAsync()
     {
-        if (Volume is not decimal v || v is < 0 or > 100)
+        if (Volume is not decimal v || v < VolumeMinimum || v > VolumeMaximum)
         {
-            Message = "The volume is 0 .. 100";
+            Message = string.Create(CultureInfo.InvariantCulture, $"The volume is {VolumeMinimum} .. {VolumeMaximum}");
             return;
         }
-        await RunStateCommandAsync(BoardCommand.UacVolume((int)v), replaceVolumeEdit: true);
+        await RunStateCommandAsync(_profile.State.Volume((int)v), replaceVolumeEdit: true);
     }
 
     [RelayCommand]
-    private Task ToggleMuteAsync() => RunStateCommandAsync(BoardCommand.UacMute(!IsMuted));
+    private Task ToggleMuteAsync() => RunStateCommandAsync(_profile.State.Mute(!IsMuted));
 
     [RelayCommand]
-    private Task ToggleHighPassAsync() => RunStateCommandAsync(BoardCommand.UacHpf(!IsHighPassOn));
+    private Task ToggleHighPassAsync() => RunStateCommandAsync(_profile.State.HighPass(!IsHighPassOn));
 
     partial void OnHumChanged(string? value)
     {
         if (!_humFromBoard && value is not null)
         {
-            _ = RunStateCommandAsync(BoardCommand.UacHum(value));
+            _ = RunStateCommandAsync(_profile.State.Hum(value));
         }
     }
 
@@ -1270,6 +1498,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _update.Cancel();
             return;
         }
+        if (_profile.Ota is not OtaSpec ota)
+        {
+            AppendOta("Not updated: the target takes no firmware update");
+            return;
+        }
         AppImage? image = ShowImageInfo();
         if (image is null)
         {
@@ -1287,10 +1520,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         IsUpdating = true;
         UpdateProgress = 0;
         AppendOta($"{image.Path}: {image.Project} {image.Version}, ELF SHA-256 {image.ElfShaHex}");
-        AppendOta($"Updating {host}:{OtaClient.DefaultPort}");
+        AppendOta(string.Create(CultureInfo.InvariantCulture, $"Updating {host}:{ota.Port}"));
         try
         {
-            OtaClient client = new(host);
+            OtaClient client = new(host, ota.Port);
             OtaResult result = await client.UpdateAsync(image, new Progress<string>(AppendOta),
                                                         new Progress<double>(p => UpdateProgress = p * 100), cts.Token);
             Message = result.Outcome == OtaOutcome.Confirmed
@@ -1405,7 +1638,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 AudioStreamState.Waiting => "no connection, retrying",
                 _ => "stopped",
             };
-            status.Append(CultureInfo.InvariantCulture, $"Stream {client.Host}:{client.Port}: {StreamState}");
+            status.Append(CultureInfo.InvariantCulture, $"Stream {client.Source.Name}: {StreamState}");
             if (s.Header is AudioStreamHeader h)
             {
                 status.Append(CultureInfo.InvariantCulture, $"  |  {h.SampleRate} Hz, {s.SamplesPerSecond:F0} samples/s");
@@ -1444,6 +1677,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         StopRecording();
         _stream?.Dispose();
         _shell?.Dispose();
+        _ssh?.Dispose();
         if (_model is not null)
         {
             // A window takes milliseconds; the wait only covers a run that is under way.

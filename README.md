@@ -384,8 +384,9 @@ partitions.csv  partition table
 script/         flash tool (USB, UART), the Wi-Fi update tool and the audio stream receiver
 host/AudioStudio/  desktop application (.NET 10 / Avalonia): shows, records and
                 classifies the audio stream, the shell over Telnet, firmware
-                update over Wi-Fi (its README.md; ORIGIN.md for what comes
-                from rp2040-connect's ImuStudio)
+                update over Wi-Fi; with another target profile (targets/) the
+                same for an Arduino UNO Q over ssh (its README.md; ORIGIN.md
+                for what comes from rp2040-connect's ImuStudio)
 patches/        this repository's patches of the upstream sources in lib/, applied
                 at configure time (each says what it fixes and why)
 ldscript/       linker script, and the check run after linking that the code

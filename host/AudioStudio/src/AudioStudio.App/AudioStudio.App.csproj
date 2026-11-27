@@ -21,4 +21,8 @@
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The target profiles, in targets/ beside the application -->
+    <None Include="..\..\targets\*.json" Link="targets\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 using FluentAssertions;
 using AudioStudio.Core.Board;
+using AudioStudio.Core.Targets;
 using Xunit;
 
 namespace AudioStudio.Core.Tests;
@@ -29,6 +30,6 @@ public class BoardTests
     public void Output_lines_leave_out_the_echo_and_the_prompt()
     {
         string captured = "uac volume 40\nvolume 40 % (-12.00 dB), set; mute off\nxiao:~$ ";
-        BoardShell.OutputLines(captured, "uac volume 40").Should().Equal("volume 40 % (-12.00 dB), set; mute off");
+        TargetProfile.Resolve("xiao-esp32s3").Prompt.OutputLines(captured, "uac volume 40").Should().Equal("volume 40 % (-12.00 dB), set; mute off");
     }
 }

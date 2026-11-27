@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using FluentAssertions;
 using AudioStudio.Core.Board;
+using AudioStudio.Core.Targets;
 using Xunit;
 
 namespace AudioStudio.Core.Tests;
@@ -11,6 +12,7 @@ namespace AudioStudio.Core.Tests;
 public class BoardShellTests
 {
     private const string Prompt = "xiao:~$ ";
+    private static readonly ShellPrompt XiaoPrompt = TargetProfile.Resolve("xiao-esp32s3").Prompt;
 
     /// <summary>A shell that answers each line with <paramref name="reply"/>, like the board's.</summary>
     private static (TcpListener Listener, Task Server) FakeBoard(bool echo, Func<string, string> reply)
@@ -58,14 +60,14 @@ public class BoardShellTests
         (TcpListener listener, Task server) = FakeBoard(echo, line => line == "uac hum" ? "hum filter: 50 Hz mains\r\nnotches\r\n" : "Stopped\r\n");
         try
         {
-            using BoardShell shell = await BoardShell.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port);
+            using BoardShell shell = await BoardShell.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, XiaoPrompt);
             StringBuilder shown = new();
             shell.Output += text => { lock (shown) { shown.Append(text); } };
             await shell.SettleAsync();
             string first = await shell.ExecuteAsync("uac hum", TimeSpan.FromSeconds(5));
-            BoardShell.OutputLines(first, "uac hum").Should().Equal("hum filter: 50 Hz mains", "notches");
+            XiaoPrompt.OutputLines(first, "uac hum").Should().Equal("hum filter: 50 Hz mains", "notches");
             string second = await shell.ExecuteAsync("uac stop", TimeSpan.FromSeconds(5));
-            BoardShell.OutputLines(second, "uac stop").Should().Equal("Stopped");
+            XiaoPrompt.OutputLines(second, "uac stop").Should().Equal("Stopped");
             lock (shown)
             {
                 shown.ToString().Should().NotContain("uac hum", "the echo is left to whoever shows the line");
@@ -87,7 +89,7 @@ public class BoardShellTests
         try
         {
             Task<TcpClient> accept = listener.AcceptTcpClientAsync();
-            using BoardShell shell = await BoardShell.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port);
+            using BoardShell shell = await BoardShell.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, XiaoPrompt);
             TaskCompletionSource<string?> closed = new();
             shell.Closed += reason => closed.TrySetResult(reason);
             using TcpClient peer = await accept;
@@ -108,7 +110,7 @@ public class BoardShellTests
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
-        Func<Task> connect = () => BoardShell.ConnectAsync("127.0.0.1", port);
+        Func<Task> connect = () => BoardShell.ConnectAsync("127.0.0.1", port, XiaoPrompt);
         await connect.Should().ThrowAsync<BoardException>();
     }
 }

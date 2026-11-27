@@ -1,14 +1,21 @@
 # AudioStudio
 
 A desktop application for the board's audio: it receives the stream of the
-throat microphone over Wi-Fi (16 kHz, mono, 16-bit), shows it as a waveform
-and a spectrogram, records it to WAV files, shows recorded WAV files the same
-way, runs the M4 swallow detector or an ONNX classification model on either,
-operates the board's shell (Telnet) and updates the board's firmware over
+throat microphone (16 kHz, mono, 16-bit), shows it as a waveform and a
+spectrogram, records it to WAV files, shows recorded WAV files the same way,
+runs the M4 swallow detector or an ONNX classification model on either,
+operates the board's shell and, for the XIAO, updates its firmware over
 Wi-Fi.
 
+Two targets are described by profiles in `targets/` (see "Targets" below):
+the XIAO ESP32S3 with this repository's firmware (Wi-Fi: the audio stream on
+TCP, a Telnet shell, OTA), and the Linux side of an Arduino UNO Q (ssh: the
+stream is the output of `tools/unoq/audio_stream.py` run on the target, the
+shell an ssh login shell).
+
 - Framework: .NET 10 / Avalonia 11, ONNX Runtime
-- Target OS: Linux (the `ip` command is used to find the board)
+- Target OS: Linux (the `ip` command is used to find the XIAO, the system's
+  `ssh` program to reach the UNO Q)
 
 ## Build and run
 
@@ -21,26 +28,32 @@ dotnet run --project src/AudioStudio.App
 
 The model tests run `tools/make_test_model.py` with `python3` (standard library
 only); the M4 tests read the fixtures in `tests/AudioStudio.Core.Tests/Fixtures/`
-(see "Regenerating the fixtures" below) and the model in `models/`.
+(see "Regenerating the fixtures" below) and the model in `models/`; the ssh
+tests run a fake ssh program (a shell script the tests write) and reach no
+network.
 
 Arguments (all optional):
 
 | Argument | Meaning |
 | --- | --- |
-| `--board <address>` | Connect the audio stream to this address on start |
+| `--target <name\|file.json>` | The target profile: a name in `targets/` (`xiao-esp32s3`, `unoq`) or the path of a profile (otherwise the last one chosen; `xiao-esp32s3` at first) |
+| `--board <address>` | Connect the audio stream to this address on start (for the UNO Q, the ssh destination `user@host`) |
 | `--shell` | With `--board`: connect the shell too |
 | `--open <file.wav>` | Show a WAV file |
 | `--model <file.onnx\|file.npz>` | Load a model (otherwise the last one loaded, or `models/m4-0038.npz` when none was loaded before) |
 | `--image <file.bin>` | The firmware image to offer for an update |
-| `--view <audio\|firmware>` | The tab to start with |
+| `--view <audio\|firmware>` | The tab to start with (`firmware` only for a target with OTA) |
 
-The board address, the view settings, the recording label, the model and its
-settings, and the height of the shell pane are saved to
-`~/.config/AudioStudio/settings.json` on exit. Two settings exist only there:
-`RecordingsDirectory` (empty: `host/AudioStudio/recordings/` for a build
-inside the repository, `~/AudioStudio/recordings/` otherwise) and
+The target, the address of each target, the view settings, the recording
+label, the model and its settings, and the height of the shell pane are
+saved to `~/.config/AudioStudio/settings.json` on exit (the `BoardAddress` of
+an older settings file is taken as the XIAO's address). Three settings exist
+only there: `RecordingsDirectory` (empty: `host/AudioStudio/recordings/` for
+a build inside the repository, `~/AudioStudio/recordings/` otherwise),
 `RepositoryDirectory` (where to find `build/xiao_esp32s3_threadx.bin`; empty:
-the first directory from the application's own upwards that has it).
+the first directory from the application's own upwards that has it) and
+`SshPath` (the ssh program; empty: `ssh` on the `PATH`; the environment
+variable `AUDIOSTUDIO_SSH` overrides it).
 The board's own settings (volume, mute, hum and high-pass filters) are not
 saved: the application shows what the board reports.
 
@@ -49,7 +62,47 @@ To have the application in the GNOME application list and dock, run
 writes `~/.local/share/applications/AudioStudio.desktop`; `--remove` takes it
 away). The icon is drawn by `tools/make_icon.py`.
 
-## The board's interfaces
+## Targets
+
+A target profile is a JSON file (comments allowed) in `targets/`, which the
+build copies beside the application. **Target** at the top left chooses one
+(while neither the stream nor the shell is connected); `--target` gives a
+name or the path of a profile of one's own. What the profile has decides
+what the window shows: a control that is absent is hidden, and the
+**Firmware** tab is there only with `ota`. A profile that does not make
+sense (a bad regular expression, an unknown key, a reply value the control
+does not have) is refused with the reason.
+
+| Key | Meaning |
+| --- | --- |
+| `name`, `title` | The name of `--target` and the settings; the name shown |
+| `address` | `default` (the address when none was entered for this target), `hint` (shown in the empty field), `find` (the **Find** button: the XIAO's access point neighbour table) |
+| `shell` | `transport`: `telnet` with `port` (an `address:port` overrides it), or `ssh` (the address is the destination); `prompt`, a .NET regular expression for the end of the shell's output; `tip`, the **Shell** button's tooltip; `refreshAfter`, the first words of typed lines after which the state is read again |
+| `stream` | `transport`: `tcp` with `port`, or `ssh` with `command`, run on the target, whose standard output is the XAUD stream |
+| `controls` | Any of `usbHost`, `microphone`, `volume`, `mute`, `hum`, `highPass` (below) |
+| `ota` | `port` of the OTA service; absent: no firmware update |
+
+A button with two states (`usbHost`, `microphone`, `highPass`) has `query`
+(`command`; `lines`, `any` or `first`; and `replies`, a list of `value` and
+`match`, a regular expression tried on each trimmed line in order), `on` and
+`off` (`command`, and `success`, a regular expression for a line of the
+output that means it worked; otherwise the first line is shown as the
+board's error), `tip`, `note` (added while the shell is connected),
+`unknownTip` (while the state is not known) and, for the microphone,
+`requiresUsbHost`. The reply values are `stopped`, `running`, `notAnswering`
+(USB host), `stopped`, `running` (microphone) and `on`, `off` (high-pass).
+`volume` has `query` (a command), `match` (a regular expression with the
+optional groups `percent`, `db`, `set` and `mute`), `set` (a command with
+`{value}`), `minimum`, `maximum`, `whileMicrophone` (read and set only while
+the microphone stream runs) and `tip`; `mute` has `on`, `off` and `tip`, and
+its state is the volume's `mute` group; `hum` has `query`, `options` (its
+reply values, and the values of `{value}` in `set`), `set`, `tip` and `note`.
+
+`targets/xiao-esp32s3.json` holds the XIAO's commands and replies described
+below. `targets/unoq.json` has no controls (the mixer controls of the UNO Q's
+adapter are not described yet) and no OTA.
+
+## The XIAO's interfaces
 
 All on the board's address (the PC runs the Wi-Fi access point at
 10.42.0.1; the board is usually 10.42.0.100):
@@ -60,10 +113,63 @@ All on the board's address (the PC runs the Wi-Fi access point at
 | TCP 23 | Telnet shell, prompt `xiao:~$ ` (one session) | **Shell** and the command buttons |
 | TCP 3232 | OTA service | **Firmware** tab |
 
+## The UNO Q over ssh
+
+The application runs the system's `ssh` program as child processes, with
+`BatchMode=yes` (it never asks for a password: the target needs key
+authentication for the user, and a refusal is shown in the status line with
+ssh's own words) and connection sharing: a master process
+(`ControlMaster=auto`, its control socket in a private temporary directory
+that is removed on exit) that the shell, the stream and any query use as
+separate channels. The master starts with the first of them and ends after
+the last; its own session reads the application's end of a pipe, so it also
+ends when the application ends without cleaning up. The address is the ssh
+destination (`arduino@unoq.local` by default; a host of `~/.ssh/config`
+works too).
+
+- **Shell** opens an interactive login shell on a terminal (`ssh -tt`,
+  `TERM=dumb`), kept like the Telnet one; the profile's prompt (`$` or `#`
+  at the end) tells when a typed command has finished. The queries and
+  button commands of a profile that has any run as channels of their own.
+- **Stream** runs the profile's command, for the UNO Q
+  `flock -n -F -E 75 /home/arduino python3 -B ~/audiostudio-unoq/audio_stream.py`.
+  Connecting starts the capture; disconnecting ends the ssh channel, and the
+  tool on the target then ends at its next write and ends arecord. Its
+  standard error lines go to the status line. Exit code 75 is shown as "the
+  adapter is in use on the target (detector or a recording)" (the detector
+  service or a recording holds the lock), any other end with the exit code
+  and the last error line. As for the XIAO, a stream that ends is started
+  again every 2 s until **Stream** is pressed again.
+
+`tools/unoq/audio_stream.py` (Python 3 and numpy, on the target) starts
+`arecord -D <device> -f S16_LE -r 48000 -c 2 -t raw -B 2000000 -F 125000 -v -`
+(`--device`, default `hw:CARD=Audio,DEV=0`; only `hw:` and `plughw:` card
+and device names), takes the left channel, decimates it to 16 kHz with the
+61-tap low-pass filter of zaitaku-mealpace's `features_np.decimate3` (the
+coefficients of scipy's `resample_poly(x, 1, 3)`; block by block, the output
+equals `decimate3`'s, 30 input samples late), rounds to 16 bits, and writes
+the XAUD stream of the XIAO's audio service: blocks of 320 samples, the
+first with the new-stream flag, and a keep-alive block when arecord gives
+nothing for a second. arecord's overruns do not say how many frames were
+dropped: each is counted and written to standard error (and so shows in the
+status line). The tool ends, and ends arecord, when its output is closed, on
+SIGTERM, SIGHUP or SIGINT, and when arecord ends; it writes no file.
+`--stdin` reads the raw 48 kHz stereo bytes from standard input instead
+(for tests).
+
+`tools/unoq/deploy.sh [user@host]` copies the tool to `~/audiostudio-unoq/`
+on the target with ssh and scp. The tool's tests run on any computer with
+numpy, with a fake arecord and the fixtures below:
+
+```bash
+python3 -B -m unittest discover -s tools/unoq -p 'test_*.py'
+```
+
 ## Usage
 
-1. **Find** looks up the board's address in the access point's neighbour
-   table; typing it works too.
+1. **Target** chooses the target profile. **Find** (XIAO) looks up the
+   board's address in the access point's neighbour table; typing it works
+   too. For the UNO Q the address is the ssh destination.
 2. **Stream** connects the audio stream. The state next to it is
    `connecting`, `connected` (the stream header came), `idle` (the board
    sends its keep-alive once a second: no microphone stream runs),
@@ -73,7 +179,9 @@ All on the board's address (the PC runs the Wi-Fi access point at
    received per second (over the last 5 s), the samples received, those lost
    (index jumps, and how many gaps), the starts of new streams on the board,
    and the number of connections.
-3. **Shell** connects the Telnet shell. The board has a single Telnet session:
+3. **Shell** connects the shell (for the UNO Q see "The UNO Q over ssh"; its
+   profile has none of the buttons and fields below). The XIAO has a single
+   Telnet session:
    while the application holds it, a terminal cannot have it, and the other
    way round. **USB host** and **Microphone** show the board's state: lit
    when the board's USB host runs (its USB-C connector is the USB host port;
@@ -249,6 +357,17 @@ interpreter (numpy only; it writes nothing into the checkout):
     --mealpace /path/to/zaitaku-mealpace --out tests/AudioStudio.Core.Tests/Fixtures
 ```
 
+The UNO Q tool's fixtures (`unoq_decimate3.s16`, the left channel of a
+synthetic 0.6 s 48 kHz stereo signal through `features_np.decimate3`, and
+`unoq_stream.xaud`, what `audio_stream.py --stdin` writes for that signal,
+which the ssh tests stream through the fake ssh) are written the same way,
+after checking that the tool's samples equal `decimate3`'s:
+
+```bash
+/path/to/zaitaku-mealpace/.venv/bin/python -B tools/unoq/make_unoq_fixtures.py \
+    --mealpace /path/to/zaitaku-mealpace --out tests/AudioStudio.Core.Tests/Fixtures
+```
+
 #### ONNX models
 
 An ONNX model of the contract below. On the live stream it runs on the newest
@@ -299,7 +418,8 @@ that fulfils the contract (energy and slope of the signal; classes
 
 ### Firmware
 
-The **Firmware** tab updates the board over Wi-Fi, as `script/ota.py` does.
+The **Firmware** tab (XIAO only) updates the board over Wi-Fi, as
+`script/ota.py` does.
 
 1. **Image** is the application image to send: by default
    `build/xiao_esp32s3_threadx.bin` of the firmware repository
@@ -326,11 +446,14 @@ firmware.
 
 | Path | Role |
 | --- | --- |
-| `src/AudioStudio.Core` | The audio stream protocol and client, the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, and its runner), the OTA client, the Telnet shell and board discovery, the settings |
+| `src/AudioStudio.Core` | The target profiles (`Targets/`), the audio stream protocol, its sources (TCP, a command over ssh) and client, the ssh connection (`Ssh/`), the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, and its runner), the OTA client, the shell (Telnet or ssh), the reading of the board's state as its profile describes it, board discovery, the settings |
 | `src/AudioStudio.App` | The Avalonia user interface (MVVM): the waveform, spectrogram, class strip and probability trace controls, the view model, the window |
 | `models/` | The M4 swallow detector's weights and mel matrix |
-| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host, microphone, volume and mute, hum filter and high-pass filter, the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams |
+| `targets/` | The target profiles: `xiao-esp32s3.json`, `unoq.json` |
+| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host, microphone, volume and mute, hum filter and high-pass filter with the XIAO's profile, the profiles and their checks, the ssh transport with a fake ssh (the stream, exit code 75, a refused key, the shell and its queries, no process left behind), the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams |
 | `tools/` | `make_test_model.py`, `make_m4_fixtures.py`, `make_icon.py`, `install_desktop.sh` |
+| `tools/unoq/` | `audio_stream.py` (runs on the UNO Q), `deploy.sh`, `make_unoq_fixtures.py`, `test_audio_stream.py` |
 
 `ORIGIN.md` lists what was copied from ImuStudio (rp2040-connect) and what was
-changed, and where the M4 model files come from.
+changed, and where the M4 model files and the UNO Q tool's arecord arguments
+and decimation come from.

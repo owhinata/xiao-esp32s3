@@ -14,7 +14,8 @@ using Avalonia.Platform.Storage;
 namespace AudioStudio.App.Views;
 
 /// <summary>What the command line asks for at the start.</summary>
-public sealed record StartOptions(string? Board, bool Shell, string? Open, string? Model, string? Image, string? View);
+public sealed record StartOptions(string? Board, bool Shell, string? Open, string? Model, string? Image, string? View,
+                                  string? Target);
 
 public partial class MainWindow : Window
 {
@@ -29,15 +30,15 @@ public partial class MainWindow : Window
     private bool _spectrumComplete;
     private int _historyIndex = -1;
 
-    public MainWindow() : this(new StartOptions(null, false, null, null, null, null))
+    public MainWindow() : this(new StartOptions(null, false, null, null, null, null, null))
     {
     }
 
     public MainWindow(StartOptions options)
     {
-        _viewModel = new MainViewModel(options.Board, options.Shell, options.Image);
+        _viewModel = new MainViewModel(options.Board, options.Shell, options.Image, options.Target);
         InitializeComponent();
-        if (string.Equals(options.View, "firmware", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(options.View, "firmware", StringComparison.OrdinalIgnoreCase) && _viewModel.HasOta)
         {
             _viewModel.SelectedView = MainViewModel.FirmwareView;
         }

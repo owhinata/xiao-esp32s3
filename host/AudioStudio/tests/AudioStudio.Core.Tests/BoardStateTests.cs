@@ -4,20 +4,23 @@ using System.Net.Sockets;
 using System.Text;
 using FluentAssertions;
 using AudioStudio.Core.Board;
+using AudioStudio.Core.Targets;
 using Xunit;
 
 namespace AudioStudio.Core.Tests;
 
-/// <summary>The replies of shell/port/usb_shell.c and uac_shell.c.</summary>
+/// <summary>The replies of shell/port/usb_shell.c and uac_shell.c, read with the XIAO's target profile.</summary>
 public class BoardStateTests
 {
+    private static readonly BoardState Xiao = TargetProfile.Resolve("xiao-esp32s3").State;
+
     [Fact]
     public void Usb_status_stopped() =>
-        BoardState.ParseUsbStatus(["host: stopped"]).Should().Be(UsbHostState.Stopped);
+        Xiao.ParseUsbHost(["host: stopped"]).Should().Be(UsbHostState.Stopped);
 
     [Fact]
     public void Usb_status_running() =>
-        BoardState.ParseUsbStatus([
+        Xiao.ParseUsbHost([
             "host: running",
             "root port: power on, connected, enabled, full speed, D+ 1 D- 0",
             "devices: 1, clients: 1",
@@ -25,34 +28,34 @@ public class BoardStateTests
 
     [Fact]
     public void Usb_status_not_answering() =>
-        BoardState.ParseUsbStatus(["host: not answering; it stays as it is until a reboot"])
+        Xiao.ParseUsbHost(["host: not answering; it stays as it is until a reboot"])
             .Should().Be(UsbHostState.NotAnswering);
 
     [Theory]
     [InlineData("usb: command not found")]
     [InlineData("host: something else")]
     public void Usb_status_unknown(string line) =>
-        BoardState.ParseUsbStatus([line]).Should().Be(UsbHostState.Unknown);
+        Xiao.ParseUsbHost([line]).Should().Be(UsbHostState.Unknown);
 
     [Fact]
     public void Usb_status_without_output() =>
-        BoardState.ParseUsbStatus([]).Should().Be(UsbHostState.Unknown);
+        Xiao.ParseUsbHost([]).Should().Be(UsbHostState.Unknown);
 
     [Fact]
     public void Uac_stats_running() =>
-        BoardState.ParseUacStats([
+        Xiao.ParseMicrophone([
             "stream: running, 48000 Hz, 1 channel, decimated to 16000 Hz",
             "data: from 0.002 s to 12.345 s after the start",
         ]).Should().Be(MicrophoneState.Running);
 
     [Fact]
     public void Uac_stats_stopped() =>
-        BoardState.ParseUacStats(["stream: stopped, 48000 Hz, 2 channels, decimated to 16000 Hz", "data: none yet"])
+        Xiao.ParseMicrophone(["stream: stopped, 48000 Hz, 2 channels, decimated to 16000 Hz", "data: none yet"])
             .Should().Be(MicrophoneState.Stopped);
 
     [Fact]
     public void Uac_stats_before_any_stream_or_without_the_host() =>
-        BoardState.ParseUacStats([
+        Xiao.ParseMicrophone([
             "No stream since the USB host started",
             "TCP stream (port 3233): no client; last client: 0 blocks, 0 samples sent, 0 lost; 0 clients dropped",
         ]).Should().Be(MicrophoneState.Stopped);
@@ -61,47 +64,47 @@ public class BoardStateTests
     [InlineData("uac: command not found")]
     [InlineData("stream: unclear")]
     public void Uac_stats_unknown(string line) =>
-        BoardState.ParseUacStats([line]).Should().Be(MicrophoneState.Unknown);
+        Xiao.ParseMicrophone([line]).Should().Be(MicrophoneState.Unknown);
 
     [Fact]
     public void Uac_stats_without_output() =>
-        BoardState.ParseUacStats([]).Should().Be(MicrophoneState.Unknown);
+        Xiao.ParseMicrophone([]).Should().Be(MicrophoneState.Unknown);
 
     // uac volume (cmd_uac_volume in shell/port/uac_shell.c)
 
     [Fact]
     public void Uac_volume_all_known() =>
-        BoardState.ParseUacVolume(["volume 50% (-12.50 dB), set to 50%; mute off"])
+        Xiao.ParseVolume(["volume 50% (-12.50 dB), set to 50%; mute off"])
             .Should().Be(new VolumeReading(50, -12.5, 50, false, null));
 
     [Fact]
     public void Uac_volume_device_default_and_muted() =>
-        BoardState.ParseUacVolume(["volume 100% (0.00 dB), device default; mute on"])
+        Xiao.ParseVolume(["volume 100% (0.00 dB), device default; mute on"])
             .Should().Be(new VolumeReading(100, 0.0, null, true, null));
 
     [Fact]
     public void Uac_volume_positive_db() =>
-        BoardState.ParseUacVolume(["volume 0% (6.00 dB), set to 0%; mute off"])
+        Xiao.ParseVolume(["volume 0% (6.00 dB), set to 0%; mute off"])
             .Should().Be(new VolumeReading(0, 6.0, 0, false, null));
 
     [Fact]
     public void Uac_volume_percent_unknown_db_known()
     {
         // A UAC 2.0 device without a volume range: the dB only.
-        VolumeReading r = BoardState.ParseUacVolume(["volume ? (-0.50 dB), device default; mute off"]);
+        VolumeReading r = Xiao.ParseVolume(["volume ? (-0.50 dB), device default; mute off"]);
         r.Should().Be(new VolumeReading(null, -0.5, null, false, null));
         r.HasVolume.Should().BeTrue();
     }
 
     [Fact]
     public void Uac_volume_db_unknown_percent_known() =>
-        BoardState.ParseUacVolume(["volume 30% (? dB), set to 30%; mute on"])
+        Xiao.ParseVolume(["volume 30% (? dB), set to 30%; mute on"])
             .Should().Be(new VolumeReading(30, null, 30, true, null));
 
     [Fact]
     public void Uac_volume_no_controls()
     {
-        VolumeReading r = BoardState.ParseUacVolume(["volume ? (? dB), device default; mute no control"]);
+        VolumeReading r = Xiao.ParseVolume(["volume ? (? dB), device default; mute no control"]);
         r.Should().Be(new VolumeReading(null, null, null, null, null));
         r.Reported.Should().BeTrue();
         r.HasVolume.Should().BeFalse();
@@ -119,7 +122,7 @@ public class BoardStateTests
     [InlineData("uac: command not found")]
     public void Uac_volume_refused(string line)
     {
-        VolumeReading r = BoardState.ParseUacVolume([line]);
+        VolumeReading r = Xiao.ParseVolume([line]);
         r.Should().Be(VolumeReading.Refused(line));
         r.Reported.Should().BeFalse();
         r.HasVolume.Should().BeFalse();
@@ -128,7 +131,7 @@ public class BoardStateTests
 
     [Fact]
     public void Uac_volume_without_output() =>
-        BoardState.ParseUacVolume([]).Reported.Should().BeFalse();
+        Xiao.ParseVolume([]).Reported.Should().BeFalse();
 
     // uac hum (print_hum in shell/port/uac_shell.c)
 
@@ -137,7 +140,7 @@ public class BoardStateTests
     [InlineData("hum filter: 50 Hz mains (notches at 50, 100, .. 400 Hz)", "50")]
     [InlineData("hum filter: 60 Hz mains (notches at 60, 120, .. 420 Hz)", "60")]
     public void Uac_hum(string line, string setting) =>
-        BoardState.ParseUacHum([line]).Should().Be(setting);
+        Xiao.ParseHum([line]).Should().Be(setting);
 
     [Theory]
     [InlineData("Not 50, 60 or off: 55")]
@@ -145,11 +148,11 @@ public class BoardStateTests
     [InlineData("Failed (-5); \"dmesg\" shows why")]
     [InlineData("hum filter: 70 Hz mains (notches at 70, 140, .. 420 Hz)")]
     public void Uac_hum_unknown(string line) =>
-        BoardState.ParseUacHum([line]).Should().BeNull();
+        Xiao.ParseHum([line]).Should().BeNull();
 
     [Fact]
     public void Uac_hum_without_output() =>
-        BoardState.ParseUacHum([]).Should().BeNull();
+        Xiao.ParseHum([]).Should().BeNull();
 
     // uac hpf
 
@@ -160,11 +163,11 @@ public class BoardStateTests
     [InlineData("uac - USB audio input (UAC 1.0 or 2.0 microphone)", HighPassState.Unknown)]
     [InlineData("high-pass filter: 20 Hz", HighPassState.Unknown)]
     public void Uac_hpf(string line, HighPassState state) =>
-        BoardState.ParseUacHpf([line]).Should().Be(state);
+        Xiao.ParseHighPass([line]).Should().Be(state);
 
     [Fact]
     public void Uac_hpf_without_output() =>
-        BoardState.ParseUacHpf([]).Should().Be(HighPassState.Unknown);
+        Xiao.ParseHighPass([]).Should().Be(HighPassState.Unknown);
 
     public static TheoryData<string, string> Successes => new()
     {
@@ -210,9 +213,9 @@ public class BoardStateTests
     private static BoardCommand Command(string line) =>
         new[]
         {
-            BoardCommand.UsbHostStart, BoardCommand.UsbHostStop, BoardCommand.UacStart, BoardCommand.UacStop,
-            BoardCommand.UacVolume(40), BoardCommand.UacMute(true), BoardCommand.UacMute(false),
-            BoardCommand.UacHum("60"), BoardCommand.UacHum("off"), BoardCommand.UacHpf(true), BoardCommand.UacHpf(false),
+            Xiao.UsbHost(true), Xiao.UsbHost(false), Xiao.Microphone(true), Xiao.Microphone(false),
+            Xiao.Volume(40), Xiao.Mute(true), Xiao.Mute(false),
+            Xiao.Hum("60"), Xiao.Hum("off"), Xiao.HighPass(true), Xiao.HighPass(false),
         }.Single(c => c.Line == line);
 
     [Theory]
@@ -228,22 +231,23 @@ public class BoardStateTests
     [Fact]
     public void Commands_take_only_what_the_board_takes()
     {
-        FluentActions.Invoking(() => BoardCommand.UacVolume(101)).Should().Throw<ArgumentOutOfRangeException>();
-        FluentActions.Invoking(() => BoardCommand.UacVolume(-1)).Should().Throw<ArgumentOutOfRangeException>();
-        FluentActions.Invoking(() => BoardCommand.UacHum("55")).Should().Throw<ArgumentException>();
-        BoardCommand.UacVolume(0).Line.Should().Be("uac volume 0");
-        BoardCommand.UacHum("50").Line.Should().Be("uac hum 50");
+        FluentActions.Invoking(() => Xiao.Volume(101)).Should().Throw<ArgumentOutOfRangeException>();
+        FluentActions.Invoking(() => Xiao.Volume(-1)).Should().Throw<ArgumentOutOfRangeException>();
+        FluentActions.Invoking(() => Xiao.Hum("55")).Should().Throw<ArgumentException>();
+        Xiao.Volume(0).Line.Should().Be("uac volume 0");
+        Xiao.Hum("50").Line.Should().Be("uac hum 50");
     }
 
     [Fact]
     public void Command_without_output_failed() =>
-        BoardCommand.UacStop.Failure([]).Should().NotBeNull();
+        Xiao.Microphone(false).Failure([]).Should().NotBeNull();
 
     [Fact]
     public void A_capture_is_finished_when_the_prompt_ends_it()
     {
-        BoardShell.Finished("host: stopped\nxiao:~$ ").Should().BeTrue();
-        BoardShell.Finished("peak  -20.1 dBFS  RMS  -23.0 dBFS\n").Should().BeFalse();
+        ShellPrompt prompt = TargetProfile.Resolve("xiao-esp32s3").Prompt;
+        prompt.Finished("host: stopped\nxiao:~$ ").Should().BeTrue();
+        prompt.Finished("peak  -20.1 dBFS  RMS  -23.0 dBFS\n").Should().BeFalse();
     }
 
     [Fact]
@@ -278,14 +282,15 @@ public class BoardStateTests
         });
         try
         {
-            using BoardShell shell = await BoardShell.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port);
+            using BoardShell shell = await BoardShell.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port,
+                                                                   TargetProfile.Resolve("xiao-esp32s3").Prompt);
             StringBuilder shown = new();
             shell.Output += text => { lock (shown) { shown.Append(text); } };
             await shell.SettleAsync();
             Task<string> command = shell.ExecuteAsync("uac stop", TimeSpan.FromSeconds(5));
-            Task<string> query = shell.QueryAsync("usb status", TimeSpan.FromSeconds(5));
-            BoardShell.OutputLines(await command, "uac stop").Should().Equal("Stopped");
-            BoardShell.OutputLines(await query, "usb status").Should().Equal("host: stopped");
+            Task<IReadOnlyList<string>> query = shell.QueryAsync("usb status", TimeSpan.FromSeconds(5));
+            shell.Prompt.OutputLines(await command, "uac stop").Should().Equal("Stopped");
+            (await query).Should().Equal("host: stopped");
             await Task.Delay(200);
             lock (shown)
             {

@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: MIT
+//
+// The Linux side of an Arduino UNO Q (Debian), reached with the system's ssh
+// program and key authentication. The audio stream is the standard output
+// of tools/unoq/audio_stream.py (installed with tools/unoq/deploy.sh), which
+// captures the USB audio adapter with arecord; flock takes the lock that the
+// target's other users of the adapter (the detector service, recordings)
+// take too, and exits with 75 while one of them holds it. Connecting the
+// stream starts the capture, disconnecting stops it. The adapter's mixer
+// controls are not described yet: no volume, mute, hum or high-pass.
+{
+  "name": "unoq",
+  "title": "Arduino UNO Q",
+  "address": { "default": "arduino@unoq.local", "hint": "user@host", "find": false },
+  "shell": {
+    "transport": "ssh",
+    "prompt": "[$#]",
+    "tip": "Connect or disconnect an ssh login shell on the target"
+  },
+  "stream": {
+    "transport": "ssh",
+    "command": "flock -n -F -E 75 /home/arduino python3 -B ~/audiostudio-unoq/audio_stream.py"
+  },
+  "controls": {}
+}

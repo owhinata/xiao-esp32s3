@@ -29,51 +29,63 @@
   </Window.Styles>
 
   <DockPanel>
-    <!-- The board: address, the audio stream, the shell and its commands, recording, files -->
+    <!-- The target and its board: address, the audio stream, the shell and its commands, recording, files.
+         The controls the target's profile does not have are hidden. -->
     <WrapPanel DockPanel.Dock="Top" Margin="10,8,10,4" Orientation="Horizontal">
       <Border Classes="group">
         <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Classes="label" Text="Target" />
+          <ComboBox ItemsSource="{Binding Targets}" SelectedItem="{Binding Target}" MinWidth="120" MaxWidth="220"
+                    IsEnabled="{Binding CanChangeTarget}" ToolTip.ShowOnDisabled="True"
+                    ToolTip.Tip="The target profile (targets/ beside the application); disconnect the stream and the shell to change it" />
+        </StackPanel>
+      </Border>
+      <Border Classes="group">
+        <StackPanel Orientation="Horizontal" Spacing="6">
           <TextBlock Classes="label" Text="Board" />
-          <TextBox Width="130" Watermark="address" Text="{Binding BoardAddress}"
-                   IsEnabled="{Binding !IsStreamConnected}" />
-          <Button Content="Find" Command="{Binding FindBoardCommand}" IsEnabled="{Binding !IsStreamConnected}" />
+          <TextBox Width="150" Watermark="{Binding AddressHint}" Text="{Binding BoardAddress}"
+                   IsEnabled="{Binding CanEditAddress}" />
+          <Button Content="Find" Command="{Binding FindBoardCommand}" IsEnabled="{Binding !IsStreamConnected}"
+                  IsVisible="{Binding HasFind}" />
           <controls:StateButton Content="Stream" IsChecked="{Binding IsStreamConnected, Mode=OneWay}"
-                        Command="{Binding ToggleStreamCommand}"
-                        ToolTip.Tip="Connect or disconnect the audio stream (TCP port 3233)" />
+                        Command="{Binding ToggleStreamCommand}" ToolTip.Tip="{Binding StreamTip}" />
           <TextBlock Classes="label" Text="{Binding StreamState}" MinWidth="80" />
         </StackPanel>
       </Border>
       <Border Classes="group">
         <StackPanel Orientation="Horizontal" Spacing="6">
           <controls:StateButton Content="Shell" IsChecked="{Binding IsShellConnected, Mode=OneWay}"
-                        Command="{Binding ToggleShellCommand}"
-                        ToolTip.Tip="Connect or disconnect the Telnet shell (the board has one Telnet session)" />
+                        Command="{Binding ToggleShellCommand}" ToolTip.Tip="{Binding ShellTip}" />
           <controls:StateButton Content="USB host" IsChecked="{Binding IsUsbHostOn, Mode=OneWay}"
                         Command="{Binding ToggleUsbHostCommand}" IsEnabled="{Binding IsShellConnected}"
-                        ToolTip.ShowOnDisabled="True"
-                        ToolTip.Tip="Start or stop the board's USB host on USB-C (usb host start, usb host stop); needs the shell" />
+                        IsVisible="{Binding HasUsbHost}" ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding UsbHostTip}" />
           <controls:StateButton Content="Microphone" IsChecked="{Binding IsMicrophoneOn, Mode=OneWay}"
                         Command="{Binding ToggleMicrophoneCommand}" IsEnabled="{Binding CanToggleMicrophone}"
-                        ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding MicrophoneTip}" />
+                        IsVisible="{Binding HasMicrophone}" ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding MicrophoneTip}" />
         </StackPanel>
       </Border>
-      <Border Classes="group">
+      <Border Classes="group" IsVisible="{Binding HasBoardSettings}">
         <!-- The board's settings as it reports them; empty or off while not known -->
         <StackPanel Orientation="Horizontal" Spacing="6">
-          <TextBlock Classes="label" Text="Volume" />
-          <NumericUpDown Width="110" Minimum="0" Maximum="100" Increment="5" FormatString="0"
-                         Value="{Binding Volume}" Watermark="?" IsEnabled="{Binding CanSetVolume}"
-                         ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding VolumeTip}" />
+          <TextBlock Classes="label" Text="Volume" IsVisible="{Binding HasVolume}" />
+          <NumericUpDown Width="110" Minimum="{Binding VolumeMinimum}" Maximum="{Binding VolumeMaximum}" Increment="5"
+                         FormatString="0" Value="{Binding Volume}" Watermark="?" IsEnabled="{Binding CanSetVolume}"
+                         IsVisible="{Binding HasVolume}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding VolumeTip}" />
           <Button Content="Set" Command="{Binding SetVolumeCommand}" IsEnabled="{Binding CanSetVolume}"
-                  ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding VolumeTip}" />
+                  IsVisible="{Binding HasVolume}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding VolumeTip}" />
           <controls:StateButton Content="Mute" IsChecked="{Binding IsMuted, Mode=OneWay}" Command="{Binding ToggleMuteCommand}"
-                        IsEnabled="{Binding CanToggleMute}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding MuteTip}" />
-          <TextBlock Classes="label" Text="Hum" />
+                        IsEnabled="{Binding CanToggleMute}" IsVisible="{Binding HasMute}" ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding MuteTip}" />
+          <TextBlock Classes="label" Text="Hum" IsVisible="{Binding HasHum}" />
           <ComboBox ItemsSource="{Binding HumOptions}" SelectedItem="{Binding Hum}" Width="80" PlaceholderText="?"
-                    IsEnabled="{Binding IsShellConnected}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding HumTip}" />
+                    IsEnabled="{Binding IsShellConnected}" IsVisible="{Binding HasHum}" ToolTip.ShowOnDisabled="True"
+                    ToolTip.Tip="{Binding HumTip}" />
           <controls:StateButton Content="HPF" IsChecked="{Binding IsHighPassOn, Mode=OneWay}"
                         Command="{Binding ToggleHighPassCommand}" IsEnabled="{Binding CanToggleHighPass}"
-                        ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding HighPassTip}" />
+                        IsVisible="{Binding HasHighPass}" ToolTip.ShowOnDisabled="True"
+                        ToolTip.Tip="{Binding HighPassTip}" />
         </StackPanel>
       </Border>
       <Border Classes="group">
@@ -235,7 +247,7 @@
             </ScrollViewer>
           </Grid>
         </TabItem>
-        <TabItem Header="Firmware">
+        <TabItem Header="Firmware" IsVisible="{Binding HasOta}">
           <DockPanel Margin="0,4,0,0">
             <StackPanel DockPanel.Dock="Top" Spacing="6">
               <DockPanel>

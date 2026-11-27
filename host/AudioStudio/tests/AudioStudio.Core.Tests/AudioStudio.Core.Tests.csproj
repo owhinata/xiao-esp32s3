@@ -19,5 +19,7 @@
     <!-- The M4 detector's model files, and the values its Python code gives (tools/make_m4_fixtures.py) -->
     <None Include="..\..\models\*" Link="models\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The target profiles the application comes with -->
+    <None Include="..\..\targets\*.json" Link="targets\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

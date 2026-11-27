@@ -25,19 +25,18 @@ public sealed record AudioStreamStatus(
     long Samples, long LostSamples, long Gaps, long NewStreams, double SamplesPerSecond);
 
 /// <summary>
-/// Receives the board's audio stream (TCP port 3233) and keeps it up: a
+/// Receives the target's audio stream from an <see cref="IAudioStreamSource"/>
+/// (the XIAO's TCP port 3233, or a command over ssh) and keeps it up: a
 /// connection that ends, breaks the protocol or stays silent for
-/// <see cref="SilenceTimeout"/> (the board sends at least one block a
+/// <see cref="SilenceTimeout"/> (the target sends at least one block a
 /// second) is closed and made again after <see cref="RetryDelay"/>, until
-/// the client is disposed. The board serves one client at a time and closes
-/// a second one at once.
+/// the client is disposed.
 /// </summary>
 public sealed class AudioStreamClient : IDisposable
 {
     public const int DefaultPort = 3233;
     public static readonly TimeSpan SilenceTimeout = TimeSpan.FromSeconds(5);
     public static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(3);
     private const long RateWindowMs = 5000;
 
     private readonly CancellationTokenSource _stop = new();
@@ -50,8 +49,7 @@ public sealed class AudioStreamClient : IDisposable
     private int _connections;
     private long _blocks, _samples, _lost, _gaps, _newStreams;
 
-    public string Host { get; }
-    public int Port { get; }
+    public IAudioStreamSource Source { get; }
 
     /// <summary>A connection got its header; raised on the receiving thread.</summary>
     public event Action<AudioStreamHeader>? Connected;
@@ -60,10 +58,14 @@ public sealed class AudioStreamClient : IDisposable
     /// <summary>A connection ended, with the reason; raised on the receiving thread.</summary>
     public event Action<string>? Disconnected;
 
-    public AudioStreamClient(string host, int port = DefaultPort)
+    public AudioStreamClient(IAudioStreamSource source)
     {
-        Host = host;
-        Port = port;
+        Source = source;
+    }
+
+    /// <summary>The XIAO's audio stream service.</summary>
+    public AudioStreamClient(string host, int port = DefaultPort) : this(new TcpAudioSource(host, port))
+    {
     }
 
     public void Start()
@@ -133,24 +135,21 @@ public sealed class AudioStreamClient : IDisposable
     private async Task<string> ConnectOnceAsync(CancellationToken ct)
     {
         SetState(AudioStreamState.Connecting);
-        using TcpClient client = new() { NoDelay = true };
-        using (CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        AudioStreamConnection connection;
+        try
         {
-            timeout.CancelAfter(ConnectTimeout);
-            try
-            {
-                await client.ConnectAsync(Host, Port, timeout.Token).ConfigureAwait(false);
-            }
-            catch (SocketException e)
-            {
-                return $"cannot connect: {e.Message}";
-            }
-            catch (OperationCanceledException)
-            {
-                return ct.IsCancellationRequested ? "stopped" : "cannot connect: timed out";
-            }
+            connection = await Source.OpenAsync(ct).ConfigureAwait(false);
         }
-        NetworkStream stream = client.GetStream();
+        catch (AudioStreamOpenException e)
+        {
+            return e.Message;
+        }
+        catch (OperationCanceledException)
+        {
+            return "stopped";
+        }
+        using AudioStreamConnection owned = connection;
+        System.IO.Stream stream = connection.Data;
         AudioStreamParser parser = new();
         byte[] buffer = new byte[16384];
         bool announced = false;
@@ -189,8 +188,7 @@ public sealed class AudioStreamClient : IDisposable
                 }
                 if (n == 0)
                 {
-                    return announced ? "closed by the board"
-                                     : "closed before the header (is another client connected?)";
+                    return await connection.EndReasonAsync(announced).ConfigureAwait(false);
                 }
                 parser.Feed(buffer.AsSpan(0, n), block =>
                 {

@@ -37,7 +37,7 @@ diff /path/to/rp2040-connect/host/ImuStudio/src/ImuStudio.Core/Board/BoardShell.
 | File | Original (`host/ImuStudio/`) | Change |
 |---|---|---|
 | `AudioStudio.slnx`, the three `.csproj` files | `ImuStudio.slnx`, `src/*/ImuStudio.*.csproj`, `tests/ImuStudio.Core.Tests/*.csproj` | The names; no rendering project (no Silk.NET), no `AllowUnsafeBlocks`; the test project copies `tools/make_test_model.py`, the M4 model files (`models/`) and the fixtures (`Fixtures/`) to its output. The package versions are the same. |
-| `src/AudioStudio.Core/Board/BoardShell.cs` | `src/ImuStudio.Core/Board/BoardShell.cs` | The namespace; `QueryAsync` runs a line whose echo, output and prompt are not raised as `Output` (the application's queries of the board's state), `Finished` tells whether a capture ended with the prompt, and spaces that end the last prompt after a line was sent are passed on instead of being taken as the line's echo. |
+| `src/AudioStudio.Core/Board/BoardShell.cs` | `src/ImuStudio.Core/Board/BoardShell.cs` | The namespace; the session is a Telnet connection or an interactive ssh session (`OpenSshAsync`, through `Ssh/SshConnection.cs`), read and written as streams; the prompt is the target profile's (`ShellPrompt`, which also has `OutputLines` and `Finished`, the check whether a capture ended with the prompt); `QueryAsync` runs a line whose echo, output and prompt are not raised as `Output` (the application's queries of the board's state; over ssh a channel of its own) and returns its lines, `CommandAsync` runs a button's command; spaces that end the last prompt after a line was sent are passed on instead of being taken as the line's echo. |
 | `src/AudioStudio.Core/Board/BoardLocator.cs` | `src/ImuStudio.Core/Board/BoardLocator.cs` | The namespace, and the comment on the gateway address, which named rp2040-connect's `script/wifi_ap.sh`. |
 | `src/AudioStudio.Core/Settings/AppSettings.cs` | `src/ImuStudio.App/Services/AppSettings.cs` | Moved to the core project (no UI dependency), the file under `~/.config/AudioStudio/`; the settings are this application's (view, recording, model, firmware repository) instead of MQTT, filter and position model; `Load` and `Save` take a path; `ResolveFirmwareImage()` is new; recordings go to `recordings/` beside the sources. |
 | `src/AudioStudio.Core/Dsp/Spectrogram.cs` | `src/ImuStudio.Core/Processing/SpectrumAnalyzer.cs`, `src/ImuStudio.App/Controls/SpectrogramControl.cs` | The window and level conventions of `SpectrumAnalyzer` (Hann window after removing the mean, a sine of amplitude A reads 20·log10(A)) and the mapping of bins to rows of `SpectrogramControl` (`Map`, `Frequency`, `HeightOf`, linear or logarithmic) in a new class: columns at fixed sample positions of a sample source, kept in a cache, in dBFS; the logarithmic axis starts at 10 Hz instead of 2 Hz. `Level` is new. |
@@ -45,8 +45,8 @@ diff /path/to/rp2040-connect/host/ImuStudio/src/ImuStudio.Core/Board/BoardShell.
 | `src/AudioStudio.App/Controls/SpectrogramControl.cs` | `src/ImuStudio.App/Controls/SpectrogramControl.cs` | The palette, the frequency ticks, the latest-spectrum curve and the title and peak text are kept. The ring of columns is replaced by the columns of a `Spectrogram` for the stretch in view, so that a file can be scrolled and the live view and a file are drawn the same way; the margins are public for the other controls to line up with. |
 | `src/AudioStudio.App/ViewModels/MainViewModel.cs` | `src/ImuStudio.App/ViewModels/MainViewModel.cs` | Kept: the shell part (Find, connect and disconnect, the shell pane's text and history, running a line) and the handling of the settings. Everything about the audio stream, the views, recording, files, the model and the firmware update is new; MQTT, calibration, attitude, position and replay are gone. |
 | `src/AudioStudio.App/Views/MainWindow.axaml`, `MainWindow.axaml.cs` | `src/ImuStudio.App/Views/MainWindow.axaml`, `MainWindow.axaml.cs` | Kept: the styles, the bar of groups at the top, the status lines and **Shell pane** at the bottom, the shell pane with its splitter, its height and its history keys. The tabs and their content (audio views with their settings and the model, the firmware update) are new, as are the file pickers and the wheel. |
-| `tests/AudioStudio.Core.Tests/BoardShellTests.cs` | `tests/ImuStudio.Core.Tests/BoardShellTests.cs` | The prompt is `xiao:~$ ` and the commands and their output are this board's (`uac hum`, `uac stop`); the test of the NuttX build's shell is left out. |
-| `tests/AudioStudio.Core.Tests/BoardTests.cs` | `tests/ImuStudio.Core.Tests/BoardTests.cs` | The output-lines example is this board's `uac volume`. |
+| `tests/AudioStudio.Core.Tests/BoardShellTests.cs` | `tests/ImuStudio.Core.Tests/BoardShellTests.cs` | The prompt is `xiao:~$ ` (the XIAO's profile) and the commands and their output are this board's (`uac hum`, `uac stop`); the test of the NuttX build's shell is left out. |
+| `tests/AudioStudio.Core.Tests/BoardTests.cs` | `tests/ImuStudio.Core.Tests/BoardTests.cs` | The output-lines example is this board's `uac volume`, with the XIAO profile's prompt. |
 | `tests/AudioStudio.Core.Tests/FftTests.cs` | `tests/ImuStudio.Core.Tests/SpectrumTests.cs` | Only its two FFT tests. |
 
 ## The M4 swallow detector (zaitaku-mealpace)
@@ -70,13 +70,31 @@ repository's Python code: `parse_config`, `_check_arrays`, `model_prob` and
 `tests/AudioStudio.Core.Tests/Fixtures/` are the values that Python code
 gives for synthetic signals, written by `tools/make_m4_fixtures.py`.
 
+## The UNO Q tool (zaitaku-mealpace)
+
+`tools/unoq/audio_stream.py` is written for AudioStudio. From the same
+zaitaku-mealpace commit `c5628c9`:
+
+| What | From |
+|---|---|
+| The arecord arguments (`-f S16_LE -r 48000 -c 2 -t raw -B 2000000 -F 125000 -v -`), the PCM names taken (`PCM_RE`), the default device `hw:CARD=Audio,DEV=0`, the counting of arecord's overrun lines, the stop of arecord (SIGTERM, then SIGKILL after 2 s), and the passing of the inherited lock descriptors of `flock -F` to arecord (`lock_fds`) | `device/unoq/audio_in.py` (`ARECORD_ARGS`, `PCM_RE`, `DEFAULT_DEVICE`, `LiveInput`, `lock_fds`) |
+| The decimation coefficients (61 taps: `np.sinc(m / 3) / 3 * np.kaiser(61, 5.0)`, normalised to a sum of 1, the same as scipy's `resample_poly(x, 1, 3)`) and the alignment of the block-wise decimation (output k centred on input 3k, zeros before the start) | `analysis/features_np.py` (`decimate3_taps`, `decimate3`, `Decimate3`) |
+
+The tool computes the taps with the same expression and sums them in the
+same order as `Decimate3`, so its samples before rounding are bit for bit
+those of `decimate3`; `tools/unoq/make_unoq_fixtures.py` checks that against
+`features_np` and writes the fixtures the tests compare with.
+
 ## Written for AudioStudio
 
-Everything else: the audio stream (`src/AudioStudio.Core/Stream/`), the
+Everything else: the target profiles (`targets/`, `src/AudioStudio.Core/Targets/`,
+`Board/BoardState.cs` and `Board/ShellPrompt.cs`), the ssh connection
+(`Ssh/`), the audio stream and its sources (`src/AudioStudio.Core/Stream/`), the
 sample sources and WAV files (`Audio/`), the model contract and runner, the
 `.npy` / `.npz` reader and the M4 detector's runner (`Model/`), the OTA
 client (`Ota/`, the sequence of `script/ota.py`), the waveform, class strip
 and probability trace controls and `StateButton`, the tests of these,
 `tools/make_test_model.py`, `tools/make_m4_fixtures.py`,
 `tools/make_icon.py` (standard library only; ImuStudio's draws its cube with
-Pillow) and the icon it draws, and `README.md`.
+Pillow) and the icon it draws, `tools/unoq/` (see above for what comes from
+zaitaku-mealpace), and `README.md`.

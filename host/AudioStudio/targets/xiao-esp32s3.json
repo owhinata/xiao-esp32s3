@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: MIT
+//
+// The XIAO ESP32S3 with this repository's firmware: the Telnet shell
+// (shell/port/), the audio stream service on TCP 3233
+// (shell/port/audio_service.c), the OTA service on TCP 3232. The replies are
+// those of shell/port/usb_shell.c and uac_shell.c. Patterns are .NET regular
+// expressions, matched against a line of the reply with its spaces trimmed.
+{
+  "name": "xiao-esp32s3",
+  "title": "XIAO ESP32S3",
+  "address": { "default": "", "hint": "address", "find": true },
+  "shell": {
+    "transport": "telnet",
+    "port": 23,
+    "prompt": "xiao:~\\$",
+    "tip": "Connect or disconnect the Telnet shell (the board has one Telnet session)",
+    "refreshAfter": ["usb", "uac"]
+  },
+  "stream": { "transport": "tcp", "port": 3233 },
+  "controls": {
+    "usbHost": {
+      "query": {
+        "command": "usb status",
+        "lines": "first",
+        "replies": [
+          { "value": "stopped", "match": "^host: stopped$" },
+          { "value": "running", "match": "^host: running$" },
+          { "value": "notAnswering", "match": "^host: not answering" }
+        ]
+      },
+      "on": { "command": "usb host start", "success": "^USB host started" },
+      "off": { "command": "usb host stop", "success": "^USB host stopped" },
+      "tip": "Start or stop the board's USB host on USB-C (usb host start, usb host stop)"
+    },
+    "microphone": {
+      "query": {
+        "command": "uac stats",
+        "lines": "first",
+        "replies": [
+          { "value": "running", "match": "^stream: running," },
+          { "value": "stopped", "match": "^stream: stopped," },
+          { "value": "stopped", "match": "^No stream since the USB host started" }
+        ]
+      },
+      "on": { "command": "uac start", "success": "^Streaming:" },
+      "off": { "command": "uac stop", "success": "^Stopped" },
+      "tip": "Start or stop the board's microphone stream (uac start, uac stop)",
+      "requiresUsbHost": true
+    },
+    "volume": {
+      // "volume 50% (-12.50 dB), set to 50%; mute off", any field unknown as
+      // "?", "? dB", "device default", "mute no control".
+      "query": "uac volume",
+      "match": "^volume (?:(?<percent>\\d{1,3})%|\\?) \\((?:(?<db>-?\\d+\\.\\d{2}) dB|\\? dB)\\), (?:set to (?<set>\\d{1,3})%|device default); mute (?<mute>on|off|no control)$",
+      "set": { "command": "uac volume {value}", "success": "^volume " },
+      "minimum": 0,
+      "maximum": 100,
+      "whileMicrophone": true,
+      "tip": "The microphone's volume, percent of its range (uac volume <0..100>)"
+    },
+    "mute": {
+      "on": { "command": "uac mute on", "success": "^Mute on" },
+      "off": { "command": "uac mute off", "success": "^Mute off" },
+      "tip": "The microphone's mute, lit when muted (uac mute on|off)"
+    },
+    "hum": {
+      "query": {
+        "command": "uac hum",
+        "replies": [
+          { "value": "off", "match": "^hum filter: off$" },
+          { "value": "50", "match": "^hum filter: 50 Hz mains" },
+          { "value": "60", "match": "^hum filter: 60 Hz mains" }
+        ]
+      },
+      "options": ["50", "60", "off"],
+      "set": { "command": "uac hum {value}", "success": "^hum filter:" },
+      "tip": "The hum filter's mains frequency (uac hum 50|60|off)",
+      "note": "50 after the board starts"
+    },
+    "highPass": {
+      "query": {
+        "command": "uac hpf",
+        "replies": [
+          { "value": "on", "match": "^high-pass filter: 30 Hz$" },
+          { "value": "off", "match": "^high-pass filter: off$" }
+        ]
+      },
+      "on": { "command": "uac hpf on", "success": "^high-pass filter:" },
+      "off": { "command": "uac hpf off", "success": "^high-pass filter:" },
+      "tip": "The 30 Hz high-pass filter (DC removal), lit when on (uac hpf on|off)",
+      "note": "on after the board starts",
+      "unknownTip": "The board's firmware does not have the command uac hpf (or its answer was not understood)"
+    }
+  },
+  "ota": { "port": 3232 }
+}

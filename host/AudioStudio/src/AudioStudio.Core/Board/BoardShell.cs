@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: MIT
 using System.Net.Sockets;
 using System.Text;
+using AudioStudio.Core.Ssh;
 
 namespace AudioStudio.Core.Board;
 
 /// <summary>
-/// One Telnet connection to the board's shell, kept for as long as the
-/// application talks to the board. The board accepts a single Telnet client
+/// One shell session on the target, kept for as long as the application
+/// talks to it: a Telnet connection (the XIAO accepts a single Telnet client
 /// and stops accepting when connections are opened and closed in quick
-/// succession, so nothing here reconnects per command.
+/// succession, so nothing here reconnects per command), or an interactive
+/// ssh session on a terminal, whose quiet queries and button commands run as
+/// channels of their own on the same ssh connection.
 /// </summary>
 public sealed class BoardShell : IDisposable
 {
-    private readonly TcpClient _client;
-    private readonly NetworkStream _stream;
+    private readonly System.IO.Stream _from;
+    private readonly System.IO.Stream _to;
+    private readonly string _newline;
+    private readonly Action _close;
+    private readonly Func<string> _endReason;
+    private readonly SshConnection? _ssh;
     private readonly TerminalFilter _filter = new();
     private readonly SemaphoreSlim _turn = new(1, 1);
     private readonly CancellationTokenSource _closing = new();
@@ -42,15 +49,23 @@ public sealed class BoardShell : IDisposable
     public event Action<string?>? Closed;
 
     public string Address { get; }
+    public ShellPrompt Prompt { get; }
 
-    private BoardShell(string address, TcpClient client)
+    private BoardShell(string address, ShellPrompt prompt, System.IO.Stream from, System.IO.Stream to, string newline,
+                       Action close, Func<string> endReason, SshConnection? ssh)
     {
         Address = address;
-        _client = client;
-        _stream = client.GetStream();
+        Prompt = prompt;
+        _from = from;
+        _to = to;
+        _newline = newline;
+        _close = close;
+        _endReason = endReason;
+        _ssh = ssh;
     }
 
-    public static async Task<BoardShell> ConnectAsync(string address, int port = BoardLocator.TelnetPort,
+    /// <summary>Connects to a Telnet shell.</summary>
+    public static async Task<BoardShell> ConnectAsync(string address, int port, ShellPrompt prompt,
                                                       CancellationToken ct = default)
     {
         TcpClient client = new() { NoDelay = true };
@@ -67,7 +82,55 @@ public sealed class BoardShell : IDisposable
             throw new BoardException($"Cannot connect to {address}:{port}: " +
                                      (e is SocketException ? e.Message : "timed out"));
         }
-        BoardShell shell = new(address, client);
+        NetworkStream stream = client.GetStream();
+        BoardShell shell = new(address, prompt, stream, stream, "\r\n", client.Dispose, () => "closed by the board", null);
+        _ = Task.Run(shell.ReadLoopAsync, CancellationToken.None);
+        return shell;
+    }
+
+    /// <summary>
+    /// Opens an interactive login shell over <paramref name="ssh"/> (which it
+    /// holds a lease of until it is closed).
+    /// </summary>
+    public static async Task<BoardShell> OpenSshAsync(SshConnection ssh, ShellPrompt prompt, CancellationToken ct = default)
+    {
+        IDisposable lease;
+        try
+        {
+            lease = await ssh.AcquireAsync(ct).ConfigureAwait(false);
+        }
+        catch (SshException e)
+        {
+            throw new BoardException(e.Message);
+        }
+        SshProcess process;
+        try
+        {
+            process = ssh.Start(null);
+        }
+        catch (SshException e)
+        {
+            lease.Dispose();
+            throw new BoardException(e.Message);
+        }
+        void Close()
+        {
+            process.Dispose();
+            lease.Dispose();
+        }
+        string EndReason()
+        {
+            try
+            {
+                process.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            return process.ExitCode == 0 ? "the session ended" : ssh.Explain(process.ExitCode, process.ErrorTail());
+        }
+        // A terminal takes a line ending with the Enter key's character.
+        BoardShell shell = new(ssh.Destination, prompt, process.Output, process.Input, "\n", Close, EndReason, ssh);
         _ = Task.Run(shell.ReadLoopAsync, CancellationToken.None);
         return shell;
     }
@@ -89,24 +152,62 @@ public sealed class BoardShell : IDisposable
     }
 
     /// <summary>
-    /// Sends a line and returns what the board printed until its prompt came
-    /// back, or until <paramref name="wait"/> passed. Calls are served one at
-    /// a time.
+    /// Sends a line to the session and returns what the board printed until
+    /// its prompt came back, or until <paramref name="wait"/> passed. Calls
+    /// are served one at a time.
     /// </summary>
     public Task<string> ExecuteAsync(string line, TimeSpan wait, CancellationToken ct = default) =>
         RunAsync(line, wait, quiet: false, ct);
 
     /// <summary>
-    /// As <see cref="ExecuteAsync"/>, but what the board prints for the line
-    /// (its echo, its output and the prompt that ends it) is not raised as
-    /// <see cref="Output"/>: for the application's own queries of the
-    /// board's state. Waits behind a command that is running.
+    /// Runs a line for the application's own reading of the board's state
+    /// and returns the lines it printed (<see cref="ShellPrompt.OutputLines"/>);
+    /// nothing of it is raised as <see cref="Output"/>. Over Telnet it is sent
+    /// in the session (and waits behind a command that is running), over ssh
+    /// it runs as a channel of its own.
     /// </summary>
-    public Task<string> QueryAsync(string line, TimeSpan wait, CancellationToken ct = default) =>
-        RunAsync(line, wait, quiet: true, ct);
+    public async Task<IReadOnlyList<string>> QueryAsync(string line, TimeSpan wait, CancellationToken ct = default) =>
+        _ssh is null
+            ? Prompt.OutputLines(await RunAsync(line, wait, quiet: true, ct).ConfigureAwait(false), line)
+            : Lines(await ChannelAsync(line, wait, ct).ConfigureAwait(false));
 
-    /// <summary>Whether a capture ends with the prompt: the command finished within the wait.</summary>
-    public static bool Finished(string captured) => IsPrompt(captured);
+    /// <summary>
+    /// Runs a button's command and returns the lines it printed. Over Telnet
+    /// it is sent in the session, as <see cref="ExecuteAsync"/>; over ssh it
+    /// runs as a channel of its own, and what it printed is raised as
+    /// <see cref="Output"/>.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> CommandAsync(string line, TimeSpan wait, CancellationToken ct = default)
+    {
+        if (_ssh is null)
+        {
+            return Prompt.OutputLines(await RunAsync(line, wait, quiet: false, ct).ConfigureAwait(false), line);
+        }
+        string output = await ChannelAsync(line, wait, ct).ConfigureAwait(false);
+        Output?.Invoke("\n" + output.Replace("\r", "", StringComparison.Ordinal));
+        return Lines(output);
+    }
+
+    private async Task<string> ChannelAsync(string line, TimeSpan wait, CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(_closed != 0, this);
+        try
+        {
+            SshResult result = await _ssh!.RunAsync(line, wait, ct).ConfigureAwait(false);
+            if (result.ExitCode == 255)
+            {
+                throw new BoardException(_ssh.Explain(result.ExitCode, result.Errors));
+            }
+            return result.Output;
+        }
+        catch (SshException e)
+        {
+            throw new BoardException(e.Message);
+        }
+    }
+
+    private static List<string> Lines(string output) =>
+        output.Split('\n').Select(l => l.TrimEnd()).Where(l => l.Length > 0).ToList();
 
     private async Task<string> RunAsync(string line, TimeSpan wait, bool quiet, CancellationToken ct)
     {
@@ -121,7 +222,8 @@ public sealed class BoardShell : IDisposable
             }
             try
             {
-                await _stream.WriteAsync(Encoding.UTF8.GetBytes(line + "\r\n"), ct).ConfigureAwait(false);
+                await _to.WriteAsync(Encoding.UTF8.GetBytes(line + _newline), ct).ConfigureAwait(false);
+                await _to.FlushAsync(ct).ConfigureAwait(false);
                 Task finished = await Task.WhenAny(capture.Done.Task, Task.Delay(wait, ct)).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested();
                 if (finished == capture.Done.Task)
@@ -151,27 +253,6 @@ public sealed class BoardShell : IDisposable
         }
     }
 
-    /// <summary>
-    /// The lines a command printed: its output without the echo of the
-    /// command and without the prompt.
-    /// </summary>
-    public static List<string> OutputLines(string captured, string line)
-    {
-        List<string> lines = new();
-        foreach (string raw in captured.Split('\n'))
-        {
-            string text = raw.TrimEnd();
-            if (text.Length == 0 || text.Contains(line, StringComparison.Ordinal) || IsPrompt(text))
-            {
-                continue;
-            }
-            lines.Add(text);
-        }
-        return lines;
-    }
-
-    private static bool IsPrompt(string text) => text.TrimEnd().EndsWith('$');
-
     private async Task ReadLoopAsync()
     {
         byte[] buffer = new byte[4096];
@@ -180,10 +261,10 @@ public sealed class BoardShell : IDisposable
         {
             while (true)
             {
-                int n = await _stream.ReadAsync(buffer, _closing.Token).ConfigureAwait(false);
+                int n = await _from.ReadAsync(buffer, _closing.Token).ConfigureAwait(false);
                 if (n == 0)
                 {
-                    reason = "closed by the board";
+                    reason = _closing.IsCancellationRequested ? null : _endReason();
                     break;
                 }
                 Interlocked.Exchange(ref _lastReceive, Environment.TickCount64);
@@ -211,7 +292,7 @@ public sealed class BoardShell : IDisposable
                         string all = capture.Text.ToString();
                         // Done when the prompt follows some output: a stale
                         // prompt alone must not end the wait.
-                        if (IsPrompt(all) && OutputLines(all, capture.Line).Count > 0)
+                        if (Prompt.IsPrompt(all) && Prompt.OutputLines(all, capture.Line).Count > 0)
                         {
                             capture.Done.TrySetResult(all);
                             _quietTail = capture.Quiet && !all.EndsWith(' ');
@@ -265,7 +346,7 @@ public sealed class BoardShell : IDisposable
     {
         bool first = Interlocked.Exchange(ref _closed, 1) == 0;
         _closing.Cancel();
-        _client.Dispose();
+        _close();
         if (first)
         {
             Closed?.Invoke(null);

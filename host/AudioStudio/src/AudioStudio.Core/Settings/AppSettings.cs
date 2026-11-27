@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using AudioStudio.Core.Targets;
 
 namespace AudioStudio.Core.Settings;
 
@@ -10,7 +12,19 @@ public sealed class AppSettings
     /// <summary>The model loaded when none was chosen before: the M4 swallow detector in <c>host/AudioStudio/models/</c>.</summary>
     public const string DefaultModel = "models/m4-0038.npz";
 
-    public string BoardAddress { get; set; } = "";
+    /// <summary>The target profile: a name in <c>targets/</c> beside the application, or the path of a profile.</summary>
+    public string Target { get; set; } = TargetProfile.DefaultName;
+    /// <summary>The address entered for each target, by the profile's name.</summary>
+    public Dictionary<string, string> Addresses { get; set; } = new();
+    /// <summary>
+    /// The board address of a settings file written before there were
+    /// targets: read once as the XIAO's address, and not written again.
+    /// </summary>
+    [JsonPropertyName("BoardAddress")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FormerBoardAddress { get; set; }
+    /// <summary>The ssh program; empty for <c>ssh</c> on the PATH. The environment variable AUDIOSTUDIO_SSH overrides it.</summary>
+    public string SshPath { get; set; } = "";
     public string RecordingsDirectory { get; set; } = "";
     public string RecordingLabel { get; set; } = "";
     public double ShellPaneHeight { get; set; } = 190;
@@ -36,14 +50,21 @@ public sealed class AppSettings
 
     public static AppSettings Load(string? path = null)
     {
+        AppSettings settings;
         try
         {
-            return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path ?? DefaultFilePath)) ?? new AppSettings();
+            settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path ?? DefaultFilePath)) ?? new AppSettings();
         }
         catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException)
         {
             return new AppSettings();
         }
+        if (!string.IsNullOrWhiteSpace(settings.FormerBoardAddress))
+        {
+            settings.Addresses.TryAdd(TargetProfile.DefaultName, settings.FormerBoardAddress);
+        }
+        settings.FormerBoardAddress = null;
+        return settings;
     }
 
     public void Save(string? path = null)
