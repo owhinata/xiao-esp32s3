@@ -58,16 +58,22 @@
         </StackPanel>
       </Border>
       <Border Classes="group">
-        <StackPanel Orientation="Horizontal" Spacing="6" IsEnabled="{Binding IsShellConnected}">
+        <!-- The board's settings as it reports them; empty or off while not known -->
+        <StackPanel Orientation="Horizontal" Spacing="6">
           <TextBlock Classes="label" Text="Volume" />
           <NumericUpDown Width="110" Minimum="0" Maximum="100" Increment="5" FormatString="0"
-                         Value="{Binding Volume}" />
-          <Button Content="Set" Command="{Binding SetVolumeCommand}" ToolTip.Tip="uac volume &lt;0..100&gt;" />
+                         Value="{Binding Volume}" Watermark="?" IsEnabled="{Binding CanSetVolume}"
+                         ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding VolumeTip}" />
+          <Button Content="Set" Command="{Binding SetVolumeCommand}" IsEnabled="{Binding CanSetVolume}"
+                  ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding VolumeTip}" />
           <controls:StateButton Content="Mute" IsChecked="{Binding IsMuted, Mode=OneWay}" Command="{Binding ToggleMuteCommand}"
-                        ToolTip.Tip="uac mute on|off" />
+                        IsEnabled="{Binding CanToggleMute}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding MuteTip}" />
           <TextBlock Classes="label" Text="Hum" />
-          <ComboBox ItemsSource="{Binding HumOptions}" SelectedItem="{Binding Hum}" Width="80"
-                    PlaceholderText="set" ToolTip.Tip="uac hum 50|60|off: the hum filter's mains frequency" />
+          <ComboBox ItemsSource="{Binding HumOptions}" SelectedItem="{Binding Hum}" Width="80" PlaceholderText="?"
+                    IsEnabled="{Binding IsShellConnected}" ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding HumTip}" />
+          <controls:StateButton Content="HPF" IsChecked="{Binding IsHighPassOn, Mode=OneWay}"
+                        Command="{Binding ToggleHighPassCommand}" IsEnabled="{Binding CanToggleHighPass}"
+                        ToolTip.ShowOnDisabled="True" ToolTip.Tip="{Binding HighPassTip}" />
         </StackPanel>
       </Border>
       <Border Classes="group">

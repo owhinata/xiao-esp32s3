@@ -67,12 +67,118 @@ public class BoardStateTests
     public void Uac_stats_without_output() =>
         BoardState.ParseUacStats([]).Should().Be(MicrophoneState.Unknown);
 
+    // uac volume (cmd_uac_volume in shell/port/uac_shell.c)
+
+    [Fact]
+    public void Uac_volume_all_known() =>
+        BoardState.ParseUacVolume(["volume 50% (-12.50 dB), set to 50%; mute off"])
+            .Should().Be(new VolumeReading(50, -12.5, 50, false, null));
+
+    [Fact]
+    public void Uac_volume_device_default_and_muted() =>
+        BoardState.ParseUacVolume(["volume 100% (0.00 dB), device default; mute on"])
+            .Should().Be(new VolumeReading(100, 0.0, null, true, null));
+
+    [Fact]
+    public void Uac_volume_positive_db() =>
+        BoardState.ParseUacVolume(["volume 0% (6.00 dB), set to 0%; mute off"])
+            .Should().Be(new VolumeReading(0, 6.0, 0, false, null));
+
+    [Fact]
+    public void Uac_volume_percent_unknown_db_known()
+    {
+        // A UAC 2.0 device without a volume range: the dB only.
+        VolumeReading r = BoardState.ParseUacVolume(["volume ? (-0.50 dB), device default; mute off"]);
+        r.Should().Be(new VolumeReading(null, -0.5, null, false, null));
+        r.HasVolume.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Uac_volume_db_unknown_percent_known() =>
+        BoardState.ParseUacVolume(["volume 30% (? dB), set to 30%; mute on"])
+            .Should().Be(new VolumeReading(30, null, 30, true, null));
+
+    [Fact]
+    public void Uac_volume_no_controls()
+    {
+        VolumeReading r = BoardState.ParseUacVolume(["volume ? (? dB), device default; mute no control"]);
+        r.Should().Be(new VolumeReading(null, null, null, null, null));
+        r.Reported.Should().BeTrue();
+        r.HasVolume.Should().BeFalse();
+        r.HasMute.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("Volume and mute are read and set while the stream runs (\"uac start\")")]
+    [InlineData("The microphone has no such control")]
+    [InlineData("The USB host is not running (\"usb host start\")")]
+    [InlineData("No microphone")]
+    [InlineData("The audio task did not answer; it stays as it is until a reboot")]
+    [InlineData("Failed (-5); \"dmesg\" shows why")]
+    [InlineData("Not a volume (0 .. 100): 101")]
+    [InlineData("uac: command not found")]
+    public void Uac_volume_refused(string line)
+    {
+        VolumeReading r = BoardState.ParseUacVolume([line]);
+        r.Should().Be(VolumeReading.Refused(line));
+        r.Reported.Should().BeFalse();
+        r.HasVolume.Should().BeFalse();
+        r.HasMute.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Uac_volume_without_output() =>
+        BoardState.ParseUacVolume([]).Reported.Should().BeFalse();
+
+    // uac hum (print_hum in shell/port/uac_shell.c)
+
+    [Theory]
+    [InlineData("hum filter: off", "off")]
+    [InlineData("hum filter: 50 Hz mains (notches at 50, 100, .. 400 Hz)", "50")]
+    [InlineData("hum filter: 60 Hz mains (notches at 60, 120, .. 420 Hz)", "60")]
+    public void Uac_hum(string line, string setting) =>
+        BoardState.ParseUacHum([line]).Should().Be(setting);
+
+    [Theory]
+    [InlineData("Not 50, 60 or off: 55")]
+    [InlineData("The audio task did not answer; it stays as it is until a reboot")]
+    [InlineData("Failed (-5); \"dmesg\" shows why")]
+    [InlineData("hum filter: 70 Hz mains (notches at 70, 140, .. 420 Hz)")]
+    public void Uac_hum_unknown(string line) =>
+        BoardState.ParseUacHum([line]).Should().BeNull();
+
+    [Fact]
+    public void Uac_hum_without_output() =>
+        BoardState.ParseUacHum([]).Should().BeNull();
+
+    // uac hpf
+
+    [Theory]
+    [InlineData("high-pass filter: 30 Hz", HighPassState.On)]
+    [InlineData("high-pass filter: off", HighPassState.Off)]
+    [InlineData("hpf: command not found", HighPassState.Unknown)]
+    [InlineData("uac - USB audio input (UAC 1.0 or 2.0 microphone)", HighPassState.Unknown)]
+    [InlineData("high-pass filter: 20 Hz", HighPassState.Unknown)]
+    public void Uac_hpf(string line, HighPassState state) =>
+        BoardState.ParseUacHpf([line]).Should().Be(state);
+
+    [Fact]
+    public void Uac_hpf_without_output() =>
+        BoardState.ParseUacHpf([]).Should().Be(HighPassState.Unknown);
+
     public static TheoryData<string, string> Successes => new()
     {
         { "usb host start", "USB host started; the console is on UART0 and Telnet only" },
         { "usb host stop", "USB host stopped; USB-C is the console's again" },
         { "uac start", "Streaming: 48000 Hz, 1 channel, 16 bits; 16000 Hz out" },
         { "uac stop", "Stopped" },
+        { "uac volume 40", "volume 40% (-15.00 dB), set to 40%; mute off" },
+        { "uac mute on", "Mute on" },
+        { "uac mute off", "Mute off" },
+        { "uac hum 60", "hum filter: 60 Hz mains (notches at 60, 120, .. 420 Hz)" },
+        { "uac hum off", "hum filter: off" },
+        { "uac hpf on", "high-pass filter: 30 Hz" },
+        { "uac hpf off", "high-pass filter: off" },
     };
 
     public static TheoryData<string, string> Failures => new()
@@ -92,11 +198,22 @@ public class BoardStateTests
         { "uac stop", "The stream is not running" },
         { "uac stop", "The USB host is not running (\"usb host start\")" },
         { "uac stop", "Failed (-5); \"dmesg\" shows why" },
+        { "uac volume 40", "Volume and mute are read and set while the stream runs (\"uac start\")" },
+        { "uac volume 40", "The microphone has no such control" },
+        { "uac volume 40", "No microphone" },
+        { "uac mute on", "Volume and mute are read and set while the stream runs (\"uac start\")" },
+        { "uac mute off", "The microphone has no such control" },
+        { "uac hum 60", "The audio task did not answer; it stays as it is until a reboot" },
+        { "uac hpf on", "hpf: command not found" },
     };
 
     private static BoardCommand Command(string line) =>
-        new[] { BoardCommand.UsbHostStart, BoardCommand.UsbHostStop, BoardCommand.UacStart, BoardCommand.UacStop }
-            .Single(c => c.Line == line);
+        new[]
+        {
+            BoardCommand.UsbHostStart, BoardCommand.UsbHostStop, BoardCommand.UacStart, BoardCommand.UacStop,
+            BoardCommand.UacVolume(40), BoardCommand.UacMute(true), BoardCommand.UacMute(false),
+            BoardCommand.UacHum("60"), BoardCommand.UacHum("off"), BoardCommand.UacHpf(true), BoardCommand.UacHpf(false),
+        }.Single(c => c.Line == line);
 
     [Theory]
     [MemberData(nameof(Successes))]
@@ -107,6 +224,16 @@ public class BoardStateTests
     [MemberData(nameof(Failures))]
     public void Command_failure_is_the_boards_line(string line, string reply) =>
         Command(line).Failure([reply]).Should().Be(reply);
+
+    [Fact]
+    public void Commands_take_only_what_the_board_takes()
+    {
+        FluentActions.Invoking(() => BoardCommand.UacVolume(101)).Should().Throw<ArgumentOutOfRangeException>();
+        FluentActions.Invoking(() => BoardCommand.UacVolume(-1)).Should().Throw<ArgumentOutOfRangeException>();
+        FluentActions.Invoking(() => BoardCommand.UacHum("55")).Should().Throw<ArgumentException>();
+        BoardCommand.UacVolume(0).Line.Should().Be("uac volume 0");
+        BoardCommand.UacHum("50").Line.Should().Be("uac hum 50");
+    }
 
     [Fact]
     public void Command_without_output_failed() =>

@@ -67,20 +67,32 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _isStreamConnected;
     [ObservableProperty] private string _streamState = "not connected";
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(CanToggleMicrophone), nameof(MicrophoneTip))]
+    [NotifyPropertyChangedFor(nameof(CanToggleMicrophone), nameof(MicrophoneTip), nameof(CanSetVolume),
+                              nameof(VolumeTip), nameof(CanToggleMute), nameof(MuteTip), nameof(HumTip),
+                              nameof(CanToggleHighPass), nameof(HighPassTip))]
     private bool _isShellConnected;
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsUsbHostOn), nameof(CanToggleMicrophone), nameof(MicrophoneTip))]
     private UsbHostState _usbHost;
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsMicrophoneOn), nameof(CanToggleMicrophone), nameof(MicrophoneTip))]
+    [NotifyPropertyChangedFor(nameof(IsMicrophoneOn), nameof(CanToggleMicrophone), nameof(MicrophoneTip),
+                              nameof(CanSetVolume), nameof(VolumeTip), nameof(CanToggleMute), nameof(MuteTip))]
     private MicrophoneState _microphone;
     [ObservableProperty] private string _shellText = "";
     [ObservableProperty] private string _shellInput = "";
     [ObservableProperty] private bool _isShellPaneVisible;
-    [ObservableProperty] private decimal? _volume = 50;
-    [ObservableProperty] private bool _isMuted;
+    /// <summary>The volume field: the board's percent, or what the user has typed and not yet sent.</summary>
+    [ObservableProperty] private decimal? _volume;
+    /// <summary>The board's last answer to <c>uac volume</c>; null when it was not asked (no shell, no stream).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanSetVolume), nameof(VolumeTip), nameof(IsMuted), nameof(CanToggleMute),
+                              nameof(MuteTip))]
+    private VolumeReading? _boardVolume;
+    /// <summary>The board's hum filter (50, 60 or off); null when not known.</summary>
     [ObservableProperty] private string? _hum;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsHighPassOn), nameof(CanToggleHighPass), nameof(HighPassTip))]
+    private HighPassState _highPass;
     [ObservableProperty] private bool _isRecording;
     [ObservableProperty] private string _recordingLabel;
     [ObservableProperty] private string _recordingText = "";
@@ -464,6 +476,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         IsShellConnected = false;
         UsbHost = UsbHostState.Unknown;
         Microphone = MicrophoneFromStream(_stream?.Status().State);
+        ShowVolume(null, replaceEdit: true);
+        ShowHum(null);
+        HighPass = HighPassState.Unknown;
         Message = reason is null ? "Shell disconnected" : $"Shell disconnected: {reason}";
     }
 
@@ -541,8 +556,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private Task ToggleMicrophoneAsync() =>
         RunStateCommandAsync(IsMicrophoneOn ? BoardCommand.UacStop : BoardCommand.UacStart);
 
-    /// <summary>Runs a button's command, shows the board's answer, and asks the board for its state again.</summary>
-    private async Task RunStateCommandAsync(BoardCommand command)
+    /// <summary>
+    /// Runs a button's command, shows the board's answer, and asks the board
+    /// for its state again. <paramref name="replaceVolumeEdit"/>: the volume
+    /// field then shows the board's volume even if it was edited.
+    /// </summary>
+    private async Task RunStateCommandAsync(BoardCommand command, bool replaceVolumeEdit = false)
     {
         if (await RunAsync(command.Line) is not string output)
         {
@@ -550,15 +569,17 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         List<string> lines = BoardShell.OutputLines(output, command.Line);
         Message = $"{command.Line}: " + (command.Failure(lines) ?? string.Join(" ", lines));
-        await RefreshBoardStateAsync();
+        await RefreshBoardStateAsync(replaceVolumeEdit);
     }
 
     /// <summary>
-    /// Asks the board for the USB host's and the microphone's state with
-    /// queries that the shell pane does not show; they wait behind a command
-    /// that is running.
+    /// Asks the board for the USB host's and the microphone's state, the
+    /// microphone's volume and mute (while its stream runs: the board reads
+    /// them only then), the hum filter and the high-pass filter, with queries
+    /// that the shell pane does not show; they wait behind a command that is
+    /// running.
     /// </summary>
-    private async Task RefreshBoardStateAsync()
+    private async Task RefreshBoardStateAsync(bool replaceVolumeEdit = false)
     {
         BoardShell? shell = _shell;
         if (shell is null)
@@ -576,12 +597,25 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 string uac = await shell.QueryAsync(BoardState.UacStatsLine, CommandWait);
                 microphone = BoardState.ParseUacStats(BoardShell.OutputLines(uac, BoardState.UacStatsLine));
             }
+            VolumeReading? volume = null;
+            if (microphone == MicrophoneState.Running)
+            {
+                string reply = await shell.QueryAsync(BoardState.UacVolumeLine, CommandWait);
+                volume = BoardState.ParseUacVolume(BoardShell.OutputLines(reply, BoardState.UacVolumeLine));
+            }
+            string humReply = await shell.QueryAsync(BoardState.UacHumLine, CommandWait);
+            string? hum = BoardState.ParseUacHum(BoardShell.OutputLines(humReply, BoardState.UacHumLine));
+            string hpfReply = await shell.QueryAsync(BoardState.UacHpfLine, CommandWait);
+            HighPassState highPass = BoardState.ParseUacHpf(BoardShell.OutputLines(hpfReply, BoardState.UacHpfLine));
             if (_shell != shell)
             {
                 return;
             }
             UsbHost = host;
             Microphone = microphone;
+            ShowVolume(volume, replaceVolumeEdit);
+            ShowHum(hum);
+            HighPass = highPass;
             if (host == UsbHostState.NotAnswering)
             {
                 Message = "The board's USB host does not answer; it stays so until the board restarts";
@@ -613,13 +647,123 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _seenStreamState = state;
         if (state is AudioStreamState.Streaming or AudioStreamState.Idle)
         {
+            bool started = state == AudioStreamState.Streaming && Microphone != MicrophoneState.Running;
             Microphone = MicrophoneFromStream(state);
+            // A stream started from elsewhere: its volume and mute can be read now.
+            if (started && _shell is not null)
+            {
+                _ = RefreshBoardStateAsync();
+            }
         }
         else if (_shell is null)
         {
             Microphone = MicrophoneState.Unknown;
         }
     }
+
+    // ---- the microphone's volume and mute, the hum and high-pass filters ----
+
+    /// <summary>The volume field's value when the board last set it; the field differs from it while the user edits.</summary>
+    private decimal? _shownVolume;
+    /// <summary>The hum combo box is being set from the board's answer: no command is sent.</summary>
+    private bool _humFromBoard;
+
+    partial void OnMicrophoneChanged(MicrophoneState value)
+    {
+        // The board reads and sets the volume and mute only while the stream runs.
+        if (value != MicrophoneState.Running)
+        {
+            ShowVolume(null, replaceEdit: true);
+        }
+    }
+
+    /// <summary>
+    /// Shows the board's volume and mute. The field is replaced only when it
+    /// still shows the board's last value (the user has not edited it), when
+    /// <paramref name="replaceEdit"/> is set (after Set), or when the volume
+    /// cannot be read: an edit is never overwritten by a refresh.
+    /// </summary>
+    private void ShowVolume(VolumeReading? reading, bool replaceEdit)
+    {
+        BoardVolume = reading;
+        bool edited = Volume != _shownVolume;
+        decimal? board = reading?.Percent;
+        if (!edited || replaceEdit || reading is not { Reported: true })
+        {
+            Volume = board;
+        }
+        _shownVolume = board;
+    }
+
+    private void ShowHum(string? hum)
+    {
+        _humFromBoard = true;
+        try
+        {
+            Hum = hum;
+        }
+        finally
+        {
+            _humFromBoard = false;
+        }
+    }
+
+    public bool CanSetVolume => IsShellConnected && IsMicrophoneOn && BoardVolume is { HasVolume: true };
+    public bool CanToggleMute => IsShellConnected && IsMicrophoneOn && BoardVolume is { HasMute: true };
+    public bool IsMuted => BoardVolume?.Muted == true;
+    public bool IsHighPassOn => HighPass == HighPassState.On;
+    public bool CanToggleHighPass => IsShellConnected && HighPass != HighPassState.Unknown;
+
+    /// <summary>Why the volume or mute cannot be set now; null when it can be.</summary>
+    private string? ControlsBlocked() =>
+        !IsShellConnected ? "needs the shell"
+        : !IsMicrophoneOn ? "the board reads and sets it only while the microphone runs: press Microphone first"
+        : BoardVolume is null ? "not read from the board yet"
+        : BoardVolume.Refusal is string refusal ? "the board says: " + refusal
+        : null;
+
+    public string VolumeTip
+    {
+        get
+        {
+            const string what = "The microphone's volume, percent of its range (uac volume <0..100>)";
+            if (ControlsBlocked() is string blocked)
+            {
+                return $"{what}; {blocked}";
+            }
+            VolumeReading r = BoardVolume!;
+            if (!r.HasVolume)
+            {
+                return what + "; the microphone has no volume control";
+            }
+            string percent = r.Percent is int p ? $"{p}%" : "?%";
+            string db = r.Db is double d ? d.ToString("0.00", CultureInfo.InvariantCulture) + " dB" : "? dB";
+            string set = r.SetPercent is int s ? $"set to {s}% in this session" : "the device's default";
+            return $"{what}. Now {percent} ({db}), {set}. Set sends the field's value";
+        }
+    }
+
+    public string MuteTip
+    {
+        get
+        {
+            const string what = "The microphone's mute, lit when muted (uac mute on|off)";
+            if (ControlsBlocked() is string blocked)
+            {
+                return $"{what}; {blocked}";
+            }
+            return BoardVolume!.HasMute ? what : what + "; the microphone has no mute control";
+        }
+    }
+
+    public string HumTip => IsShellConnected
+        ? "The hum filter's mains frequency (uac hum 50|60|off); 50 after the board starts"
+        : "The hum filter's mains frequency (uac hum 50|60|off); needs the shell";
+
+    public string HighPassTip =>
+        !IsShellConnected ? "The 30 Hz high-pass filter (DC removal), lit when on (uac hpf on|off); needs the shell"
+        : HighPass == HighPassState.Unknown ? "The board's firmware does not have the command uac hpf (or its answer was not understood)"
+        : "The 30 Hz high-pass filter (DC removal), lit when on (uac hpf on|off); on after the board starts";
 
     [RelayCommand]
     private async Task SetVolumeAsync()
@@ -629,26 +773,20 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Message = "The volume is 0 .. 100";
             return;
         }
-        await RunAsync(string.Create(CultureInfo.InvariantCulture, $"uac volume {(int)v}"));
+        await RunStateCommandAsync(BoardCommand.UacVolume((int)v), replaceVolumeEdit: true);
     }
 
     [RelayCommand]
-    private async Task ToggleMuteAsync()
-    {
-        bool mute = !IsMuted;
-        // The board answers "Mute on" or "Mute off" when it took the setting.
-        if (await RunAsync(mute ? "uac mute on" : "uac mute off") is string output &&
-            output.Contains(mute ? "Mute on" : "Mute off", StringComparison.Ordinal))
-        {
-            IsMuted = mute;
-        }
-    }
+    private Task ToggleMuteAsync() => RunStateCommandAsync(BoardCommand.UacMute(!IsMuted));
+
+    [RelayCommand]
+    private Task ToggleHighPassAsync() => RunStateCommandAsync(BoardCommand.UacHpf(!IsHighPassOn));
 
     partial void OnHumChanged(string? value)
     {
-        if (value is not null)
+        if (!_humFromBoard && value is not null)
         {
-            _ = RunAsync("uac hum " + value);
+            _ = RunStateCommandAsync(BoardCommand.UacHum(value));
         }
     }
 

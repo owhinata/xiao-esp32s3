@@ -41,6 +41,8 @@ settings, and the height of the shell pane are saved to
 inside the repository, `~/AudioStudio/recordings/` otherwise) and
 `RepositoryDirectory` (where to find `build/xiao_esp32s3_threadx.bin`; empty:
 the first directory from the application's own upwards that has it).
+The board's own settings (volume, mute, hum and high-pass filters) are not
+saved: the application shows what the board reports.
 
 To have the application in the GNOME application list and dock, run
 `tools/install_desktop.sh` once (it builds the Release configuration and
@@ -86,9 +88,29 @@ All on the board's address (the PC runs the Wi-Fi access point at
    While the audio stream is connected, its samples and keep-alives keep
    **Microphone** up to date too, also without the shell. Without the shell
    both buttons are disabled, and without the shell and the stream they show
-   off (the state is not known). **Volume** with **Set** sends
-   `uac volume <0..100>`, **Mute** `uac mute on|off`, **Hum** `uac hum
-   50|60|off`. Other commands (`uac info`, `uac stats`, `uac level`, ...) are
+   off (the state is not known).
+   **Volume**, **Mute**, **Hum** and **HPF** show the board's settings too,
+   read with the same quiet queries (`uac volume`, `uac hum`, `uac hpf`), and
+   are empty (`?`) or off while they are not known. **Set** sends
+   `uac volume <0..100>` with the field's value, **Mute** (lit when muted)
+   `uac mute on|off`, choosing in **Hum** `uac hum 50|60|off`, and **HPF**
+   (the 30 Hz high-pass filter that removes the DC offset; lit when on)
+   `uac hpf on|off`; after each the application asks the board again and
+   shows what it reports, not what was sent. The board reads and sets the
+   volume and mute only while the microphone stream runs: otherwise the
+   field is empty and **Set** and **Mute** are disabled (the tooltip says
+   why, and gives the board's own reply when it refuses), and they are read
+   when the stream starts, also when the audio stream shows that it started.
+   A volume typed in the field and not yet sent is kept: a refresh replaces
+   the field only while it still shows the board's last value, **Set**
+   replaces it with the board's answer, and it is emptied when the volume
+   can no longer be read. The hum filter and the high-pass filter are read
+   and set whether or not a stream runs (a change applies to the running
+   stream or the next one). After the board starts, the volume and mute are
+   the microphone's own defaults until set (a volume or mute set is kept
+   until the board restarts and set again at every stream start), the hum
+   filter is 50 Hz and the high-pass filter is on. A firmware without
+   `uac hpf` leaves **HPF** disabled. Other commands (`uac info`, `uac stats`, `uac level`, ...) are
    typed in the shell pane at the bottom (Enter to send, Up/Down for history).
    Drag the bar above the shell pane to change its height; **Shell pane** at
    the bottom right hides and shows it.
@@ -306,7 +328,7 @@ firmware.
 | `src/AudioStudio.Core` | The audio stream protocol and client, the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, and its runner), the OTA client, the Telnet shell and board discovery, the settings |
 | `src/AudioStudio.App` | The Avalonia user interface (MVVM): the waveform, spectrogram, class strip and probability trace controls, the view model, the window |
 | `models/` | The M4 swallow detector's weights and mel matrix |
-| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host and microphone, the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams |
+| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host, microphone, volume and mute, hum filter and high-pass filter, the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams |
 | `tools/` | `make_test_model.py`, `make_m4_fixtures.py`, `make_icon.py`, `install_desktop.sh` |
 
 `ORIGIN.md` lists what was copied from ImuStudio (rp2040-connect) and what was
