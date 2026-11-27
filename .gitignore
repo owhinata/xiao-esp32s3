@@ -6,3 +6,6 @@
 /host/**/bin/
 /host/**/obj/
 /host/AudioStudio/recordings/
+/model/data/
+/model/**/__pycache__/
+/model/.venv/

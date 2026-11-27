@@ -43,6 +43,11 @@ notice.
   Copyright (c) The Regents of the University of California and
   contributors; its text is in those files.
 
+- model, and the detector model and mel matrix in host/AudioStudio/models:
+  copied from https://github.com/owhinata/zaitaku-mealpace (see
+  model/ORIGIN.md and host/AudioStudio/ORIGIN.md), under the MIT License,
+  Copyright (c) 2026 k.ouwa.
+
 What the build fetches into lib/ is not part of this repository and carries
 its own licence: Eclipse ThreadX (MIT), Espressif's HAL components and a few
 ESP-IDF components (Apache-2.0, a few files under other licences named in

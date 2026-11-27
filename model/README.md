@@ -1,0 +1,115 @@
+# model/
+
+Training and evaluation tools of the throat-microphone swallowing indication
+detector "M4" (a small CNN on 40 log-mel bands, 0-4000 Hz, of 1.0 s windows
+every 0.25 s; three seeds averaged; hysteresis enter 0.85 / exit 0.65 and a
+0.5 s refractory period), with the recordings it was trained on. The
+detector's output is an *indication* of swallowing for the user's own notes.
+It is not a medical device and makes no judgement or diagnosis.
+
+The files come unchanged from the author's repository zaitaku-mealpace
+(see `ORIGIN.md`). The comments, messages and decision records are in
+Japanese.
+
+## Layout
+
+| Path | Contents |
+|---|---|
+| `analysis/` | the scripts, their tests, the mel matrices, `models/m4-0038.npz` (the M4 model) |
+| `tools/throat_check.py` | reading and checking a throat-microphone session (used by `analysis/features.py`) |
+| `docs/` | evaluation rules (`evaluation.md`), session format (`data-schema.md`), recording protocol, the decision records the code checks or implements (`decisions/`), the markers of the one-time evaluation-side scoring (`log/`) |
+| `data/` | the recordings (not in Git) |
+| `.venv/` | the Python environment (not in Git) |
+
+The scripts take the repository root as the parent of `analysis/` (this
+directory), so run them from `model/`.
+
+## Data
+
+`data/raw/<yyyymmdd>-<HHMMSS>_<subject>_<cond>/` is one session
+(`docs/data-schema.md`). The throat-microphone sessions (`meta.json` `fw`
+= `pc-throat`) hold `throat.wav` (48 kHz, 2 ch, 16 bit; the left channel is
+used, decimated to 16 kHz), `throat_chunks.csv` (sample index and PC time of
+each block), `events.csv` (`t_ms,label,note`: `o start` begins the scored
+range, `s` is a swallow marker; `t`, `c`, `n` other markers) and
+`meta.json`. `cond` is `meal` or one of the condition sessions (`quiet`,
+`water`, `saliva`, `talk`, `cough`, `neck`). Earlier sessions of other
+milestones (IMU, detector firmware) are in the same directory; the M4 tools
+skip them. `data/sample/` is a 10 s example of the format.
+
+M4 training side (`analysis/fixed_eval.py` `M4_EXPECTED_TRAIN`, decision
+0037): the 21 condition sessions of 2026-10-11/12 and the 5 meals of
+2026-10-25 to 10-28. Evaluation side (`M4_EXPECTED_EVAL`): the 4 meals of
+2026-10-30 to 11-01.
+
+## Environment
+
+```
+python3 -m venv model/.venv
+model/.venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.1+cpu
+model/.venv/bin/pip install numpy==2.5.3 scipy==1.18.1 scikit-learn==1.9.1 librosa==1.0.0 matplotlib==3.11.2
+```
+
+Use `-B`, so no `__pycache__` is written beside the scripts (one test
+starts a child interpreter with `-I`, which still writes
+`analysis/__pycache__/`; it is ignored by Git).
+
+## Tests
+
+```
+cd model
+.venv/bin/python -B -m unittest discover -s analysis   # 373 tests, about 2 minutes
+.venv/bin/python -B -m unittest discover -s tools      # 10 tests
+```
+
+The tests use synthetic data in temporary directories, not `data/`.
+
+## Training and evaluation
+
+```
+cd model
+.venv/bin/python -B analysis/m4_compare.py data/raw [--figures docs/log/<dir>]
+.venv/bin/python -B analysis/m4_compare.py data/raw --final-model analysis/models/<name>.npz
+```
+
+- The first command compares 25 candidate rows (classifier C1-C5 x
+  post-processing P0-P4) by cross-validation on the training side only
+  (folds by collection day) and prints a Markdown report. It takes about
+  2.5 hours of CPU (81 CNN trainings).
+- `--final-model` trains the configuration `fixed_eval.M4_CONFIG` (which
+  must equal the `M4-CONFIG:` line of `docs/decisions/0038`) on all training
+  sessions, saves it, reads it back and prints its sha256. It refuses an
+  existing output file. About 16 minutes (41 minutes of CPU, 4.7 GiB of
+  memory); with the same package versions it reproduces
+  `analysis/models/m4-0038.npz` bit for bit.
+- Both refuse to start when a tracked file of the Git repository has an
+  uncommitted change (the repository is the whole xiao-esp32s3 tree), so
+  that the report's commit reproduces it.
+- `--smoke` (the dry run) only works while `M4_EXPECTED_TRAIN` is `None`.
+- `analysis/m4_final_eval.py data/raw` scores evaluation-side sessions
+  recorded by the source's device (`detect.csv`); it stops here because the
+  marker `docs/log/m4-final-49.txt` exists.
+
+The training labels: a window is positive when its centre is in
+`[t, t + 1.0]` after a swallow marker `t`, not used in the 0.5 s around
+that, negative otherwise (decision 0014). Counting: a swallow is found when
+a positive window's centre is in `[t - 0.5, t + 1.5]`; false indications
+per minute are runs of positive windows outside those intervals per minute
+of the rest (`docs/evaluation.md`, decision 0011).
+
+## The evaluation side
+
+The M4 evaluation side has been scored once (2026-11-01, the marker in
+`docs/log/`). Do not use those sessions, or any session dated after
+`M4_TRAIN_CUTOFF` (2026-10-28), for training, threshold or configuration
+choice: `m4_compare.py` does not open them (not even `meta.json`). Choose
+anything new by cross-validation on the training side, and score a new
+held-out set, fixed before it is looked at, only once.
+
+## Privacy
+
+The recordings are the user's own meal and speech audio. Keep them only in
+`model/data/`. Do not print, plot, upload or summarise their audio content
+or samples; the scripts print only aggregate numbers (counts, durations,
+rates). The figures of `--figures` draw meal sessions only as window-level
+summaries. No tool here uses the network.

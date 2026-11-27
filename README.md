@@ -387,6 +387,10 @@ host/AudioStudio/  desktop application (.NET 10 / Avalonia): shows, records and
                 update over Wi-Fi; with another target profile (targets/) the
                 same for an Arduino UNO Q over ssh (its README.md; ORIGIN.md
                 for what comes from rp2040-connect's ImuStudio)
+model/          training and evaluation tools of the swallowing indication
+                detector that AudioStudio runs, from zaitaku-mealpace (its
+                README.md and ORIGIN.md; the recordings in model/data/ are
+                not in Git)
 patches/        this repository's patches of the upstream sources in lib/, applied
                 at configure time (each says what it fixes and why)
 ldscript/       linker script, and the check run after linking that the code
