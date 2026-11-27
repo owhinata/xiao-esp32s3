@@ -41,6 +41,27 @@ public class DspTests
     }
 
     [Fact]
+    public void Mains_hum_and_a_dc_offset_leave_the_lowest_bins_empty()
+    {
+        // 50 Hz is 6.4 bins of 2048 at 16 kHz: its mean over a window is not zero.
+        Spectrogram s = new(16000, 2048, 128, 64, 8000, logFrequency: true);
+        FileSource hum = Sine(50, 0.01, 1.0);
+        for (long end = 2048; end <= 16000; end += 128)
+        {
+            float[] bins = s.Bins(hum, end);
+            bins[0].Should().BeLessThan(-100f);
+            // What the Hann window itself lets through from 5.4 bins away, 45 dB below the tone.
+            bins[1].Should().BeLessThan(-85f);
+            bins[6].Should().BeGreaterThan(-45f);
+        }
+        short[] offset = new short[4096];
+        Array.Fill(offset, (short)3277);
+        float[] dc = s.Bins(new FileSource("dc", 16000, offset), 4096);
+        dc[0].Should().BeLessThan(-100f);
+        dc[1].Should().BeLessThan(-100f);
+    }
+
+    [Fact]
     public void Fft_4096_resolves_mains_hum_next_to_a_low_tone()
     {
         // 50 Hz hum and a tone at 78.125 Hz (bin 20), 3.9 Hz bins: two separate peaks.

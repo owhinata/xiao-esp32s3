@@ -32,7 +32,7 @@ public static class Level
 /// The spectrogram of a sample source, column by column. Column k is the
 /// amplitude spectrum of the <see cref="FftSize"/> samples that end at
 /// position k × <see cref="Hop"/>, with a Hann window after removing their
-/// mean, in dBFS: a sine of amplitude A (full scale 1) reads 20·log10(A) at
+/// mean (weighted by the window), in dBFS: a sine of amplitude A (full scale 1) reads 20·log10(A) at
 /// its frequency. Each column is reduced to <see cref="Rows"/> rows along a
 /// linear or logarithmic frequency axis, and kept, so that a picture that
 /// moves on computes only its new columns.
@@ -181,12 +181,16 @@ public sealed class Spectrogram
     private void Transform(ISampleSource source, long end)
     {
         source.Read(end - FftSize, _samples);
+        // The mean as the window weighs it: taking it away leaves bin 0 empty
+        // without adding anything.  The plain mean of a strong tone that does
+        // not fit the window a whole number of times (mains hum) is not zero,
+        // and taking that away would show as a level in the lowest bins.
         float mean = 0;
-        foreach (float s in _samples)
+        for (int i = 0; i < FftSize; i++)
         {
-            mean += s;
+            mean += _samples[i] * _window[i];
         }
-        mean /= FftSize;
+        mean /= _windowSum;
         for (int i = 0; i < FftSize; i++)
         {
             _re[i] = (_samples[i] - mean) * _window[i];
