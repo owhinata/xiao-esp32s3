@@ -23,6 +23,8 @@ public partial class MainWindow : Window
 {
     /// <summary>Spectrogram columns computed per frame at most, so that a jump in a file does not stall the window.</summary>
     private const int ColumnBudget = 120;
+    /// <summary>How near to a mark's line, in pixels, a click in the views selects the mark.</summary>
+    private const double MarkHitTolerance = 4;
 
     private readonly MainViewModel _viewModel;
     private Spectrogram? _analysis;
@@ -51,8 +53,10 @@ public partial class MainWindow : Window
         _viewModel.ViewChanged += () => _analysis = null;
         // Once the box is shown; a click on a mark button has taken the focus from it.
         _viewModel.MemoOpened += () => Dispatcher.UIThread.Post(() => MemoBox.Focus(), DispatcherPriority.Input);
+        _viewModel.MarkTextWanted += () => Dispatcher.UIThread.Post(() => MarkTextBox.Focus(), DispatcherPriority.Input);
         ShowShellPane(_viewModel.IsShellPaneVisible);
         ViewsGrid.PointerWheelChanged += OnViewsWheel;
+        ViewsGrid.PointerPressed += OnViewsPressed;
         // Tunnel: the mark keys reach the window before a focused button or list takes them.
         AddHandler(KeyDownEvent, OnMarkKeyDown, RoutingStrategies.Tunnel);
         // The model of the command line, else the last one loaded, else the M4 swallow detector in models/.
@@ -110,7 +114,7 @@ public partial class MainWindow : Window
         if (marksKey != _marksKey)
         {
             _marksKey = marksKey;
-            MarksOverlay.Show(_viewModel.MarksInView(), from, to);
+            MarksOverlay.Show(_viewModel.MarksInView(), from, to, _viewModel.SelectedMarkIndex, _viewModel.PickedSample);
         }
 
         if (_viewModel.IsM4Model)
@@ -152,6 +156,37 @@ public partial class MainWindow : Window
         else
         {
             _viewModel.Scroll(-(e.Delta.Y + e.Delta.X) * 0.25);
+        }
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// A click in the views of a file whose marks can be edited: on or near
+    /// a mark's line it selects the mark, elsewhere it picks the position.
+    /// A text box with the focus gives it up first (its text is stored).
+    /// </summary>
+    private void OnViewsPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (!_viewModel.CanEditMarks || !e.GetCurrentPoint(ViewsGrid).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+        if (FocusManager?.GetFocusedElement() is TextBox)
+        {
+            FocusManager.ClearFocus();
+        }
+        double x = e.GetPosition(MarksOverlay).X;
+        if (MarksOverlay.MarkAt(x, MarkHitTolerance) is int index)
+        {
+            _viewModel.SelectMark(index);
+        }
+        else if (MarksOverlay.PositionAt(x) is long position)
+        {
+            _viewModel.PickPosition(position);
+        }
+        else
+        {
+            return;
         }
         e.Handled = true;
     }
@@ -209,9 +244,18 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>1 swallow, 2 false, 3 other (also on the number pad); not while a text box has the focus.</summary>
+    /// <summary>
+    /// Not while a text box has the focus: 1 swallow, 2 false, 3 other (also
+    /// on the number pad) mark the recording in progress, or else a file's
+    /// picked position; Delete deletes a file's selected mark; Escape takes
+    /// the selection and the picked position away.
+    /// </summary>
     private void OnMarkKeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.KeyModifiers != KeyModifiers.None || FocusManager?.GetFocusedElement() is TextBox)
+        {
+            return;
+        }
         MarkKind? kind = e.Key switch
         {
             Key.D1 or Key.NumPad1 => MarkKind.Swallow,
@@ -219,13 +263,48 @@ public partial class MainWindow : Window
             Key.D3 or Key.NumPad3 => MarkKind.Other,
             _ => null,
         };
-        if (kind is null || e.KeyModifiers != KeyModifiers.None || FocusManager?.GetFocusedElement() is TextBox)
+        if (kind is MarkKind k)
         {
-            return;
+            e.Handled = true;
+            if (_viewModel.IsRecording)
+            {
+                _viewModel.AddMark(k);
+            }
+            else
+            {
+                _viewModel.AddMarkAtPick(k);
+            }
         }
-        e.Handled = true;
-        _viewModel.AddMark(kind.Value);
+        else if (e.Key == Key.Delete && _viewModel.CanEditMarks)
+        {
+            e.Handled = _viewModel.DeleteSelectedMark();
+        }
+        else if (e.Key == Key.Escape && _viewModel.CanEditMarks &&
+                 FocusManager?.GetFocusedElement() is not (ComboBox or ComboBoxItem))
+        {
+            _viewModel.ClearMarkSelection();
+        }
     }
+
+    /// <summary>Enter stores the mark's text and gives the focus back to the window; Escape goes back to the stored text.</summary>
+    private void OnMarkTextKeyDown(object? sender, KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.Enter:
+                _viewModel.StoreMarkText();
+                FocusManager?.ClearFocus();
+                e.Handled = true;
+                break;
+            case Key.Escape:
+                _viewModel.RevertMarkText();
+                FocusManager?.ClearFocus();
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void OnMarkTextLostFocus(object? sender, RoutedEventArgs e) => _viewModel.StoreMarkText();
 
     private void OnMemoKeyDown(object? sender, KeyEventArgs e)
     {

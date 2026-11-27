@@ -193,7 +193,7 @@
                   <TextBlock Text="{Binding MarksSummary}" FontFamily="monospace" FontSize="12"
                              ToolTip.Tip="The user's notes about the indications: an indication counts as a hit unless a false mark refers to it (the latest indication at or before the mark); a swallow mark with no indication from 2 s before to 3 s after it is a missed swallow" />
                   <ListBox ItemsSource="{Binding Marks}" SelectedItem="{Binding SelectedMark}" MaxHeight="160"
-                           ToolTip.Tip="Click a mark to show it (a file)">
+                           ToolTip.Tip="Click a mark to show it (a file) and select it for editing">
                     <ListBox.Styles>
                       <Style Selector="ListBoxItem">
                         <Setter Property="Padding" Value="8,2" />
@@ -207,6 +207,41 @@
                       </DataTemplate>
                     </ListBox.ItemTemplate>
                   </ListBox>
+                  <!-- Editing the marks of a file: select a mark (list or views), pick a position (views) -->
+                  <StackPanel Spacing="4" Margin="0,2,0,0" IsVisible="{Binding CanEditMarks}">
+                    <TextBlock Text="{Binding MarkEditorText}" FontFamily="monospace" FontSize="12"
+                               ToolTip.Tip="Click on or near a mark's line in the views to select it, elsewhere to pick a position. Esc: neither" />
+                    <DockPanel>
+                      <ComboBox DockPanel.Dock="Left" Width="96" ItemsSource="{Binding UserMarkKinds}" SelectedItem="{Binding EditKind}"
+                                IsEnabled="{Binding IsUserMarkSelected}" ToolTip.ShowOnDisabled="True"
+                                ToolTip.Tip="The kind of the selected mark; an indication's kind is not changed" />
+                      <TextBox x:Name="MarkTextBox" Margin="6,0,0,0" Text="{Binding EditText}" Watermark="text (Enter stores it)"
+                               IsEnabled="{Binding IsUserMarkSelected}" KeyDown="OnMarkTextKeyDown" LostFocus="OnMarkTextLostFocus"
+                               ToolTip.Tip="The text of the selected mark: Enter or leaving the box stores it, Esc goes back" />
+                    </DockPanel>
+                    <WrapPanel Orientation="Horizontal">
+                      <Button Content="Delete" Margin="0,0,6,4" Command="{Binding DeleteMarkCommand}"
+                              IsEnabled="{Binding IsUserMarkSelected}" ToolTip.ShowOnDisabled="True"
+                              ToolTip.Tip="Delete the selected mark (Delete key). An indication is not deleted" />
+                      <Button Content="Mark wrong" Margin="0,0,6,4" Command="{Binding MarkWrongCommand}"
+                              IsEnabled="{Binding IsIndicationSelected}" ToolTip.ShowOnDisabled="True"
+                              ToolTip.Tip="Your note that the selected indication was wrong: a false mark at its time. When it has one, that one is selected" />
+                      <Button Content="Move here" Margin="0,0,6,4" Command="{Binding MoveMarkCommand}"
+                              IsEnabled="{Binding CanMoveMark}" ToolTip.ShowOnDisabled="True"
+                              ToolTip.Tip="Move the selected mark to the picked position. An indication is not moved" />
+                    </WrapPanel>
+                    <WrapPanel Orientation="Horizontal">
+                      <Button Content="Swallow (1)" Margin="0,0,6,4" Command="{Binding AddSwallowAtPickCommand}"
+                              IsEnabled="{Binding HasPick}" ToolTip.ShowOnDisabled="True"
+                              ToolTip.Tip="Add a swallow mark at the picked position (1)" />
+                      <Button Content="Wrong (2)" Margin="0,0,6,4" Command="{Binding AddFalseAtPickCommand}"
+                              IsEnabled="{Binding HasPick}" ToolTip.ShowOnDisabled="True"
+                              ToolTip.Tip="Add a false mark at the picked position (2): it refers to the latest indication at or before it" />
+                      <Button Content="Other (3)" Margin="0,0,6,4" Command="{Binding AddOtherAtPickCommand}"
+                              IsEnabled="{Binding HasPick}" ToolTip.ShowOnDisabled="True"
+                              ToolTip.Tip="Add an other mark at the picked position (3)" />
+                    </WrapPanel>
+                  </StackPanel>
                 </StackPanel>
 
                 <TextBlock Classes="heading" Text="Model" />

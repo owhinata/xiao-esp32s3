@@ -32,7 +32,8 @@ public sealed partial class ScoreItem : ObservableObject
 public sealed record IndicationItem(double Seconds, string Text);
 
 /// <summary>One mark of the recording in view, for the list of marks.</summary>
-public sealed record MarkItem(double Seconds, string Text);
+/// <param name="Index">The mark's place in the sorted marks.</param>
+public sealed record MarkItem(int Index, double Seconds, string Text);
 
 public sealed partial class MainViewModel : ObservableObject, IDisposable
 {
@@ -60,8 +61,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private MarkLog? _marks;
     private IndicationTracker? _tracker;
     private M4Runner? _trackedRunner;
-    /// <summary>The marks of the file in view.</summary>
+    /// <summary>The marks of the file in view when they cannot be edited (the recording in progress).</summary>
     private List<Mark> _fileMarks = [];
+    /// <summary>The marks of the file in view when they can be edited; null otherwise.</summary>
+    private MarkEditor? _editor;
+    /// <summary>The mark selected for editing (an index into the editor's marks); null when none is.</summary>
+    private int? _selectedIndex;
+    /// <summary>The position picked in the views of the file, for a new mark or a move.</summary>
+    private long? _pickedSample;
+    /// <summary>The list of marks is being filled: its selection changes are not the user's.</summary>
+    private bool _showingMarks;
+    /// <summary>The editor's fields are being filled from the selected mark: their changes are not the user's.</summary>
+    private bool _loadingEditor;
     private FileSource? _file;
     private AudioModel? _model;
     private Classifier? _liveClassifier, _fileClassifier;
@@ -126,6 +137,21 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _marksSummary = "";
     [ObservableProperty] private MarkItem? _selectedMark;
     [ObservableProperty] private bool _hasMarks;
+    /// <summary>The marks of the file in view can be edited.</summary>
+    [ObservableProperty] private bool _canEditMarks;
+    /// <summary>What the editor works on: the selected mark and the picked position.</summary>
+    [ObservableProperty] private string _markEditorText = "";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanMoveMark))]
+    private bool _isUserMarkSelected;
+    [ObservableProperty] private bool _isIndicationSelected;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanMoveMark))]
+    private bool _hasPick;
+    /// <summary>The kind of the selected user's mark (swallow, false, other); null for an indication or none.</summary>
+    [ObservableProperty] private string? _editKind;
+    /// <summary>The text of the selected user's mark as typed; stored with Enter or when the box loses the focus.</summary>
+    [ObservableProperty] private string _editText = "";
     [ObservableProperty] private bool _isFileShown;
     [ObservableProperty] private string _sourceText = "Live";
     [ObservableProperty] private double _position;
@@ -171,6 +197,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>Changes whenever the marks to draw change.</summary>
     public int MarksVersion { get; private set; }
     public List<string> ShellHistory { get; } = new();
+    /// <summary>The kinds a user's mark can be given.</summary>
+    public IReadOnlyList<string> UserMarkKinds { get; } =
+        [.. new[] { MarkKind.Swallow, MarkKind.False, MarkKind.Other }.Select(MarkFile.KindName)];
+    public bool CanMoveMark => IsUserMarkSelected && HasPick;
+    /// <summary>The mark selected for editing, an index into the marks <see cref="MarksInView"/> gives; null when none is.</summary>
+    public int? SelectedMarkIndex => _selectedIndex;
+    /// <summary>The position picked in the views of the file; null when none is.</summary>
+    public long? PickedSample => _pickedSample;
 
     /// <summary>Raised on the UI thread at the frame rate, for the views to draw what <see cref="ViewSource"/> holds.</summary>
     public event Action? Frame;
@@ -178,6 +212,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public event Action? ViewChanged;
     /// <summary>The memo box opened for a new mark (also when it was open for the mark before).</summary>
     public event Action? MemoOpened;
+    /// <summary>A mark of the file was made and its text can be typed.</summary>
+    public event Action? MarkTextWanted;
 
     /// <param name="board">Board address to connect the audio stream to at once.</param>
     /// <param name="shell">Connect the shell at once too.</param>
@@ -1244,7 +1280,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         if (_file is not null)
         {
-            return _fileMarks.Select(m => (m.Sample, m.Kind)).ToList();
+            return FileMarks.Select(m => (m.Sample, m.Kind)).ToList();
         }
         List<(long, MarkKind)> marks = new();
         if (_marks is MarkLog log && _timeline is RecordingTimeline timeline)
@@ -1260,6 +1296,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         return marks;
     }
 
+    /// <summary>The marks of the file in view, sorted.</summary>
+    private IReadOnlyList<Mark> FileMarks => _editor?.Marks ?? _fileMarks;
+
     /// <summary>The list of marks and their counts, for the file in view or the recording on the live view.</summary>
     private void ShowMarks()
     {
@@ -1268,7 +1307,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         IReadOnlyList<Mark> marks;
         if (_file is not null)
         {
-            marks = _fileMarks;
+            marks = FileMarks;
             rate = _file.SampleRate;
         }
         else if (_marks is MarkLog log)
@@ -1281,31 +1320,315 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             marks = [];
             rate = 16000;
         }
-        Marks.Clear();
-        foreach (Mark m in marks)
+        if (_selectedIndex >= marks.Count)
         {
-            double s = m.Seconds(rate);
-            string probability = m.Probability is double p ? " " + p.ToString("0.000", CultureInfo.InvariantCulture) : "";
-            string text = m.Text.Length > 0 ? "  " + m.Text.ReplaceLineEndings(" ") : "";
-            Marks.Add(new MarkItem(s, $"{Seconds(s),9}  {MarkFile.KindName(m.Kind)}{probability}{text}"));
+            _selectedIndex = null;
         }
-        HasMarks = Marks.Count > 0 || (IsRecording && _file is null);
+        MarkReviewResult r = MarkReview.Review(marks, rate);
+        List<MarkItem> items = marks.Select((m, i) => ItemOf(m, i, rate, r)).ToList();
+        _showingMarks = true;
+        try
+        {
+            // In place when only texts change, so that a click in the list is not lost.
+            if (items.Count != Marks.Count)
+            {
+                Marks.Clear();
+                items.ForEach(Marks.Add);
+            }
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (Marks[i] != items[i])
+                {
+                    Marks[i] = items[i];
+                }
+            }
+            if (_file is not null)
+            {
+                SelectedMark = _selectedIndex is int s ? Marks[s] : null;
+            }
+        }
+        finally
+        {
+            _showingMarks = false;
+        }
+        ShowMarkEditor(r);
+        HasMarks = Marks.Count > 0 || (IsRecording && _file is null) || CanEditMarks;
         if (!HasMarks)
         {
             MarksSummary = "";
             return;
         }
-        MarkReviewResult r = MarkReview.Review(marks, rate);
         MarksSummary = string.Create(CultureInfo.InvariantCulture,
             $"indications      {r.Indications.Count}\nmarked wrong     {r.MarkedFalse} (hits {r.Hits})\nmissed swallows  {r.MissedSwallows.Count}");
     }
 
-    /// <summary>Scrolls the file so that the chosen mark is in the middle of the view.</summary>
+    private static MarkItem ItemOf(Mark m, int index, int rate, MarkReviewResult review)
+    {
+        double s = m.Seconds(rate);
+        string probability = m.Probability is double p ? " " + p.ToString("0.000", CultureInfo.InvariantCulture) : "";
+        string wrong = m.Kind == MarkKind.Indication &&
+                       review.Indications.Any(i => ReferenceEquals(i.Indication, m) && !i.IsHit) ? " (marked wrong)" : "";
+        string text = m.Text.Length > 0 ? "  " + m.Text.ReplaceLineEndings(" ") : "";
+        return new MarkItem(index, s, $"{Seconds(s),9}  {MarkFile.KindName(m.Kind)}{probability}{wrong}{text}");
+    }
+
+    /// <summary>The editor's fields for the selected mark and the picked position.</summary>
+    private void ShowMarkEditor(MarkReviewResult review)
+    {
+        Mark? m = _editor is not null && _selectedIndex is int i ? _editor.Marks[i] : null;
+        IsUserMarkSelected = m is { Kind: not MarkKind.Indication };
+        IsIndicationSelected = m is { Kind: MarkKind.Indication };
+        HasPick = _pickedSample is not null;
+        _loadingEditor = true;
+        EditKind = IsUserMarkSelected ? MarkFile.KindName(m!.Kind) : null;
+        EditText = m?.Text ?? "";
+        _loadingEditor = false;
+        if (_editor is null)
+        {
+            MarkEditorText = "";
+            return;
+        }
+        int rate = _editor.SampleRate;
+        string selected = m is null ? "selected: none (click a mark)"
+            : $"selected: {Seconds(m.Seconds(rate))} {MarkFile.KindName(m.Kind)}" +
+              (m.Probability is double p ? " " + p.ToString("0.000", CultureInfo.InvariantCulture) : "") +
+              (review.Indications.Any(x => ReferenceEquals(x.Indication, m) && !x.IsHit) ? " (marked wrong)" : "");
+        string picked = _pickedSample is long s ? $"picked: {Seconds(s / (double)rate)}" : "picked: none (click in the views)";
+        MarkEditorText = selected + "\n" + picked;
+    }
+
+    /// <summary>A click in the list: scrolls the file so that the mark is in the middle of the view, and selects it for editing.</summary>
     partial void OnSelectedMarkChanged(MarkItem? value)
     {
-        if (value is not null && _file is not null)
+        if (_showingMarks || _file is null)
+        {
+            return;
+        }
+        if (value is not null)
         {
             Position = Math.Clamp(value.Seconds - SpanSeconds / 2, 0, PositionMaximum);
+        }
+        if (_editor is not null)
+        {
+            CommitMarkText();
+            _selectedIndex = value?.Index;
+            ShowMarks();
+        }
+    }
+
+    /// <summary>A click in the views on or near the line of a mark of the file.</summary>
+    public void SelectMark(int index)
+    {
+        if (_editor is null || index < 0 || index >= _editor.Marks.Count)
+        {
+            return;
+        }
+        CommitMarkText();
+        _selectedIndex = index;
+        ShowMarks();
+    }
+
+    /// <summary>A click in the views of the file away from the marks: the position for a new mark or a move.</summary>
+    public void PickPosition(long sample)
+    {
+        if (_editor is null || _file is not FileSource file)
+        {
+            return;
+        }
+        CommitMarkText();
+        _pickedSample = Math.Clamp(sample, 0, Math.Max(0, file.End - 1));
+        ShowMarks();
+    }
+
+    /// <summary>Escape in the views: no mark selected and no position picked.</summary>
+    public void ClearMarkSelection()
+    {
+        if (_editor is null)
+        {
+            return;
+        }
+        CommitMarkText();
+        _selectedIndex = null;
+        _pickedSample = null;
+        ShowMarks();
+    }
+
+    partial void OnEditKindChanged(string? value)
+    {
+        if (_loadingEditor || _editor is not MarkEditor editor || _selectedIndex is not int i ||
+            value is null || MarkFile.ParseKind(value) is not MarkKind kind || !IsUserMarkSelected)
+        {
+            return;
+        }
+        Mark m = editor.Marks[i];
+        bool ok = editor.Edit(i, kind, EditText);
+        ShowEdit(ok, $"The mark at {Seconds(m.Seconds(editor.SampleRate))} is now {value}");
+    }
+
+    /// <summary>Enter in the mark's text box, or the box lost the focus: the text becomes the selected mark's.</summary>
+    public void StoreMarkText()
+    {
+        if (CommitMarkText())
+        {
+            ShowMarks();
+        }
+    }
+
+    /// <summary>
+    /// The text typed for the selected user's mark becomes its text, with the
+    /// message; whether there was a change to write. The caller shows the marks.
+    /// </summary>
+    private bool CommitMarkText()
+    {
+        if (_editor is not MarkEditor editor || _selectedIndex is not int i || !IsUserMarkSelected)
+        {
+            return false;
+        }
+        Mark m = editor.Marks[i];
+        if (m.Text == EditText)
+        {
+            return false;
+        }
+        Message = editor.Edit(i, m.Kind, EditText)
+            ? $"The text of the {MarkFile.KindName(m.Kind)} mark at {Seconds(m.Seconds(editor.SampleRate))} is stored"
+            : NotWritten();
+        return true;
+    }
+
+    /// <summary>Escape in the mark's text box: back to the text the mark has.</summary>
+    public void RevertMarkText()
+    {
+        if (_editor is MarkEditor editor && _selectedIndex is int i)
+        {
+            _loadingEditor = true;
+            EditText = editor.Marks[i].Text;
+            _loadingEditor = false;
+        }
+    }
+
+    [RelayCommand]
+    private void AddSwallowAtPick() => AddMarkAtPick(MarkKind.Swallow);
+
+    [RelayCommand]
+    private void AddFalseAtPick() => AddMarkAtPick(MarkKind.False);
+
+    [RelayCommand]
+    private void AddOtherAtPick() => AddMarkAtPick(MarkKind.Other);
+
+    /// <summary>A mark of the user at the picked position of the file; it becomes the selected one. False without a picked position.</summary>
+    public bool AddMarkAtPick(MarkKind kind)
+    {
+        if (_editor is not MarkEditor editor || _pickedSample is not long sample)
+        {
+            return false;
+        }
+        CommitMarkText();
+        int? added = editor.Add(sample, kind);
+        string at = Seconds(sample / (double)editor.SampleRate);
+        if (added is int i)
+        {
+            _selectedIndex = i;
+            _pickedSample = null;
+        }
+        ShowEdit(added is not null, $"Mark {MarkFile.KindName(kind)} added at {at}");
+        if (added is not null && kind is not MarkKind.Swallow)
+        {
+            MarkTextWanted?.Invoke();
+        }
+        return true;
+    }
+
+    /// <summary>Deletes the selected user's mark (an indication is not deleted). False when none is selected.</summary>
+    [RelayCommand]
+    private void DeleteMark() => DeleteSelectedMark();
+
+    public bool DeleteSelectedMark()
+    {
+        if (_editor is not MarkEditor editor || _selectedIndex is not int i || !IsUserMarkSelected)
+        {
+            return false;
+        }
+        Mark m = editor.Marks[i];
+        bool ok = editor.Delete(i);
+        if (ok)
+        {
+            _selectedIndex = null;
+        }
+        ShowEdit(ok, $"The {MarkFile.KindName(m.Kind)} mark at {Seconds(m.Seconds(editor.SampleRate))} is deleted" +
+                     (editor.Marks.Count == 0 ? $"; no marks left, {Path.GetFileName(editor.Path)} removed" : ""));
+        return true;
+    }
+
+    /// <summary>
+    /// The selected indication was wrong: a <c>false</c> mark at its sample,
+    /// selected for its text; when it has one already, that one is selected.
+    /// </summary>
+    [RelayCommand]
+    private void MarkWrong()
+    {
+        if (_editor is not MarkEditor editor || _selectedIndex is not int i || !IsIndicationSelected)
+        {
+            return;
+        }
+        string at = Seconds(editor.Marks[i].Seconds(editor.SampleRate));
+        if (editor.FalseMarkOf(i) is int existing)
+        {
+            _selectedIndex = existing;
+            ShowMarks();
+            EnsureInView(editor.Marks[existing].Sample);
+            Message = $"The indication at {at} is marked wrong already; its false mark is selected";
+            return;
+        }
+        int? added = editor.MarkWrong(i);
+        if (added is int f)
+        {
+            _selectedIndex = f;
+        }
+        ShowEdit(added is not null, $"The indication at {at} is marked wrong");
+        if (added is not null)
+        {
+            MarkTextWanted?.Invoke();
+        }
+    }
+
+    /// <summary>Moves the selected user's mark to the picked position.</summary>
+    [RelayCommand]
+    private void MoveMark()
+    {
+        if (_editor is not MarkEditor editor || _selectedIndex is not int i || !IsUserMarkSelected ||
+            _pickedSample is not long sample)
+        {
+            return;
+        }
+        CommitMarkText();
+        Mark m = editor.Marks[i];
+        int? moved = editor.Move(i, sample);
+        if (moved is int j)
+        {
+            _selectedIndex = j;
+            _pickedSample = null;
+        }
+        ShowEdit(moved is not null, $"The {MarkFile.KindName(m.Kind)} mark is moved from " +
+                                    $"{Seconds(m.Seconds(editor.SampleRate))} to {Seconds(sample / (double)editor.SampleRate)}");
+    }
+
+    /// <summary>The message after an edit of the file's marks, and the list and counts as they are now.</summary>
+    private void ShowEdit(bool written, string done)
+    {
+        Message = written ? done : NotWritten();
+        ShowMarks();
+    }
+
+    private string NotWritten() =>
+        $"The marks could not be written: {_editor?.Error}; nothing changed (the list is as the file on disk)";
+
+    /// <summary>Scrolls the file to a sample that is out of view.</summary>
+    private void EnsureInView(long sample)
+    {
+        (long from, long to) = ViewRange();
+        if (_file is FileSource file && (sample < from || sample > to))
+        {
+            Position = Math.Clamp(sample / (double)file.SampleRate - SpanSeconds / 2, 0, PositionMaximum);
         }
     }
 
@@ -1323,22 +1646,36 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Message = e.Message;
             return;
         }
-        _fileMarks = [];
+        CommitMarkText();
+        List<Mark> marks = [];
+        bool editable = true;
         string marksPath = MarkFile.PathFor(path);
         string marksNote = "";
         if (File.Exists(marksPath))
         {
             try
             {
-                _fileMarks = await Task.Run(() => MarkFile.Read(marksPath));
-                marksNote = string.Create(CultureInfo.InvariantCulture, $", {_fileMarks.Count} marks");
+                marks = await Task.Run(() => MarkFile.Read(marksPath));
+                marksNote = string.Create(CultureInfo.InvariantCulture, $", {marks.Count} marks");
             }
             catch (MarkFileException e)
             {
-                marksNote = $"; marks not shown: {e.Message}";
+                editable = false;
+                marksNote = $"; marks not shown and not editable: {e.Message}";
             }
         }
+        if (editable && IsRecording && _marks is MarkLog log &&
+            string.Equals(Path.GetFullPath(log.Path), Path.GetFullPath(marksPath), StringComparison.Ordinal))
+        {
+            editable = false;
+            marksNote += "; the marks of the recording in progress are not editable";
+        }
         _file = file;
+        _editor = editable ? new MarkEditor(marksPath, file.SampleRate, marks) : null;
+        _fileMarks = editable ? [] : marks;
+        _selectedIndex = null;
+        _pickedSample = null;
+        CanEditMarks = editable;
         IsFileShown = true;
         SourceText = string.Create(CultureInfo.InvariantCulture,
             $"{Path.GetFileName(path)}  ({file.End / (double)file.SampleRate:F1} s, {file.SampleRate} Hz)");
@@ -1353,11 +1690,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void ShowLive()
     {
+        CommitMarkText();
         _fileAnalysis?.Cancel();
         _fileClassifier = null;
         _fileM4 = null;
         _file = null;
         _fileMarks = [];
+        _editor = null;
+        _selectedIndex = null;
+        _pickedSample = null;
+        CanEditMarks = false;
         IsFileShown = false;
         SourceText = "Live";
         PositionMaximum = 0;
