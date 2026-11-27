@@ -224,7 +224,9 @@ python3 -B -m unittest discover -s tools/unoq -p 'test_*.py'
    the bottom right hides and shows it.
 4. **Record** writes the live stream to a WAV file until it is pressed again
    (see "Recordings" below). The text in **label** goes into the file name.
-   Recording goes on whatever the views show.
+   Recording goes on whatever the views show. While recording, **Swallow
+   (1)**, **Wrong (2)** and **Other (3)** leave marks in the recording
+   (see "Marks" below).
 5. **Open WAV…** shows a WAV file instead of the live stream; **Live** goes
    back. The scroll bar under the views, or the mouse wheel over them, moves
    along the file; Ctrl + wheel changes the span.
@@ -416,6 +418,80 @@ that fulfils the contract (energy and slope of the signal; classes
 - The header's sizes are brought up to date every second, so the file of a
   recording that did not end normally reads up to that point.
 
+### Marks
+
+While recording, the user leaves marks: timed notes beside the WAV file.
+
+| Button | Key | Kind | Meaning |
+| --- | --- | --- | --- |
+| **Swallow (1)** | 1 | `swallow` | I swallowed now (no text) |
+| **Wrong (2)** | 2 | `false` | The indication just shown was wrong: the user's note about the indication (optional text) |
+| **Other (3)** | 3 | `other` | Anything else (optional text) |
+
+- The buttons are enabled only while recording. The keys work while the
+  window has the focus and no text box has it (shell input, address,
+  label, memo, volume); with a text box focused they do nothing.
+- A mark's time is the moment of the key press or click: the number of
+  samples written to the WAV file at that moment (the samples arrive in
+  blocks, and the stream's delay to the PC is not taken off).
+- After **Wrong** or **Other** a memo box opens beside the buttons and takes
+  the focus. Enter stores its text; Escape leaves the mark without text. A
+  mark made while the box is open (with a button) keeps the earlier mark
+  with what was typed so far; the end of the recording does the same. The
+  box takes nothing from the recording, which goes on in the background.
+- The detector's indications are kept as well, without a key: kind
+  `indication`, at the time of the indication (the centre of its first
+  positive window, as the list of indications shows it), with the highest
+  probability of its positive windows, so the notes can be read against
+  what was shown. An indication that started before the recording is left
+  out. Only the M4 detector gives indications; with an ONNX model no
+  `indication` rows are written (its classes have no indication).
+- **On disk at once**: each mark is written when it is made, without its
+  text; the text follows when it is stored. Each time, the whole file is
+  written to `<name>.marks.csv.tmp`, flushed to the disk and renamed over
+  `<name>.marks.csv`, so the file is always complete and sorted, also when
+  the application ends abnormally (an indication is written when it starts
+  and again, with its highest probability, when it ends). A recording with
+  neither marks nor indications has no marks file.
+- The file: `<name>.marks.csv` beside `<name>.wav`, UTF-8, the header line
+  and one row per mark sorted by the sample index. Columns: the sample
+  index in the WAV file, the time in seconds (3 decimals; the sample index is
+  what counts when the file is read), the kind, the probability (4
+  decimals; only for `indication`) and the text (CSV quoting when it holds a
+  comma, a quote or a line break):
+
+  ```csv
+  sample,seconds,kind,probability,text
+  16000,1.000,swallow,,
+  52000,3.250,indication,0.9731,
+  60800,3.800,false,,"coughed, did not swallow"
+  ```
+
+- **Open WAV…** reads the file's marks when there is one, and the views
+  show each mark as a dashed vertical line across the waveform, the
+  spectrogram and the model's strip, coloured by kind, with its letter at the
+  top (S `swallow` magenta, F `false` red, O `other` white, I `indication`
+  green). During a recording the live view shows them the same way. The
+  **Marks** section on the right lists them (time, kind, probability,
+  text); clicking one moves the view of a file there.
+- **Counts**: the **Marks** section also counts the marks as the user's
+  notes about the indications (they are notes about the indications, not a
+  medical judgement):
+  - an indication counts as a swallow found by the detector (a hit) unless
+    the user marked it wrong;
+  - a `false` mark refers to the latest indication that starts at or before
+    it and that no earlier `false` mark took; with none it stays a note that
+    refers to no indication;
+  - an indication with a `false` mark is a false indication (**marked
+    wrong**); **hits** are the indications less those marked wrong;
+  - a `swallow` mark is the same swallow as the nearest indication not
+    marked wrong that starts from 2 s before to 3 s after it (each indication
+    is taken by one `swallow` mark at most), and is not counted twice;
+    otherwise it is a **missed swallow**.
+
+  The pairing is derived when the marks are read; the file holds only the
+  rows above.
+
 ### Firmware
 
 The **Firmware** tab (XIAO only) updates the board over Wi-Fi, as
@@ -446,11 +522,11 @@ firmware.
 
 | Path | Role |
 | --- | --- |
-| `src/AudioStudio.Core` | The target profiles (`Targets/`), the audio stream protocol, its sources (TCP, a command over ssh) and client, the ssh connection (`Ssh/`), the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, and its runner), the OTA client, the shell (Telnet or ssh), the reading of the board's state as its profile describes it, board discovery, the settings |
-| `src/AudioStudio.App` | The Avalonia user interface (MVVM): the waveform, spectrogram, class strip and probability trace controls, the view model, the window |
+| `src/AudioStudio.Core` | The target profiles (`Targets/`), the audio stream protocol, its sources (TCP, a command over ssh) and client, the ssh connection (`Ssh/`), the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, and its runner), the OTA client, the shell (Telnet or ssh), the reading of the board's state as its profile describes it, board discovery, the settings, the marks of a recording (`Marks/`: the file, the log written as marks come, the live-to-WAV timeline, the indications of the detector, the counts) |
+| `src/AudioStudio.App` | The Avalonia user interface (MVVM): the waveform, spectrogram, class strip, probability trace and marks controls, the view model, the window |
 | `models/` | The M4 swallow detector's weights and mel matrix |
 | `targets/` | The target profiles: `xiao-esp32s3.json`, `unoq.json` |
-| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host, microphone, volume and mute, hum filter and high-pass filter with the XIAO's profile, the profiles and their checks, the ssh transport with a fake ssh (the stream, exit code 75, a refused key, the shell and its queries, no process left behind), the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams |
+| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host, microphone, volume and mute, hum filter and high-pass filter with the XIAO's profile, the profiles and their checks, the ssh transport with a fake ssh (the stream, exit code 75, a refused key, the shell and its queries, no process left behind), the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams, the marks (file round trip and quoting, sorting, the time and sample index, a mark during memo entry, indications with their highest probability, the counts) |
 | `tools/` | `make_test_model.py`, `make_m4_fixtures.py`, `make_icon.py`, `install_desktop.sh` |
 | `tools/unoq/` | `audio_stream.py` (runs on the UNO Q), `deploy.sh`, `make_unoq_fixtures.py`, `test_audio_stream.py` |
 

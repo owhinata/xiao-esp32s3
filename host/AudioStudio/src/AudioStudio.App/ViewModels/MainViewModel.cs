@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using AudioStudio.Core.Audio;
 using AudioStudio.Core.Board;
 using AudioStudio.Core.Dsp;
+using AudioStudio.Core.Marks;
 using AudioStudio.Core.Model;
 using AudioStudio.Core.Ota;
 using AudioStudio.Core.Settings;
@@ -30,6 +31,9 @@ public sealed partial class ScoreItem : ObservableObject
 /// <summary>One swallow indication of the M4 detector in a file: the centre of its first positive window.</summary>
 public sealed record IndicationItem(double Seconds, string Text);
 
+/// <summary>One mark of the recording in view, for the list of marks.</summary>
+public sealed record MarkItem(double Seconds, string Text);
+
 public sealed partial class MainViewModel : ObservableObject, IDisposable
 {
     private const int ShellLogLimit = 40_000;
@@ -50,6 +54,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private volatile LiveSource _live = new(16000);
     private BoardShell? _shell;
     private WavWriter? _writer;
+    /// <summary>The live positions of the recording's samples; set under <see cref="_recordLock"/> with the writer.</summary>
+    private RecordingTimeline? _timeline;
+    /// <summary>The marks of the recording in progress, or of the last one (shown on the live view).</summary>
+    private MarkLog? _marks;
+    private IndicationTracker? _tracker;
+    private M4Runner? _trackedRunner;
+    /// <summary>The marks of the file in view.</summary>
+    private List<Mark> _fileMarks = [];
     private FileSource? _file;
     private AudioModel? _model;
     private Classifier? _liveClassifier, _fileClassifier;
@@ -106,6 +118,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _isRecording;
     [ObservableProperty] private string _recordingLabel;
     [ObservableProperty] private string _recordingText = "";
+    /// <summary>The memo box of a <c>false</c> or <c>other</c> mark is open.</summary>
+    [ObservableProperty] private bool _isMemoOpen;
+    [ObservableProperty] private string _memoText = "";
+    [ObservableProperty] private string _memoHint = "";
+    /// <summary>The counts of the marks in view: indications, marked wrong, hits, missed swallows.</summary>
+    [ObservableProperty] private string _marksSummary = "";
+    [ObservableProperty] private MarkItem? _selectedMark;
+    [ObservableProperty] private bool _hasMarks;
     [ObservableProperty] private bool _isFileShown;
     [ObservableProperty] private string _sourceText = "Live";
     [ObservableProperty] private double _position;
@@ -146,12 +166,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public ObservableCollection<ScoreItem> Scores { get; } = new();
     /// <summary>The swallow indications of the file in view.</summary>
     public ObservableCollection<IndicationItem> Indications { get; } = new();
+    /// <summary>The marks of the file in view, or of the recording on the live view.</summary>
+    public ObservableCollection<MarkItem> Marks { get; } = new();
+    /// <summary>Changes whenever the marks to draw change.</summary>
+    public int MarksVersion { get; private set; }
     public List<string> ShellHistory { get; } = new();
 
     /// <summary>Raised on the UI thread at the frame rate, for the views to draw what <see cref="ViewSource"/> holds.</summary>
     public event Action? Frame;
     /// <summary>The view settings changed: the pictures are made anew.</summary>
     public event Action? ViewChanged;
+    /// <summary>The memo box opened for a new mark (also when it was open for the mark before).</summary>
+    public event Action? MemoOpened;
 
     /// <param name="board">Board address to connect the audio stream to at once.</param>
     /// <param name="shell">Connect the shell at once too.</param>
@@ -572,6 +598,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             live.MarkNewStream();
         }
         live.Append(block.Samples);
+        long blockStart = live.End - block.Samples.Length;
         lock (_recordLock)
         {
             if (_writer is WavWriter writer && writer.SampleRate == live.SampleRate)
@@ -582,6 +609,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     {
                         writer.WriteGap(fill);
                     }
+                    _timeline?.Anchor(blockStart, writer.Samples);
                     writer.Write(block.Samples);
                 }
                 catch (IOException e)
@@ -1046,11 +1074,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 path = Path.Combine(directory, $"{stem}-{n}.wav");
             }
             WavWriter writer = new(path, _live.SampleRate);
+            RecordingTimeline timeline = new();
+            MarkLog marks = new(MarkFile.PathFor(path), _live.SampleRate);
             lock (_recordLock)
             {
                 _writer = writer;
+                _timeline = timeline;
             }
+            _marks = marks;
+            _tracker = new IndicationTracker(marks, timeline);
+            _trackedRunner = null;
             IsRecording = true;
+            ShowMarks();
             Message = $"Recording to {path}" + (_stream is null ? " (the audio stream is not connected)" : "");
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
@@ -1069,6 +1104,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void StopRecording()
     {
         WavWriter? writer;
+        TrackIndications();
+        _tracker?.Close();
+        _tracker = null;
         lock (_recordLock)
         {
             writer = _writer;
@@ -1080,16 +1118,194 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             return;
         }
+        MarkLog? marks = _marks;
+        marks?.Finish(IsMemoOpen ? MemoText : "");
+        CloseMemo();
+        ShowMarks();
+        string marked = marks is null || marks.Marks.Count == 0 ? ""
+            : marks.Error is string error ? $"; the marks could not be written: {error}"
+            : string.Create(CultureInfo.InvariantCulture, $"; {marks.Marks.Count} marks in {Path.GetFileName(marks.Path)}");
         try
         {
             writer.Dispose();
             Message = string.Create(CultureInfo.InvariantCulture,
                 $"Recorded {writer.Samples / (double)writer.SampleRate:F1} s to {writer.Path}") +
-                (writer.Gaps == 0 ? "" : $" ({writer.Gaps} gaps, {writer.GapSamples} samples filled with zeros)");
+                (writer.Gaps == 0 ? "" : $" ({writer.Gaps} gaps, {writer.GapSamples} samples filled with zeros)") + marked;
         }
         catch (IOException e)
         {
             Message = $"Cannot finish the recording: {e.Message}";
+        }
+    }
+
+    // ---- marks -------------------------------------------------------------
+
+    [RelayCommand]
+    private void MarkSwallow() => AddMark(MarkKind.Swallow);
+
+    [RelayCommand]
+    private void MarkFalse() => AddMark(MarkKind.False);
+
+    [RelayCommand]
+    private void MarkOther() => AddMark(MarkKind.Other);
+
+    /// <summary>
+    /// A mark of the user at the recording's current sample: the moment of
+    /// the key press or click. A memo still open keeps what was typed. For
+    /// <c>false</c> and <c>other</c> the memo box opens for the new mark.
+    /// </summary>
+    public void AddMark(MarkKind kind)
+    {
+        long sample;
+        lock (_recordLock)
+        {
+            if (_writer is null)
+            {
+                return;
+            }
+            sample = _writer.Samples;
+        }
+        if (_marks is not MarkLog log)
+        {
+            return;
+        }
+        log.Add(sample, kind, IsMemoOpen ? MemoText : "");
+        MemoText = "";
+        string at = Seconds(sample / (double)log.SampleRate);
+        if (log.MemoMark is not null)
+        {
+            MemoHint = $"memo for the {MarkFile.KindName(kind)} mark at {at} (Enter stores it, Esc leaves it empty)";
+            IsMemoOpen = true;
+            MemoOpened?.Invoke();
+        }
+        else
+        {
+            IsMemoOpen = false;
+        }
+        Message = log.Error is string error ? $"The marks could not be written: {error}"
+            : $"Mark {MarkFile.KindName(kind)} at {at}";
+        ShowMarks();
+    }
+
+    /// <summary>Enter in the memo box.</summary>
+    public void StoreMemo()
+    {
+        _marks?.StoreMemo(MemoText);
+        CloseMemo();
+        ShowMarks();
+    }
+
+    /// <summary>Escape in the memo box: the mark stays without text.</summary>
+    public void CancelMemo()
+    {
+        _marks?.CancelMemo();
+        CloseMemo();
+        ShowMarks();
+    }
+
+    private void CloseMemo()
+    {
+        IsMemoOpen = false;
+        MemoText = "";
+    }
+
+    /// <summary>
+    /// Feeds the live detector's new windows to the recording's indications.
+    /// Another detector (the model loaded again) ends an open indication; its
+    /// windows are taken from after the last one fed. An ONNX model gives no
+    /// indications.
+    /// </summary>
+    private void TrackIndications()
+    {
+        if (_tracker is not IndicationTracker tracker || _timeline is not { HasAnchor: true } || _marks is not MarkLog log)
+        {
+            return;
+        }
+        M4Runner? runner = _liveM4;
+        if (runner != _trackedRunner)
+        {
+            tracker.Close();
+            _trackedRunner = runner;
+        }
+        if (runner is null)
+        {
+            return;
+        }
+        int version = log.Version;
+        tracker.Feed(runner.History.Range(Math.Max(long.MinValue / 2, tracker.LastFed), long.MaxValue / 2));
+        if (log.Version != version)
+        {
+            ShowMarks();
+        }
+    }
+
+    /// <summary>The marks to draw: their positions in the view's source, and their kinds.</summary>
+    public List<(long Position, MarkKind Kind)> MarksInView()
+    {
+        if (_file is not null)
+        {
+            return _fileMarks.Select(m => (m.Sample, m.Kind)).ToList();
+        }
+        List<(long, MarkKind)> marks = new();
+        if (_marks is MarkLog log && _timeline is RecordingTimeline timeline)
+        {
+            foreach (Mark m in log.Marks)
+            {
+                if (timeline.ToLive(m.Sample) is long live)
+                {
+                    marks.Add((live, m.Kind));
+                }
+            }
+        }
+        return marks;
+    }
+
+    /// <summary>The list of marks and their counts, for the file in view or the recording on the live view.</summary>
+    private void ShowMarks()
+    {
+        MarksVersion++;
+        int rate;
+        IReadOnlyList<Mark> marks;
+        if (_file is not null)
+        {
+            marks = _fileMarks;
+            rate = _file.SampleRate;
+        }
+        else if (_marks is MarkLog log)
+        {
+            marks = MarkFile.Sorted(log.Marks);
+            rate = log.SampleRate;
+        }
+        else
+        {
+            marks = [];
+            rate = 16000;
+        }
+        Marks.Clear();
+        foreach (Mark m in marks)
+        {
+            double s = m.Seconds(rate);
+            string probability = m.Probability is double p ? " " + p.ToString("0.000", CultureInfo.InvariantCulture) : "";
+            string text = m.Text.Length > 0 ? "  " + m.Text.ReplaceLineEndings(" ") : "";
+            Marks.Add(new MarkItem(s, $"{Seconds(s),9}  {MarkFile.KindName(m.Kind)}{probability}{text}"));
+        }
+        HasMarks = Marks.Count > 0 || (IsRecording && _file is null);
+        if (!HasMarks)
+        {
+            MarksSummary = "";
+            return;
+        }
+        MarkReviewResult r = MarkReview.Review(marks, rate);
+        MarksSummary = string.Create(CultureInfo.InvariantCulture,
+            $"indications      {r.Indications.Count}\nmarked wrong     {r.MarkedFalse} (hits {r.Hits})\nmissed swallows  {r.MissedSwallows.Count}");
+    }
+
+    /// <summary>Scrolls the file so that the chosen mark is in the middle of the view.</summary>
+    partial void OnSelectedMarkChanged(MarkItem? value)
+    {
+        if (value is not null && _file is not null)
+        {
+            Position = Math.Clamp(value.Seconds - SpanSeconds / 2, 0, PositionMaximum);
         }
     }
 
@@ -1107,13 +1323,29 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Message = e.Message;
             return;
         }
+        _fileMarks = [];
+        string marksPath = MarkFile.PathFor(path);
+        string marksNote = "";
+        if (File.Exists(marksPath))
+        {
+            try
+            {
+                _fileMarks = await Task.Run(() => MarkFile.Read(marksPath));
+                marksNote = string.Create(CultureInfo.InvariantCulture, $", {_fileMarks.Count} marks");
+            }
+            catch (MarkFileException e)
+            {
+                marksNote = $"; marks not shown: {e.Message}";
+            }
+        }
         _file = file;
         IsFileShown = true;
         SourceText = string.Create(CultureInfo.InvariantCulture,
             $"{Path.GetFileName(path)}  ({file.End / (double)file.SampleRate:F1} s, {file.SampleRate} Hz)");
         Position = 0;
         UpdatePositionRange();
-        Message = $"Showing {path}";
+        Message = $"Showing {path}{marksNote}";
+        ShowMarks();
         AnalyzeFile();
         ViewChanged?.Invoke();
     }
@@ -1125,9 +1357,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _fileClassifier = null;
         _fileM4 = null;
         _file = null;
+        _fileMarks = [];
         IsFileShown = false;
         SourceText = "Live";
         PositionMaximum = 0;
+        ShowMarks();
         ViewChanged?.Invoke();
     }
 
@@ -1570,6 +1804,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             return;
         }
+        TrackIndications();
         ShowModel();
         ShowLevel();
         ShowStatus();

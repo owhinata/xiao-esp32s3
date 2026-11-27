@@ -96,6 +96,18 @@
           <TextBox Width="120" Watermark="label" Text="{Binding RecordingLabel}" IsEnabled="{Binding !IsRecording}"
                    ToolTip.Tip="Goes into the file name: yyyyMMdd-HHmmss_label.wav" />
           <TextBlock Classes="label" Text="{Binding RecordingText}" FontFamily="monospace" FontSize="12" />
+          <!-- Marks: the time is the moment of the press; the shortcuts work while no text box has the focus -->
+          <Button Content="Swallow (1)" Command="{Binding MarkSwallowCommand}" IsEnabled="{Binding IsRecording}"
+                  ToolTip.ShowOnDisabled="True"
+                  ToolTip.Tip="Mark: I swallowed now (1). Enabled while recording; written to the .marks.csv beside the WAV file at once" />
+          <Button Content="Wrong (2)" Command="{Binding MarkFalseCommand}" IsEnabled="{Binding IsRecording}"
+                  ToolTip.ShowOnDisabled="True"
+                  ToolTip.Tip="Mark false: the indication just shown was wrong, your note (2). A memo box opens for an optional text. Enabled while recording" />
+          <Button Content="Other (3)" Command="{Binding MarkOtherCommand}" IsEnabled="{Binding IsRecording}"
+                  ToolTip.ShowOnDisabled="True"
+                  ToolTip.Tip="Mark other: anything else (3). A memo box opens for an optional text. Enabled while recording" />
+          <TextBox x:Name="MemoBox" Width="260" Text="{Binding MemoText}" Watermark="{Binding MemoHint}"
+                   IsVisible="{Binding IsMemoOpen}" KeyDown="OnMemoKeyDown" ToolTip.Tip="{Binding MemoHint}" />
         </StackPanel>
       </Border>
       <StackPanel Orientation="Horizontal" Spacing="6">
@@ -137,6 +149,7 @@
                 <controls:ClassStripControl x:Name="ClassStrip" Grid.Row="4" Height="34" IsVisible="{Binding !IsM4Model}" />
                 <controls:ProbabilityTraceControl x:Name="ProbabilityTrace" Grid.Row="4" Height="110"
                                                   IsVisible="{Binding IsM4Model}" />
+                <controls:MarksControl x:Name="MarksOverlay" Grid.Row="0" Grid.RowSpan="5" />
               </Grid>
             </DockPanel>
             <ScrollViewer Grid.Column="1" Margin="12,0,0,0" VerticalScrollBarVisibility="Auto">
@@ -173,6 +186,28 @@
                   <Slider Minimum="-120" Maximum="20" Value="{Binding MaxDb}" Margin="8,0" />
                 </DockPanel>
                 <TextBlock Text="{Binding LevelText}" FontFamily="monospace" FontSize="12" Margin="0,4,0,0" />
+
+                <!-- The marks of the file in view, or of the recording on the live view -->
+                <StackPanel Spacing="2" IsVisible="{Binding HasMarks}">
+                  <TextBlock Classes="heading" Text="Marks" />
+                  <TextBlock Text="{Binding MarksSummary}" FontFamily="monospace" FontSize="12"
+                             ToolTip.Tip="The user's notes about the indications: an indication counts as a hit unless a false mark refers to it (the latest indication at or before the mark); a swallow mark with no indication from 2 s before to 3 s after it is a missed swallow" />
+                  <ListBox ItemsSource="{Binding Marks}" SelectedItem="{Binding SelectedMark}" MaxHeight="160"
+                           ToolTip.Tip="Click a mark to show it (a file)">
+                    <ListBox.Styles>
+                      <Style Selector="ListBoxItem">
+                        <Setter Property="Padding" Value="8,2" />
+                        <Setter Property="MinHeight" Value="0" />
+                      </Style>
+                    </ListBox.Styles>
+                    <ListBox.ItemTemplate>
+                      <DataTemplate x:DataType="vm:MarkItem">
+                        <TextBlock Text="{Binding Text}" FontFamily="monospace" FontSize="12" ToolTip.Tip="{Binding Text}"
+                                   TextTrimming="CharacterEllipsis" />
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+                </StackPanel>
 
                 <TextBlock Classes="heading" Text="Model" />
                 <StackPanel Orientation="Horizontal" Spacing="6">

@@ -4,12 +4,14 @@ using AudioStudio.App.Controls;
 using AudioStudio.App.ViewModels;
 using AudioStudio.Core.Audio;
 using AudioStudio.Core.Dsp;
+using AudioStudio.Core.Marks;
 using AudioStudio.Core.Model;
 using AudioStudio.Core.Settings;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 
 namespace AudioStudio.App.Views;
 
@@ -28,6 +30,7 @@ public partial class MainWindow : Window
     private (ISampleSource? Source, long From, long To, double Zoom, double Width) _waveKey;
     private (long From, long To, double Min, double Max) _spectrumKey;
     private bool _spectrumComplete;
+    private (long From, long To, int Version, double Width) _marksKey;
     private int _historyIndex = -1;
 
     public MainWindow() : this(new StartOptions(null, false, null, null, null, null, null))
@@ -46,8 +49,12 @@ public partial class MainWindow : Window
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
         _viewModel.Frame += OnFrame;
         _viewModel.ViewChanged += () => _analysis = null;
+        // Once the box is shown; a click on a mark button has taken the focus from it.
+        _viewModel.MemoOpened += () => Dispatcher.UIThread.Post(() => MemoBox.Focus(), DispatcherPriority.Input);
         ShowShellPane(_viewModel.IsShellPaneVisible);
         ViewsGrid.PointerWheelChanged += OnViewsWheel;
+        // Tunnel: the mark keys reach the window before a focused button or list takes them.
+        AddHandler(KeyDownEvent, OnMarkKeyDown, RoutingStrategies.Tunnel);
         // The model of the command line, else the last one loaded, else the M4 swallow detector in models/.
         string? model = options.Model ??
             (string.IsNullOrWhiteSpace(_viewModel.ModelPath) ? AppSettings.ResolveDefaultModel() : _viewModel.ModelPath);
@@ -97,6 +104,13 @@ public partial class MainWindow : Window
         {
             _spectrumKey = spectrumKey;
             _spectrumComplete = Spectrogram.Show(_analysis, source, from, to, ColumnBudget);
+        }
+
+        (long, long, int, double) marksKey = (from, to, _viewModel.MarksVersion, MarksOverlay.Bounds.Width);
+        if (marksKey != _marksKey)
+        {
+            _marksKey = marksKey;
+            MarksOverlay.Show(_viewModel.MarksInView(), from, to);
         }
 
         if (_viewModel.IsM4Model)
@@ -184,6 +198,46 @@ public partial class MainWindow : Window
                 break;
             case nameof(MainViewModel.OtaText):
                 OtaLogBox.CaretIndex = _viewModel.OtaText.Length;
+                break;
+            case nameof(MainViewModel.IsMemoOpen):
+                if (!_viewModel.IsMemoOpen && MemoBox.IsFocused)
+                {
+                    // Back to the window, where the mark keys work.
+                    FocusManager?.ClearFocus();
+                }
+                break;
+        }
+    }
+
+    /// <summary>1 swallow, 2 false, 3 other (also on the number pad); not while a text box has the focus.</summary>
+    private void OnMarkKeyDown(object? sender, KeyEventArgs e)
+    {
+        MarkKind? kind = e.Key switch
+        {
+            Key.D1 or Key.NumPad1 => MarkKind.Swallow,
+            Key.D2 or Key.NumPad2 => MarkKind.False,
+            Key.D3 or Key.NumPad3 => MarkKind.Other,
+            _ => null,
+        };
+        if (kind is null || e.KeyModifiers != KeyModifiers.None || FocusManager?.GetFocusedElement() is TextBox)
+        {
+            return;
+        }
+        e.Handled = true;
+        _viewModel.AddMark(kind.Value);
+    }
+
+    private void OnMemoKeyDown(object? sender, KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.Enter:
+                _viewModel.StoreMemo();
+                e.Handled = true;
+                break;
+            case Key.Escape:
+                _viewModel.CancelMemo();
+                e.Handled = true;
                 break;
         }
     }
