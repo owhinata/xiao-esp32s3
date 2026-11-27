@@ -36,7 +36,7 @@ diff /path/to/rp2040-connect/host/ImuStudio/src/ImuStudio.Core/Board/BoardShell.
 
 | File | Original (`host/ImuStudio/`) | Change |
 |---|---|---|
-| `AudioStudio.slnx`, the three `.csproj` files | `ImuStudio.slnx`, `src/*/ImuStudio.*.csproj`, `tests/ImuStudio.Core.Tests/*.csproj` | The names; no rendering project (no Silk.NET), no `AllowUnsafeBlocks`; the test project copies `tools/make_test_model.py` to its output. The package versions are the same. |
+| `AudioStudio.slnx`, the three `.csproj` files | `ImuStudio.slnx`, `src/*/ImuStudio.*.csproj`, `tests/ImuStudio.Core.Tests/*.csproj` | The names; no rendering project (no Silk.NET), no `AllowUnsafeBlocks`; the test project copies `tools/make_test_model.py`, the M4 model files (`models/`) and the fixtures (`Fixtures/`) to its output. The package versions are the same. |
 | `src/AudioStudio.Core/Board/BoardShell.cs` | `src/ImuStudio.Core/Board/BoardShell.cs` | The namespace; `QueryAsync` runs a line whose echo, output and prompt are not raised as `Output` (the application's queries of the board's state), `Finished` tells whether a capture ended with the prompt, and spaces that end the last prompt after a line was sent are passed on instead of being taken as the line's echo. |
 | `src/AudioStudio.Core/Board/BoardLocator.cs` | `src/ImuStudio.Core/Board/BoardLocator.cs` | The namespace, and the comment on the gateway address, which named rp2040-connect's `script/wifi_ap.sh`. |
 | `src/AudioStudio.Core/Settings/AppSettings.cs` | `src/ImuStudio.App/Services/AppSettings.cs` | Moved to the core project (no UI dependency), the file under `~/.config/AudioStudio/`; the settings are this application's (view, recording, model, firmware repository) instead of MQTT, filter and position model; `Load` and `Save` take a path; `ResolveFirmwareImage()` is new; recordings go to `recordings/` beside the sources. |
@@ -49,11 +49,34 @@ diff /path/to/rp2040-connect/host/ImuStudio/src/ImuStudio.Core/Board/BoardShell.
 | `tests/AudioStudio.Core.Tests/BoardTests.cs` | `tests/ImuStudio.Core.Tests/BoardTests.cs` | The output-lines example is this board's `uac volume`. |
 | `tests/AudioStudio.Core.Tests/FftTests.cs` | `tests/ImuStudio.Core.Tests/SpectrumTests.cs` | Only its two FFT tests. |
 
+## The M4 swallow detector (zaitaku-mealpace)
+
+The swallow detector comes from
+[zaitaku-mealpace](https://github.com/owhinata/zaitaku-mealpace), at commit
+`c5628c9`. Its author is also this repository's; it is under the MIT
+License, as this repository.
+
+| File | Original | What |
+|---|---|---|
+| `models/m4-0038.npz` | `analysis/models/m4-0038.npz` (unchanged, SHA-256 `c786086f069c55c5...`) | The weights of the "M4" detector: three seeds of a small CNN with their normalisation, and its configuration string. Trained on the author's own throat-microphone recordings, as that repository's README and `docs/decisions/0038-m4-detector-config.md` describe. |
+| `models/mel40_htk_0_4000.npy` | `analysis/mel40_htk_0_4000.npy` (unchanged, SHA-256 `3afb1f205d69ab4c...`) | The mel matrix (40 bands, 0 to 4000 Hz, for an FFT of 512 at 16 kHz) that its features use. |
+
+The C# code of the detector (`src/AudioStudio.Core/Model/M4Config.cs`,
+`M4Model.cs`, `M4Steppers.cs`) is written for AudioStudio after that
+repository's Python code: `parse_config`, `_check_arrays`, `model_prob` and
+`Detector` of `analysis/m4_infer.py`, `mfe40` and `cnn_forward` of
+`analysis/features_np.py`, `PostStepper` of `analysis/postprocess.py`, and
+`LedStepper` of `analysis/led_rule.py`. The fixtures in
+`tests/AudioStudio.Core.Tests/Fixtures/` are the values that Python code
+gives for synthetic signals, written by `tools/make_m4_fixtures.py`.
+
 ## Written for AudioStudio
 
 Everything else: the audio stream (`src/AudioStudio.Core/Stream/`), the
-sample sources and WAV files (`Audio/`), the model contract and runner
-(`Model/`), the OTA client (`Ota/`, the sequence of `script/ota.py`), the
-waveform and class strip controls and `StateButton`, the tests of these, `tools/make_test_model.py`,
+sample sources and WAV files (`Audio/`), the model contract and runner, the
+`.npy` / `.npz` reader and the M4 detector's runner (`Model/`), the OTA
+client (`Ota/`, the sequence of `script/ota.py`), the waveform, class strip
+and probability trace controls and `StateButton`, the tests of these,
+`tools/make_test_model.py`, `tools/make_m4_fixtures.py`,
 `tools/make_icon.py` (standard library only; ImuStudio's draws its cube with
 Pillow) and the icon it draws, and `README.md`.

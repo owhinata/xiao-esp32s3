@@ -25,6 +25,9 @@ public sealed partial class ScoreItem : ObservableObject
     [ObservableProperty] private Avalonia.Media.IBrush _brush = Avalonia.Media.Brushes.Gray;
 }
 
+/// <summary>One swallow indication of the M4 detector in a file: the centre of its first positive window.</summary>
+public sealed record IndicationItem(double Seconds, string Text);
+
 public sealed partial class MainViewModel : ObservableObject, IDisposable
 {
     private const int ShellLogLimit = 40_000;
@@ -45,6 +48,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private FileSource? _file;
     private AudioModel? _model;
     private Classifier? _liveClassifier, _fileClassifier;
+    private M4Model? _m4;
+    private M4Runner? _liveM4, _fileM4;
+    private long _listedIndications = -1;
     private CancellationTokenSource? _fileAnalysis;
     private Task _fileAnalysisTask = Task.CompletedTask;
     private CancellationTokenSource? _update;
@@ -97,6 +103,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _topClass = "";
     [ObservableProperty] private decimal? _modelHop;
     [ObservableProperty] private decimal? _modelWindow;
+    /// <summary>The loaded model is the M4 swallow detector (a .npz), not an ONNX model.</summary>
+    [ObservableProperty] private bool _isM4Model;
+    [ObservableProperty] private string _indicatorText = "";
+    [ObservableProperty] private Avalonia.Media.IBrush _indicatorBrush = Avalonia.Media.Brushes.Gray;
+    [ObservableProperty] private string _detectorText = "";
+    [ObservableProperty] private IndicationItem? _selectedIndication;
     [ObservableProperty] private string _imagePath;
     [ObservableProperty] private string _imageText = "";
     [ObservableProperty] private bool _isUpdating;
@@ -109,6 +121,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public IReadOnlyList<string> MaxFrequencies { get; } = ["Nyquist", "4000", "2000", "1000", "500"];
     public IReadOnlyList<string> HumOptions { get; } = ["50", "60", "off"];
     public ObservableCollection<ScoreItem> Scores { get; } = new();
+    /// <summary>The swallow indications of the file in view.</summary>
+    public ObservableCollection<IndicationItem> Indications { get; } = new();
     public List<string> ShellHistory { get; } = new();
 
     /// <summary>Raised on the UI thread at the frame rate, for the views to draw what <see cref="ViewSource"/> holds.</summary>
@@ -169,8 +183,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         return (end - span, end);
     }
 
-    /// <summary>The classifier of what is in view, if a model is loaded.</summary>
+    /// <summary>The classifier of what is in view, if an ONNX model is loaded.</summary>
     public Classifier? ViewClassifier => _file is null ? _liveClassifier : _fileClassifier;
+
+    /// <summary>The M4 detector's runner of what is in view, if the M4 model is loaded.</summary>
+    public M4Runner? ViewM4Runner => _file is null ? _liveM4 : _fileM4;
+
+    /// <summary>The M4 configuration's enter and exit levels (NaN where it has none).</summary>
+    public (double Enter, double Exit) M4Levels =>
+        _m4 is null ? (double.NaN, double.NaN)
+        : (_m4.Config.Enter ?? _m4.Config.Threshold ?? double.NaN, _m4.Config.Exit ?? double.NaN);
 
     /// <summary>Upper end of the frequency axis in Hz.</summary>
     public double MaxHz =>
@@ -735,6 +757,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         _fileAnalysis?.Cancel();
         _fileClassifier = null;
+        _fileM4 = null;
         _file = null;
         IsFileShown = false;
         SourceText = "Live";
@@ -744,19 +767,29 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     // ---- the model -------------------------------------------------------
 
+    /// <summary>Loads an ONNX model (.onnx) or the M4 swallow detector (.npz with the mel matrix beside it).</summary>
     public void LoadModel(string path)
     {
         UnloadModel();
+        bool m4 = Path.GetExtension(path).Equals(".npz", StringComparison.OrdinalIgnoreCase);
         try
         {
-            int window = ModelWindow is decimal w && w >= 1 ? (int)w : 16000;
-            _model = new AudioModel(path, window);
+            if (m4)
+            {
+                _m4 = M4Model.Load(path);
+            }
+            else
+            {
+                int window = ModelWindow is decimal w && w >= 1 ? (int)w : 16000;
+                _model = new AudioModel(path, window);
+            }
         }
         catch (Exception e) when (e is ModelContractException or IOException or UnauthorizedAccessException)
         {
             ModelText = e.Message;
             return;
         }
+        IsM4Model = m4;
         ModelPath = path;
         _settings.ModelPath = path;
         MakeLiveClassifier();
@@ -772,12 +805,20 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _liveClassifier = null;
         _fileClassifier = null;
         _model = null;
+        _liveM4 = null;
+        _fileM4 = null;
+        _m4 = null;
         if (model is not null)
         {
             _ = DisposeWhenIdleAsync(model, idle);
         }
         Scores.Clear();
         TopClass = "";
+        IsM4Model = false;
+        IndicatorText = "";
+        DetectorText = "";
+        Indications.Clear();
+        _listedIndications = -1;
         ModelText = "No model loaded";
     }
 
@@ -786,7 +827,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         _fileAnalysis?.Cancel();
         // Completes however the runs end: cancelled, failed or done.
-        return Task.WhenAll(_fileAnalysisTask, _liveClassifier?.WhenIdle() ?? Task.CompletedTask)
+        return Task.WhenAll(_fileAnalysisTask, _liveClassifier?.WhenIdle() ?? Task.CompletedTask,
+                            _liveM4?.WhenIdle() ?? Task.CompletedTask)
             .ContinueWith(_ => { }, TaskScheduler.Default);
     }
 
@@ -813,6 +855,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void MakeLiveClassifier()
     {
         _liveClassifier = _model is null ? null : new Classifier(_model, Hop(_model));
+        _liveM4 = _m4 is null ? null : new M4Runner(_m4);
     }
 
     /// <summary>Runs the model over the whole of the opened file, in the background.</summary>
@@ -820,6 +863,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         _fileAnalysis?.Cancel();
         _fileClassifier = null;
+        _fileM4 = null;
+        Indications.Clear();
+        _listedIndications = -1;
+        if (_m4 is not null && _file is not null)
+        {
+            AnalyzeFileM4(_m4, _file);
+            return;
+        }
         if (_model is null || _file is null)
         {
             return;
@@ -855,8 +906,141 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>Runs the M4 detector over the whole of the opened file, in the background.</summary>
+    private void AnalyzeFileM4(M4Model model, FileSource file)
+    {
+        M4Runner runner = new(model);
+        CancellationTokenSource cts = new();
+        _fileAnalysis = cts;
+        _fileM4 = runner;
+        Progress<double> progress = new(p =>
+        {
+            if (_fileM4 == runner)
+            {
+                Message = string.Create(CultureInfo.InvariantCulture,
+                    $"Running the swallow detector on {Path.GetFileName(file.Path)}: {p * 100:F0} %");
+            }
+        });
+        _fileAnalysisTask = RunAnalysisM4Async(runner, file, progress, cts.Token);
+    }
+
+    private async Task RunAnalysisM4Async(M4Runner runner, FileSource file, IProgress<double> progress, CancellationToken ct)
+    {
+        try
+        {
+            await runner.AnalyzeAsync(file, progress, ct);
+            if (_fileM4 == runner)
+            {
+                Message = runner.Error is string error ? error
+                    : $"Swallow detector on {Path.GetFileName(file.Path)}: {runner.History.Count} windows, {runner.History.Indications} swallow indications";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    /// <summary>Scrolls the file so that the chosen indication is in the middle of the view.</summary>
+    partial void OnSelectedIndicationChanged(IndicationItem? value)
+    {
+        if (value is not null && _file is not null)
+        {
+            Position = Math.Clamp(value.Seconds - SpanSeconds / 2, 0, PositionMaximum);
+        }
+    }
+
+    private static readonly Avalonia.Media.IBrush s_ledOff = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(0x50, 0x50, 0x58));
+    private static readonly Avalonia.Media.IBrush s_ledYellow = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(0xE0, 0xB0, 0x30));
+    private static readonly Avalonia.Media.IBrush s_ledGreen = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(0x3F, 0xB9, 0x50));
+
+    private static string Seconds(double s) => s < 60
+        ? s.ToString("F2", CultureInfo.InvariantCulture) + " s"
+        : string.Create(CultureInfo.InvariantCulture, $"{(int)(s / 60)}:{s % 60:00.00}");
+
+    /// <summary>The time of an indication: the centre of its first positive window.</summary>
+    private static double IndicationSeconds(M4Window rise) => (rise.Start + M4Model.WindowSamples / 2) / (double)M4Model.SampleRate;
+
+    /// <summary>The M4 detector's state: the LED, the last probability, the indications, the model.</summary>
+    private void ShowDetector(M4Model model)
+    {
+        M4Runner? runner = ViewM4Runner;
+        if (runner is null)
+        {
+            return;
+        }
+        (long from, long to) = ViewRange();
+        List<M4Window> inView = runner.History.Range(from, to);
+        int inViewRises = inView.Count(w => w.Rise);
+        M4Window? last;
+        int led;
+        string lastText;
+        if (_file is null)
+        {
+            last = runner.History.Latest;
+            // As the device: off when no window result came for a second.
+            led = last is null || runner.SinceLastWindow > TimeSpan.FromSeconds(1) ? LedStepper.Off : last.Step.Led;
+            M4Window? rise = runner.History.LastRise;
+            lastText = rise is null ? "none yet"
+                : Seconds(_live.End / (double)M4Model.SampleRate - IndicationSeconds(rise)) + " ago";
+        }
+        else
+        {
+            last = inView.Count > 0 ? inView[^1] : null;
+            led = last?.Step.Led ?? LedStepper.Off;
+            M4Window? rise = inView.LastOrDefault(w => w.Rise);
+            lastText = rise is null ? "none in view" : "at " + Seconds(IndicationSeconds(rise));
+            if (runner.History.Indications != _listedIndications)
+            {
+                _listedIndications = runner.History.Indications;
+                Indications.Clear();
+                foreach (M4Window w in runner.History.Rises(long.MinValue / 2, long.MaxValue / 2))
+                {
+                    Indications.Add(new IndicationItem(IndicationSeconds(w), Seconds(IndicationSeconds(w))));
+                }
+            }
+        }
+        (IndicatorText, IndicatorBrush) = led switch
+        {
+            LedStepper.Green => ("swallow indication", s_ledGreen),
+            LedStepper.Yellow => ("running", s_ledYellow),
+            _ => (_file is null && last is not null ? "off (no window for 1 s)" : "off", s_ledOff),
+        };
+        string probability = last is null ? "-"
+            : last.Step.Valid ? last.Step.Probability.ToString("0.000", CultureInfo.InvariantCulture)
+            : "not valid (lost samples)";
+        DetectorText = string.Create(CultureInfo.InvariantCulture, $"""
+            probability  {probability}
+            indications  {inViewRises} in view, {runner.History.Indications} {(_file is null ? "since the start" : "in the file")}
+            last         {lastText}
+            """);
+
+        M4Config c = model.Config;
+        string post = c.Post == "none"
+            ? string.Create(CultureInfo.InvariantCulture, $"threshold {c.Threshold}")
+            : string.Create(CultureInfo.InvariantCulture,
+                $"enter {c.Enter}, exit {c.Exit}, refractory {(c.RefractorySeconds is double r ? $"{r} s" : "none")}, cap {(c.CapSeconds is double cap ? $"{cap} s" : "none")}");
+        string behind = _file is null && runner.Backlog > 0
+            ? string.Create(CultureInfo.InvariantCulture, $", {runner.Backlog} behind") : "";
+        string lagged = runner.Lagged > 0
+            ? string.Create(CultureInfo.InvariantCulture, $", {runner.Lagged} not valid: the PC fell behind") : "";
+        ModelText = string.Create(CultureInfo.InvariantCulture, $"""
+            {Path.GetFileName(model.Path)} (M4 swallow detector)
+            {c.Text}
+            seeds    {string.Join(", ", c.Seeds)}
+            post     {post}
+            runs     {runner.Runs}{behind}{lagged}
+            time     {runner.Milliseconds:F1} ms per window (mean {runner.MeanMilliseconds:F1})
+            {(runner.Error is null ? "" : "error: " + runner.Error)}
+            """);
+    }
+
     private void ShowModel()
     {
+        if (_m4 is M4Model m4)
+        {
+            ShowDetector(m4);
+            return;
+        }
         AudioModel? model = _model;
         Classifier? classifier = ViewClassifier;
         if (model is null || classifier is null)
@@ -1008,6 +1192,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             _liveClassifier?.Offer(_live);
         }
+        // The detector follows the live stream also while a file is shown: it needs every window.
+        _liveM4?.Offer(_live);
         Frame?.Invoke();
         if (++_frame % 3 != 0)
         {
@@ -1019,6 +1205,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         if (_frame % 30 == 0)
         {
             _liveClassifier?.History.TrimBefore(_live.Start);
+            _liveM4?.History.TrimBefore(_live.Start);
             lock (_recordLock)
             {
                 try
@@ -1088,6 +1275,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             if (s.State == AudioStreamState.Waiting && s.Reason is string reason)
             {
                 status.Append("  |  ").Append(reason);
+            }
+        }
+        if (_liveM4 is M4Runner m4 && (m4.Backlog >= 4 || m4.Lagged > 0))
+        {
+            status.Append(CultureInfo.InvariantCulture, $"  |  swallow detector {m4.Backlog} windows behind the stream");
+            if (m4.Lagged > 0)
+            {
+                status.Append(CultureInfo.InvariantCulture, $", {m4.Lagged} windows not valid: the PC fell behind");
             }
         }
         StreamStatus = status.ToString();

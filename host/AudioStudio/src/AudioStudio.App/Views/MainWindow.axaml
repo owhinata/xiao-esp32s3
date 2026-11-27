@@ -113,10 +113,12 @@
                          Minimum="0" Maximum="{Binding PositionMaximum}" Value="{Binding Position}"
                          ViewportSize="{Binding SpanSeconds}" LargeChange="{Binding SpanSeconds}" SmallChange="0.1"
                          IsVisible="{Binding IsFileShown}" AllowAutoHide="False" />
-              <Grid x:Name="ViewsGrid" RowDefinitions="2*,3,3*,3,34" Background="Transparent">
+              <Grid x:Name="ViewsGrid" RowDefinitions="2*,3,3*,3,Auto" Background="Transparent">
                 <controls:WaveformControl x:Name="Waveform" Grid.Row="0" />
                 <controls:SpectrogramControl x:Name="Spectrogram" Grid.Row="2" />
-                <controls:ClassStripControl x:Name="ClassStrip" Grid.Row="4" />
+                <controls:ClassStripControl x:Name="ClassStrip" Grid.Row="4" Height="34" IsVisible="{Binding !IsM4Model}" />
+                <controls:ProbabilityTraceControl x:Name="ProbabilityTrace" Grid.Row="4" Height="110"
+                                                  IsVisible="{Binding IsM4Model}" />
               </Grid>
             </DockPanel>
             <ScrollViewer Grid.Column="1" Margin="12,0,0,0" VerticalScrollBarVisibility="Auto">
@@ -159,19 +161,55 @@
                   <Button Content="Load…" Click="OnLoadModelClick" />
                   <Button Content="Unload" Command="{Binding UnloadModelCommand}" />
                 </StackPanel>
-                <DockPanel>
-                  <TextBlock Classes="label" Text="Step" Width="100"
-                             ToolTip.Tip="Samples between windows; 0 for half a window" />
-                  <NumericUpDown Minimum="0" Maximum="160000" Increment="800" FormatString="0" Value="{Binding ModelHop}" />
-                </DockPanel>
-                <DockPanel>
-                  <TextBlock Classes="label" Text="Open window" Width="100"
-                             ToolTip.Tip="Samples per window for a model whose input length is not fixed" />
-                  <NumericUpDown Minimum="1" Maximum="480000" Increment="1600" FormatString="0" Value="{Binding ModelWindow}" />
-                </DockPanel>
-                <Button Content="Apply" Command="{Binding ApplyModelSettingsCommand}"
-                        ToolTip.Tip="Load the model again with the step and window above" />
-                <TextBlock Text="{Binding TopClass}" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,0" />
+                <StackPanel Spacing="6" IsVisible="{Binding !IsM4Model}">
+                  <DockPanel>
+                    <TextBlock Classes="label" Text="Step" Width="100"
+                               ToolTip.Tip="Samples between windows; 0 for half a window" />
+                    <NumericUpDown Minimum="0" Maximum="160000" Increment="800" FormatString="0" Value="{Binding ModelHop}" />
+                  </DockPanel>
+                  <DockPanel>
+                    <TextBlock Classes="label" Text="Open window" Width="100"
+                               ToolTip.Tip="Samples per window for a model whose input length is not fixed" />
+                    <NumericUpDown Minimum="1" Maximum="480000" Increment="1600" FormatString="0" Value="{Binding ModelWindow}" />
+                  </DockPanel>
+                  <Button Content="Apply" Command="{Binding ApplyModelSettingsCommand}"
+                          ToolTip.Tip="Load the model again with the step and window above" />
+                </StackPanel>
+                <!-- The M4 swallow detector fixes its window and step -->
+                <StackPanel Spacing="6" IsVisible="{Binding IsM4Model}">
+                  <DockPanel ToolTip.Tip="The M4 detector's step: 4000 samples (0.25 s)" ToolTip.ShowOnDisabled="True">
+                    <TextBlock Classes="label" Text="Step" Width="100" />
+                    <NumericUpDown IsEnabled="False" FormatString="0 '(0.25 s)'" Value="4000" ShowButtonSpinner="False" />
+                  </DockPanel>
+                  <DockPanel ToolTip.Tip="The M4 detector's window: 16000 samples (1.0 s)" ToolTip.ShowOnDisabled="True">
+                    <TextBlock Classes="label" Text="Window" Width="100" />
+                    <NumericUpDown IsEnabled="False" FormatString="0 '(1.0 s)'" Value="16000" ShowButtonSpinner="False" />
+                  </DockPanel>
+                  <Border Background="{Binding IndicatorBrush}" CornerRadius="6" Padding="10,8" Margin="0,4,0,0"
+                          ToolTip.Tip="As the device's LED matrix: yellow while it runs, green for 1.75 s after a window of a swallow indication. An indication, not a judgement; not a medical device.">
+                    <TextBlock Text="{Binding IndicatorText}" FontSize="20" FontWeight="SemiBold" Foreground="#101010"
+                               HorizontalAlignment="Center" />
+                  </Border>
+                  <TextBlock Text="{Binding DetectorText}" FontFamily="monospace" FontSize="12" />
+                  <StackPanel Spacing="2" IsVisible="{Binding IsFileShown}">
+                    <TextBlock Classes="label" Text="Swallow indications in the file (click to show)" FontSize="12" />
+                    <ListBox ItemsSource="{Binding Indications}" SelectedItem="{Binding SelectedIndication}" MaxHeight="160">
+                      <ListBox.Styles>
+                        <Style Selector="ListBoxItem">
+                          <Setter Property="Padding" Value="8,2" />
+                          <Setter Property="MinHeight" Value="0" />
+                        </Style>
+                      </ListBox.Styles>
+                      <ListBox.ItemTemplate>
+                        <DataTemplate x:DataType="vm:IndicationItem">
+                          <TextBlock Text="{Binding Text}" FontFamily="monospace" FontSize="12" />
+                        </DataTemplate>
+                      </ListBox.ItemTemplate>
+                    </ListBox>
+                  </StackPanel>
+                </StackPanel>
+                <TextBlock Text="{Binding TopClass}" FontSize="22" FontWeight="SemiBold" Margin="0,4,0,0"
+                           IsVisible="{Binding !IsM4Model}" />
                 <ItemsControl ItemsSource="{Binding Scores}">
                   <ItemsControl.ItemTemplate>
                     <DataTemplate x:DataType="vm:ScoreItem">

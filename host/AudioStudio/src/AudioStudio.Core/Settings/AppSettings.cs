@@ -7,6 +7,8 @@ namespace AudioStudio.Core.Settings;
 public sealed class AppSettings
 {
     public const string ImageName = "xiao_esp32s3_threadx.bin";
+    /// <summary>The model loaded when none was chosen before: the M4 swallow detector in <c>host/AudioStudio/models/</c>.</summary>
+    public const string DefaultModel = "models/m4-0038.npz";
 
     public string BoardAddress { get; set; } = "";
     public string RecordingsDirectory { get; set; } = "";
@@ -89,6 +91,25 @@ public sealed class AppSettings
         for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
         {
             string candidate = Path.Combine(dir.FullName, "build", ImageName);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The model to load when none was chosen before: <see cref="DefaultModel"/>
+    /// in the first directory from the application's own upwards that has
+    /// it (the application's sources, for a build inside them). Null when
+    /// there is none.
+    /// </summary>
+    public static string? ResolveDefaultModel()
+    {
+        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            string candidate = Path.Combine(dir.FullName, DefaultModel);
             if (File.Exists(candidate))
             {
                 return candidate;

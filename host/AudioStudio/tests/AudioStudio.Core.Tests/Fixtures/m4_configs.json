@@ -1,0 +1,190 @@
+[
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": true,
+  "set": "mfe40",
+  "kind": "cnn",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "hard_negative": false,
+  "post": "hyst",
+  "threshold": null,
+  "enter": 0.85,
+  "exit": 0.65,
+  "cap_s": null,
+  "refractory_s": 0.5
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": true,
+  "set": "mfe40",
+  "kind": "cnn",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "hard_negative": false,
+  "post": "hyst",
+  "threshold": null,
+  "enter": 0.85,
+  "exit": 0.65,
+  "cap_s": null,
+  "refractory_s": 0.5
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": true,
+  "set": "mfe40",
+  "kind": "cnn",
+  "seeds": [
+   0
+  ],
+  "hard_negative": false,
+  "post": "hyst",
+  "threshold": null,
+  "enter": 0.85,
+  "exit": 0.65,
+  "cap_s": null,
+  "refractory_s": 0.5
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=2.0 refractory_s=0.5",
+  "ok": true,
+  "set": "mfe40",
+  "kind": "cnn",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "hard_negative": false,
+  "post": "hyst",
+  "threshold": null,
+  "enter": 0.85,
+  "exit": 0.65,
+  "cap_s": 2.0,
+  "refractory_s": 0.5
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=1.5 refractory_s=none",
+  "ok": true,
+  "set": "mfe40",
+  "kind": "cnn",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "hard_negative": false,
+  "post": "hyst",
+  "threshold": null,
+  "enter": 0.85,
+  "exit": 0.65,
+  "cap_s": 1.5,
+  "refractory_s": null
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=w3.0 post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": true,
+  "set": "mfe40",
+  "kind": "cnn",
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "hard_negative": true,
+  "post": "hyst",
+  "threshold": null,
+  "enter": 0.85,
+  "exit": 0.65,
+  "cap_s": null,
+  "refractory_s": 0.5
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0 hard_negative=none post=none threshold=0.5 enter=- exit=- cap_s=none refractory_s=none",
+  "ok": true,
+  "set": "mfe40",
+  "kind": "cnn",
+  "seeds": [
+   0
+  ],
+  "hard_negative": false,
+  "post": "none",
+  "threshold": 0.5,
+  "enter": null,
+  "exit": null,
+  "cap_s": null,
+  "refractory_s": null
+ },
+ {
+  "text": "set=a52 classifier=lr seeds=- hard_negative=none post=hyst threshold=- enter=0.7 exit=0.4 cap_s=none refractory_s=none",
+  "ok": true,
+  "set": "a52",
+  "kind": "lr",
+  "seeds": [],
+  "hard_negative": false,
+  "post": "hyst",
+  "threshold": null,
+  "enter": 0.7,
+  "exit": 0.4,
+  "cap_s": null,
+  "refractory_s": null
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=3.0 refractory_s=0.5",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=1.0",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": false
+ },
+ {
+  "text": "set=a52 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=x exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=0.5 enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0 hard_negative=none post=none threshold=0.5 enter=0.8 exit=- cap_s=none refractory_s=none",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0 hard_negative=none post=none threshold=0.5 enter=- exit=- cap_s=2.0 refractory_s=none",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none",
+  "ok": false
+ },
+ {
+  "text": "classifier=cnn set=mfe40 seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40  classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5 extra=1",
+  "ok": false
+ },
+ {
+  "text": "set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85=1 exit=0.65 cap_s=none refractory_s=0.5",
+  "ok": false
+ }
+]

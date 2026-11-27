@@ -5,6 +5,7 @@ using AudioStudio.App.ViewModels;
 using AudioStudio.Core.Audio;
 using AudioStudio.Core.Dsp;
 using AudioStudio.Core.Model;
+using AudioStudio.Core.Settings;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -46,7 +47,9 @@ public partial class MainWindow : Window
         _viewModel.ViewChanged += () => _analysis = null;
         ShowShellPane(_viewModel.IsShellPaneVisible);
         ViewsGrid.PointerWheelChanged += OnViewsWheel;
-        string? model = options.Model ?? (string.IsNullOrWhiteSpace(_viewModel.ModelPath) ? null : _viewModel.ModelPath);
+        // The model of the command line, else the last one loaded, else the M4 swallow detector in models/.
+        string? model = options.Model ??
+            (string.IsNullOrWhiteSpace(_viewModel.ModelPath) ? AppSettings.ResolveDefaultModel() : _viewModel.ModelPath);
         if (model is not null && File.Exists(model))
         {
             _viewModel.LoadModel(model);
@@ -95,6 +98,24 @@ public partial class MainWindow : Window
             _spectrumComplete = Spectrogram.Show(_analysis, source, from, to, ColumnBudget);
         }
 
+        if (_viewModel.IsM4Model)
+        {
+            M4Runner? runner = _viewModel.ViewM4Runner;
+            (double enter, double exit) = _viewModel.M4Levels;
+            if (runner is null)
+            {
+                ProbabilityTrace.Clear("no model loaded");
+            }
+            else if (runner.Error is string error && runner.History.Count == 0)
+            {
+                ProbabilityTrace.Clear(error);
+            }
+            else
+            {
+                ProbabilityTrace.Show(runner.History.Range(from, to), from, to, enter, exit);
+            }
+            return;
+        }
         Classifier? classifier = _viewModel.ViewClassifier;
         if (classifier is null)
         {
@@ -229,7 +250,7 @@ public partial class MainWindow : Window
     private async void OnLoadModelClick(object? sender, RoutedEventArgs e)
     {
         string? start = _viewModel.ModelPath.Length > 0 ? Path.GetDirectoryName(_viewModel.ModelPath) : null;
-        if (await PickFileAsync("ONNX model", start, "ONNX models", "*.onnx") is string path)
+        if (await PickFileAsync("Model: ONNX, or the M4 swallow detector's .npz", start, "Models", "*.onnx", "*.npz") is string path)
         {
             _viewModel.LoadModel(path);
         }

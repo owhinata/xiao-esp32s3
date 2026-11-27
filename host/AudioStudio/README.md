@@ -3,8 +3,9 @@
 A desktop application for the board's audio: it receives the stream of the
 throat microphone over Wi-Fi (16 kHz, mono, 16-bit), shows it as a waveform
 and a spectrogram, records it to WAV files, shows recorded WAV files the same
-way, runs an ONNX classification model on either, operates the board's shell
-(Telnet) and updates the board's firmware over Wi-Fi.
+way, runs the M4 swallow detector or an ONNX classification model on either,
+operates the board's shell (Telnet) and updates the board's firmware over
+Wi-Fi.
 
 - Framework: .NET 10 / Avalonia 11, ONNX Runtime
 - Target OS: Linux (the `ip` command is used to find the board)
@@ -18,7 +19,9 @@ dotnet test tests/AudioStudio.Core.Tests
 dotnet run --project src/AudioStudio.App
 ```
 
-The model tests run `tools/make_test_model.py` with `python3` (standard library only).
+The model tests run `tools/make_test_model.py` with `python3` (standard library
+only); the M4 tests read the fixtures in `tests/AudioStudio.Core.Tests/Fixtures/`
+(see "Regenerating the fixtures" below) and the model in `models/`.
 
 Arguments (all optional):
 
@@ -27,7 +30,7 @@ Arguments (all optional):
 | `--board <address>` | Connect the audio stream to this address on start |
 | `--shell` | With `--board`: connect the shell too |
 | `--open <file.wav>` | Show a WAV file |
-| `--model <file.onnx>` | Load a model (otherwise the last one loaded is loaded again) |
+| `--model <file.onnx\|file.npz>` | Load a model (otherwise the last one loaded, or `models/m4-0038.npz` when none was loaded before) |
 | `--image <file.bin>` | The firmware image to offer for an update |
 | `--view <audio\|firmware>` | The tab to start with |
 
@@ -98,8 +101,8 @@ All on the board's address (the PC runs the Wi-Fi access point at
 
 ### Views
 
-The waveform, the spectrogram and the model's class strip share one time
-axis: the newest samples at the right for the live stream (the time is
+The waveform, the spectrogram and the model's strip (the class strip of an
+ONNX model, the probability trace of the M4 detector) share one time axis: the newest samples at the right for the live stream (the time is
 relative to now), the chosen place for a file (the time from the file's
 start).
 
@@ -124,7 +127,108 @@ start).
 
 ### Model
 
-**Load…** loads an ONNX model. On the live stream it runs on the newest
+**Load…** loads a model: a `.npz` file is the M4 swallow detector (below),
+an `.onnx` file a model of the contract further below. Without
+`--model` the application loads the model loaded last, or, when none was
+loaded before, `models/m4-0038.npz` (looked up from the application's
+directory upwards, so it is found for a build inside the repository).
+
+#### The M4 swallow detector
+
+The detector of [zaitaku-mealpace](https://github.com/owhinata/zaitaku-mealpace)
+(the same author; MIT): a small CNN over log-mel features of the throat
+microphone, whose output is a swallow *indication* that drives the LED
+matrix of that project's device. It is an indication, not a judgement: the
+device is not a medical device and does not detect or diagnose aspiration.
+
+What it computes, with the same arithmetic as that repository's Python code
+(`analysis/m4_infer.py`, `features_np.py`, `postprocess.py`, `led_rule.py`):
+
+- **Windows**: 16000 samples (1.0 s) every 4000 samples (0.25 s); window k
+  starts 4000·k samples after the start of its stretch. A file is one
+  stretch from its first sample. On the live stream a stretch starts with a
+  new connection or a new stream on the board (the yellow line in the
+  waveform), where the detector starts afresh; a window of the stretch before
+  that would reach past it is not run. When the model is loaded during a
+  stream, the detector starts at the newest complete window.
+- **Features**: the samples divided by 32768, pre-emphasis 0.97 over the
+  whole window, frames of 400 samples every 160 (98 frames), a symmetric
+  Hamming window, |FFT(512)|²/512, 40 mel bands (0 to 4000 Hz) from the mel
+  matrix, log(x + 1e-10).
+- **Probability**: per seed, the features normalised with that seed's mean
+  and standard deviation, then three 3×3 convolutions with ReLU (2×2 max
+  pooling after the first two), the global mean, one fully connected output
+  and a sigmoid; the probability is the mean of the seeds' probabilities.
+- **Post-processing**: hysteresis (a run starts at a probability of at least
+  **enter** and goes on while it is at least **exit**), a refractory period
+  (a run that starts within 0.5 s of the last window of the run before is
+  suppressed) and a cap on a run's length, as the configuration in the
+  weights file sets them; the windows of a run that is not suppressed are the
+  positive windows. Each run of positive windows is one swallow indication.
+- **LED**: green (**swallow indication**) while the window starts at most
+  1.75 s after the start of the last positive window, otherwise yellow
+  (**running**); off when no window came for a second (the live stream
+  stopped).
+- **Lost samples**: a window that overlaps lost samples (shaded red in the
+  waveform) is not valid: it is not run, it ends a run and cannot start one,
+  and the trace has no probability there.
+
+Every window is run, in order: the post-processing needs each one. On the
+live stream the detector runs on its own thread as samples come, also while
+a file is shown; if it falls
+behind, the status line says by how many windows (from 4 on), and windows
+whose samples left the live buffer (about 2 minutes) before it reached them
+are counted as not valid. A window takes about 6 ms in the Release build
+and 50 ms in the Debug build (one thread, AMD Ryzen 7 8840U). A file is run
+in the background, batches of windows in parallel.
+
+The **Step** and **Window** fields show the detector's fixed 0.25 s and
+1.0 s. Below them:
+
+- the LED as the device shows it: **running** (yellow) or **swallow
+  indication** (green), for the newest window (live) or the last window in
+  view (file);
+- the last window's probability, the number of swallow indications in view
+  and since the start of the live stream (or in the file), and the time since
+  the last one (live) or of the last one in view (file);
+- for a file, the list of its swallow indications (the centre of the first
+  positive window of each); clicking one moves the view there;
+- the weights file, its configuration string, and the time per window.
+
+Under the spectrogram the **probability trace** shows each window's
+probability over the 0.25 s around the window's centre, so that the windows
+tile the time axis and line up with the sound they hold: dashed lines at
+enter (0.85) and exit (0.65) from the configuration, green bands for the
+positive windows, red bands for windows that were not valid.
+
+The files, in `models/`:
+
+| File | What |
+| --- | --- |
+| `m4-0038.npz` | The weights: three seeds of the CNN with their normalisation, and the configuration string `config` (`set=mfe40 classifier=cnn seeds=0,1,2 hard_negative=none post=hyst threshold=- enter=0.85 exit=0.65 cap_s=none refractory_s=0.5`) |
+| `mel40_htk_0_4000.npy` | The mel matrix (40 × 257, float64); it is looked up beside the weights file, under this name |
+
+The weights file is read without code execution (numpy's `.npz`, a zip of
+`.npy` arrays) and checked as the Python code checks it: exactly the keys the
+configuration needs, each with its shape and dtype, and `format` 1. Only the
+`mfe40` CNN configurations are supported.
+
+#### Regenerating the fixtures
+
+The tests compare the C# detector with values that the Python code gives
+for synthetic signals (sines, a chirp, fixed-seed noise, bursts; no
+recordings), in `tests/AudioStudio.Core.Tests/Fixtures/`. They are written by
+`tools/make_m4_fixtures.py`, run with a zaitaku-mealpace checkout's own
+interpreter (numpy only; it writes nothing into the checkout):
+
+```bash
+/path/to/zaitaku-mealpace/.venv/bin/python tools/make_m4_fixtures.py \
+    --mealpace /path/to/zaitaku-mealpace --out tests/AudioStudio.Core.Tests/Fixtures
+```
+
+#### ONNX models
+
+An ONNX model of the contract below. On the live stream it runs on the newest
 window whenever a new one is complete; a window that comes while the model
 is still busy is dropped (counted as `dropped`), so the results never fall
 behind the stream. On a file it runs on every window of the whole file in
@@ -135,7 +239,7 @@ the time axis. **Step** is the number of samples between windows (0: half a
 window), **Open window** the window length for a model that does not fix it;
 **Apply** loads the model again with them.
 
-#### The model contract
+##### The model contract
 
 - **Input**: exactly one input, float32, of shape `[1, N]` or `[1, 1, N]`:
   N consecutive samples of 16 kHz mono audio scaled to -1..1 (the 16-bit
@@ -199,10 +303,11 @@ firmware.
 
 | Path | Role |
 | --- | --- |
-| `src/AudioStudio.Core` | The audio stream protocol and client, the live ring and WAV files, the spectrogram (FFT) and levels, the model contract and its runner, the OTA client, the Telnet shell and board discovery, the settings |
-| `src/AudioStudio.App` | The Avalonia user interface (MVVM): the waveform, spectrogram and class strip controls, the view model, the window |
-| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host and microphone, the model contract with the test model |
-| `tools/` | `make_test_model.py`, `make_icon.py`, `install_desktop.sh` |
+| `src/AudioStudio.Core` | The audio stream protocol and client, the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, and its runner), the OTA client, the Telnet shell and board discovery, the settings |
+| `src/AudioStudio.App` | The Avalonia user interface (MVVM): the waveform, spectrogram, class strip and probability trace controls, the view model, the window |
+| `models/` | The M4 swallow detector's weights and mel matrix |
+| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host and microphone, the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams |
+| `tools/` | `make_test_model.py`, `make_m4_fixtures.py`, `make_icon.py`, `install_desktop.sh` |
 
 `ORIGIN.md` lists what was copied from ImuStudio (rp2040-connect) and what was
-changed.
+changed, and where the M4 model files come from.
