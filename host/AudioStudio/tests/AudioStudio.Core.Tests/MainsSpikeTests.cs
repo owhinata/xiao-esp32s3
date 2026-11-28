@@ -63,7 +63,7 @@ public sealed class MainsSpikeTests(ITestOutputHelper output)
         {
             MainsSpike.LowPassHz, MainsSpike.Taps, MainsSpike.EnvelopeTau, MainsSpike.HumQ, MainsSpike.Refractory,
             MainsSpike.PeriodTolerance, MainsSpike.PeriodRate, MainsSpike.Alpha, MainsSpike.QuantStep, MainsSpike.Margin,
-            MainsSpike.Limit, MainsSpike.FloorGain2, MainsSpike.FInit, MainsSpike.Warmup,
+            MainsSpike.Limit, MainsSpike.FloorGain2, MainsSpike.FInit, MainsSpike.Warmup, MainsSpike.Spread,
         }.Should().Equal(c);
         MainsSpike.Delay.Should().Be(80);
         MainsSpike.Bins(50).Should().Be(331);

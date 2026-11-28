@@ -10,7 +10,9 @@ namespace AudioStudio.Core.Model;
 /// Python code's float64; the output rounded to float as its float32).
 /// It limits short bursts above about 450 Hz that come back at the same
 /// place of every mains period (an electric heater the wearer touches) and
-/// leaves sound that is not synchronous with the mains alone. It is causal;
+/// leaves sound that is not synchronous with the mains alone: at a burst
+/// phase it takes away no more than the burst its template expects there.
+/// It is causal;
 /// the output is the input delayed by <see cref="Delay"/> samples wherever
 /// it does not act. The Python module's docstring gives the algorithm.
 /// </summary>
@@ -32,6 +34,8 @@ public sealed class MainsSpike
     public const double QuantStep = 1.0 / 512.0;
     public const double Margin = 3.0;
     public const double Limit = 2.0;
+    /// <summary>The expected burst at a phase: the template plus Spread times its mean absolute deviation.</summary>
+    public const double Spread = 10.0;
     public const double FloorGain2 = 0.01;
     public const double FInit = 1e-12;
     public const int Warmup = 32;
@@ -45,7 +49,7 @@ public sealed class MainsSpike
     private double _e, _zPrev;
     private double? _last;
     private double _p, _pBlock;
-    private readonly double[] _template;
+    private readonly double[] _template, _spread;
     private double _f = FInit, _r, _rLast, _acc;
     private int _j, _length, _up, _blocks;
     private long _n;
@@ -62,6 +66,7 @@ public sealed class MainsSpike
         _a = Math.Exp(-1.0 / EnvelopeTau);
         _p = _pBlock = SampleRate / mainsHz;
         _template = new double[Bins(mainsHz)];
+        _spread = new double[_template.Length];
         _length = (int)Math.Ceiling(_pBlock - _r);
     }
 
@@ -151,12 +156,14 @@ public sealed class MainsSpike
         _zPrev = z;
 
         int j = _j;
-        double tj = _template[j];
+        double tj = _template[j], vj = _spread[j];
         double reference = Math.Max(_f, _rLast);
         double g2 = 1.0;
         if (_blocks >= Warmup && tj > Margin * reference && _e > 0.0)
         {
-            g2 = Math.Min(1.0, Math.Max(FloorGain2, Limit * reference / _e));
+            // Limited to Limit x reference, but never by more than the expected burst.
+            g2 = Math.Max(Limit * reference / _e, 1.0 - (tj + Spread * vj) / _e);
+            g2 = Math.Min(1.0, Math.Max(FloorGain2, g2));
         }
         double g = Math.Sqrt(g2);
         _acc += g2 * _e;
@@ -164,6 +171,7 @@ public sealed class MainsSpike
         {
             _up++;
         }
+        _spread[j] = vj + Alpha * (Math.Abs(_e - tj) - vj);
         _template[j] = tj + Alpha * (_e - tj);
         _j++;
         _n++;

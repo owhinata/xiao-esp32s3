@@ -315,7 +315,9 @@ What it computes, with the same arithmetic as that repository's Python code
   samples. It limits short bursts above about 450 Hz that come back at the
   same place of every mains period (seen while the wearer touches an
   electric heater) and leaves sound that is not synchronous with the mains
-  alone; the Python module describes the algorithm. Its output is the input
+  alone: at a burst phase it takes away no more than the burst it expects
+  there, so a swallow on a burst phase keeps what it has above it; the
+  Python module describes the algorithm. Its output is the input
   delayed by 80 samples (5 ms) where it does not act; the windows read it 80
   samples late, so window positions, indications and their times refer to
   the raw samples as without the filter, and a window waits for 80 samples

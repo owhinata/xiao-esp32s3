@@ -150,6 +150,25 @@ class SuppressionTest(unittest.TestCase):
                 ey = db(high(y - yr)[tm])
                 self.assertLess(abs(ey - ex), 0.5)
 
+    def test_clicks_pass(self):
+        # short loud broadband clicks (3 ms), some on burst phases, keep
+        # their energy within 2 dB with weak and with strong bursts: only
+        # the expected burst is taken away where they fall on a burst phase
+        # (a limit to LIMIT ref alone takes about 10 dB of them)
+        rng = np.random.default_rng(5)
+        for spike_amp in (0.0005, 0.005):
+            with self.subTest(spike_amp=spike_amp):
+                x0, _, _ = make(spike_amp=spike_amp)
+                c = np.zeros(len(x0))
+                cm = np.zeros(len(x0), bool)
+                for k in range(12):
+                    a = int((3.0 + 0.21 * k) * SR)
+                    c[a : a + 48] = 0.05 * np.hanning(48) * rng.standard_normal(48)
+                    cm[a : a + 48] = True
+                y, c, cm = aligned(ms.apply(x0 + c), c, cm)
+                y0, = aligned(ms.apply(x0))
+                self.assertLess(abs(db(high(y - y0)[cm]) - db(high(c)[cm])), 2.0)
+
     def test_amplitude_change_followed(self):
         x1, sm, _ = make(seconds=8.0, spike_amp=0.002, seed=1)
         x2, _, _ = make(seconds=8.0, spike_amp=0.01, seed=1)

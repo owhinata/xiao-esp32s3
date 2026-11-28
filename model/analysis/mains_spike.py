@@ -8,8 +8,8 @@ about 1-2 ms long, up to two per period, the amplitude changing from period
 to period), and nothing that is not synchronous with the mains.
 
 Algorithm (causal; per sample O(1) apart from the LP_TAPS-tap FIR; state:
-LP_TAPS input samples, one template of ceil(1.03 P) + 1 values and a few
-scalars; P = samples per mains period, 320 at 50 Hz):
+LP_TAPS input samples, a template and its spread of ceil(1.03 P) + 1
+values each and a few scalars; P = samples per mains period, 320 at 50 Hz):
 
   1. Band split: lp = FIR low-pass (LP_TAPS taps, Hamming-windowed sinc at
      LP_HZ, linear phase, delay D = (LP_TAPS - 1) / 2), xd = x delayed by D,
@@ -26,21 +26,25 @@ scalars; P = samples per mains period, 320 at 50 Hz):
      its start; P is the estimate at the block start). Sample j of a block
      is template bin j. The template follows the spikes' place by itself, so
      the counter needs no lock to the hum's phase.
-  4. Template: T[j] <- T[j] + ALPHA (e - T[j]) after use (once per period
-     per bin). F: a running median of the template values, updated at the
-     end of every block by F <- F exp(QUANT_STEP (n_above - n_below))
-     (the block's bins with T > F and T <= F, counted before the block's
-     updates). R: the mean of the output envelope g^2 e over the previous
-     block. ref = max(F, R).
+  4. Template: T[j] <- T[j] + ALPHA (e - T[j]) and the spread
+     V[j] <- V[j] + ALPHA (|e - T[j]| - V[j]) (T[j] before its update),
+     after use (once per period per bin). F: a running median of the
+     template values, updated at the end of every block by
+     F <- F exp(QUANT_STEP (n_above - n_below)) (the block's bins with
+     T > F and T <= F, counted before the block's updates). R: the mean of
+     the output envelope g^2 e over the previous block. ref = max(F, R).
   5. Gain on the high band, after WARMUP blocks: at a bin with
      T[j] > MARGIN ref (a mains-synchronous burst is expected there),
-     g^2 = clip(LIMIT ref / e, FLOOR_GAIN2, 1); elsewhere g = 1.
-     Output y = xd - (1 - g) h = lp + g h: the burst is limited to LIMIT
-     times the reference level, by at most -10 log10(FLOOR_GAIN2) dB.
-     Energy that is not synchronous with the mains (a swallow) raises all
-     bins together and passes the gain, so it raises F and R and the
-     condition T[j] > MARGIN ref stops holding; a burst limited by the
-     gain does not raise R.
+     g^2 = clip(max(LIMIT ref / e, 1 - B / e), FLOOR_GAIN2, 1) with
+     B = T[j] + SPREAD V[j], the most a burst at that phase is expected to
+     have; elsewhere g = 1. Output y = xd - (1 - g) h = lp + g h. A burst
+     (e <= B) is limited to LIMIT times the reference level, by at most
+     -10 log10(FLOOR_GAIN2) dB; of a louder envelope only B is taken away
+     (g^2 e >= e - B), so sound that is not synchronous with the mains (a
+     swallow) keeps what it has above the expected burst also where it
+     falls on a burst phase. Such sound raises all bins together, so it
+     raises F and R and the condition T[j] > MARGIN ref stops holding; a
+     burst limited by the gain does not raise R.
 
 The output is the input delayed by D samples (5 ms) wherever g = 1.
 
@@ -67,6 +71,7 @@ ALPHA = 1.0 / 8.0  # template update per period (m4-ms.npz was trained with 1 / 
 QUANT_STEP = 1.0 / 512.0
 MARGIN = 3.0  # T[j] / ref above which a bin is a burst phase
 LIMIT = 2.0  # limit of a burst, times ref
+SPREAD = 10.0  # B = T + SPREAD V: the expected burst, in mean absolute deviations
 FLOOR_GAIN2 = 0.01  # -20 dB
 F_INIT = 1e-12
 WARMUP = 32  # blocks (periods) before any gain is applied
@@ -147,6 +152,7 @@ def apply(x, mains_hz: float = MAINS_HZ, sr: int = SR) -> np.ndarray:
     z = _lfilter(bp_coeffs(mains_hz, HUM_Q, sr), x)
     ct, cp = _periods(z, mains_hz, sr)
     T = np.zeros(n_bins(mains_hz, sr))
+    V = np.zeros(len(T))
     F = F_INIT
     R = 0.0
     p = sr / mains_hz
@@ -163,12 +169,15 @@ def apply(x, mains_hz: float = MAINS_HZ, sr: int = SR) -> np.ndarray:
         b = min(n, s + L)
         m = b - s
         Tj = T[:m]
+        Vj = V[:m]
         es = e[s:b]
         ref = max(F, R)
         if blocks >= WARMUP:
             with np.errstate(divide="ignore", invalid="ignore"):
                 g2 = np.where(
-                    (Tj > MARGIN * ref) & (es > 0.0), LIMIT * ref / es, 1.0
+                    (Tj > MARGIN * ref) & (es > 0.0),
+                    np.maximum(LIMIT * ref / es, 1.0 - (Tj + SPREAD * Vj) / es),
+                    1.0,
                 )
             g2 = np.clip(g2, FLOOR_GAIN2, 1.0)
             g[s:b] = np.sqrt(g2)
@@ -177,6 +186,7 @@ def apply(x, mains_hz: float = MAINS_HZ, sr: int = SR) -> np.ndarray:
         R = float(np.sum(g2 * es)) / m
         up = int(np.count_nonzero(Tj > F))
         F *= math.exp(QUANT_STEP * (up - (m - up)))
+        V[:m] = Vj + ALPHA * (np.abs(es - Tj) - Vj)
         T[:m] = Tj + ALPHA * (es - Tj)
         r = r + L - p
         s = b
@@ -202,6 +212,7 @@ class MainsSpike:
         self.p = self.p_nom  # period estimate
         self.p_block = self.p_nom  # period of the current block
         self.T = [0.0] * n_bins(mains_hz, sr)
+        self.V = [0.0] * len(self.T)
         self.F = F_INIT
         self.r = 0.0
         self.j = 0  # sample in the block
@@ -247,14 +258,17 @@ class MainsSpike:
         self.z_prev = z
         j = self.j
         Tj = self.T[j]
+        Vj = self.V[j]
         ref = max(self.F, self.R)
         g2 = 1.0
         if self.blocks >= WARMUP and Tj > MARGIN * ref and self.e > 0.0:
-            g2 = min(1.0, max(FLOOR_GAIN2, LIMIT * ref / self.e))
+            g2 = max(LIMIT * ref / self.e, 1.0 - (Tj + SPREAD * Vj) / self.e)
+            g2 = min(1.0, max(FLOOR_GAIN2, g2))
         g = math.sqrt(g2)
         self.acc += g2 * self.e
         if Tj > self.F:
             self.up += 1
+        self.V[j] = Vj + ALPHA * (abs(self.e - Tj) - Vj)
         self.T[j] = Tj + ALPHA * (self.e - Tj)
         self.j += 1
         self.n += 1

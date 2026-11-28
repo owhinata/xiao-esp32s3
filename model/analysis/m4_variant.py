@@ -498,8 +498,8 @@ def hum(root: Path, model_paths: Sequence[Path], windows_fn=None) -> list:
 # --- front-end check (mains_spike.py before an unchanged mfe40 model) ---
 
 FRONT_PARAMS = (  # mains_spike constants --front-param may change
-    "ALPHA", "MARGIN", "LIMIT", "WARMUP", "QUANT_STEP", "FLOOR_GAIN2",
-    "ENV_TAU", "PERIOD_RATE",
+    "ALPHA", "MARGIN", "LIMIT", "SPREAD", "WARMUP", "QUANT_STEP",
+    "FLOOR_GAIN2", "ENV_TAU", "PERIOD_RATE",
 )
 TOUCH_BAND_HZ = (500.0, 4000.0)
 TOUCH_SMOOTH = 16  # samples (1 ms) of envelope smoothing
@@ -721,7 +721,13 @@ def front_check(root: Path, model_path: Path, specs, candidates,
         touches = sync_touches(x)
         per_case = []
         for label, params in cases:
-            t_start, M = _rec_windows(run(x, params))
+            y = run(x, params)
+            if params is not None:
+                # read the output D samples late, as AudioStudio's runner does:
+                # window k holds the front-end's output for the raw samples
+                # of window k (the last D samples of the last window read 0)
+                y = np.concatenate((y[D:], np.zeros(D, np.float32)))
+            t_start, M = _rec_windows(y)
             prob = model_prob(m, M)
             per_case.append((label, touch_metrics(t_start, prob, touches, cfg),
                              swallow_probs(t_start, prob, swallows), t_start, prob))

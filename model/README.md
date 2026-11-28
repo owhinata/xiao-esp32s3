@@ -185,7 +185,10 @@ R=data/studio/<name>
 The front-end limits short bursts in the band above about 450 Hz that come
 back at the same place of every mains period (seen with a hand on or near
 an electric heater), and leaves sound that is not synchronous with the
-mains alone. It is causal and runs from the first sample of the signal (of
+mains alone: at a burst phase it limits the signal to twice a reference
+level, but takes away no more than the burst its template expects there,
+so a swallow that falls on a burst phase keeps what it has above the
+expected burst. It is causal and runs from the first sample of the signal (of
 a session, of a recording, of a stream); the output is the input delayed
 by 80 samples (5 ms) wherever it does not act. The module docstring gives
 the algorithm and constants; `MainsSpike` is the per-sample reference for
@@ -202,13 +205,14 @@ has the front-end as its **Spike filter** switch (a C# port of
     [--front-param current] [--front-param ALPHA=1/16 ...]
 ```
 
-`analysis/models/m4-ms.npz` was trained with the front-end's earlier
-template rate `ALPHA = 1/16` (now `1/8`); it was not retrained, so its
-training input differs a little from what `mfe40ms` now computes.
+`analysis/models/m4-ms.npz` was trained with earlier constants of the
+front-end (template rate `ALPHA = 1/16`, now `1/8`, and the limit without
+the bound by the expected burst, `SPREAD`); it was not retrained, so its
+training input differs from what `mfe40ms` now computes.
 
 `--front M.npz` (an `mfe40` model, no training) scores the model on its own
 and behind the front-end, once per `--front-param` case (`NAME=VALUE,...`
-of the constants `ALPHA`, `MARGIN`, `LIMIT`, `WARMUP`, `QUANT_STEP`,
+of the constants `ALPHA`, `MARGIN`, `LIMIT`, `SPREAD`, `WARMUP`, `QUANT_STEP`,
 `FLOOR_GAIN2`, `ENV_TAU`, `PERIOD_RATE`, values as numbers or fractions;
 `current` or none: the module's constants), and prints:
 
@@ -221,7 +225,13 @@ of the constants `ALPHA`, `MARGIN`, `LIMIT`, `WARMUP`, `QUANT_STEP`,
   5 ms, the per-bin median over the periods, its top 10 % against its lower
   half above 11 dB, runs of at least 2 s;
 - the probability at each swallow of each recording (the highest in its
-  counting interval) and the swallows found;
+  counting interval) and the swallows found. The recording's windows start
+  at its sample 0, every 0.25 s; the front-end's output is read 80 samples
+  late, as AudioStudio reads it, so a window holds the output for the raw
+  samples of the same window. A short or light swallow's probability
+  depends on where the 0.25 s grid falls (on AudioStudio's live stream the
+  grid starts with the stream, not with the recording): judge it over
+  several grid offsets, not one;
 - the training-side swallow check, on the `water` and `saliva` condition
   sessions and the first meal (10 sessions, 162 swallows; in the model's
   training data): swallows found, false indications, the mean probability

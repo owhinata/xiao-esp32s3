@@ -447,7 +447,7 @@ def main():
             constants=np.array([
                 ms.LP_HZ, ms.LP_TAPS, ms.ENV_TAU, ms.HUM_Q, ms.REFRACTORY, ms.PERIOD_TOL,
                 ms.PERIOD_RATE, ms.ALPHA, ms.QUANT_STEP, ms.MARGIN, ms.LIMIT, ms.FLOOR_GAIN2,
-                ms.F_INIT, ms.WARMUP], dtype=np.float64),
+                ms.F_INIT, ms.WARMUP, ms.SPREAD], dtype=np.float64),
         )
         written.append(
             f"mains spike ({k_ms} windows, {sum(r[1] for r in on_rows)} positive with the front-end, "
