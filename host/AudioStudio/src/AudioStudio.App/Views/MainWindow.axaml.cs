@@ -384,8 +384,7 @@ public partial class MainWindow : Window
 
     private async void OnLoadModelClick(object? sender, RoutedEventArgs e)
     {
-        string? start = _viewModel.ModelPath.Length > 0 ? Path.GetDirectoryName(_viewModel.ModelPath) : null;
-        if (await PickFileAsync("Model: ONNX, or the M4 swallow detector's .npz", start, "Models", "*.onnx", "*.npz") is string path)
+        if (await PickFileAsync("Model: ONNX, or the M4 swallow detector's .npz", _viewModel.ModelPickerDirectory, "Models", "*.onnx", "*.npz") is string path)
         {
             _viewModel.LoadModel(path);
         }

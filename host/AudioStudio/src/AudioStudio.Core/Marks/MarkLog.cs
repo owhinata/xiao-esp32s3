@@ -35,8 +35,10 @@ public sealed class MarkLog
     /// <summary>
     /// A mark made by the user at <paramref name="sample"/>. A memo still
     /// open keeps <paramref name="typedSoFar"/> as its text first. For
-    /// <see cref="MarkKind.False"/> and <see cref="MarkKind.Other"/> a memo
-    /// is then open on the new mark. Returns the new mark's handle.
+    /// <see cref="MarkKind.Other"/> a memo is then open on the new mark;
+    /// <see cref="MarkKind.Swallow"/> and <see cref="MarkKind.False"/> take
+    /// none (a text is added later in the mark editor of the opened file).
+    /// Returns the new mark's handle.
     /// </summary>
     public int Add(long sample, MarkKind kind, string typedSoFar = "")
     {
@@ -51,7 +53,7 @@ public sealed class MarkLog
         }
         _marks.Add(new Mark(sample, kind));
         int index = _marks.Count - 1;
-        if (kind is MarkKind.False or MarkKind.Other)
+        if (kind == MarkKind.Other)
         {
             MemoMark = index;
         }

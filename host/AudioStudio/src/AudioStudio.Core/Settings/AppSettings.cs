@@ -10,7 +10,9 @@ public sealed class AppSettings
 {
     public const string ImageName = "xiao_esp32s3_threadx.bin";
     /// <summary>The model loaded when none was chosen before: the M4 swallow detector in <c>host/AudioStudio/models/</c>.</summary>
-    public const string DefaultModel = "models/m4-0038.npz";
+    public const string DefaultModel = ModelsDirectoryName + "/m4-0038.npz";
+    /// <summary>The directory of the models, in <c>host/AudioStudio/</c>.</summary>
+    public const string ModelsDirectoryName = "models";
 
     /// <summary>The target profile: a name in <c>targets/</c> beside the application, or the path of a profile.</summary>
     public string Target { get; set; } = TargetProfile.DefaultName;
@@ -143,10 +145,24 @@ public sealed class AppSettings
         return null;
     }
 
-    /// <summary>The directory of this application's sources, if it runs from a build inside it.</summary>
-    private static DirectoryInfo? SourceDirectory()
+    /// <summary>
+    /// The directory the model file dialog starts in: <c>models/</c> beside
+    /// this application's sources (<c>host/AudioStudio/models/</c>) when it
+    /// runs from a build inside them (searched from <paramref name="baseDirectory"/>,
+    /// default the application's directory, upwards). Null when there is none.
+    /// </summary>
+    public static string? ResolveModelsDirectory(string? baseDirectory = null) =>
+        SourceDirectory(baseDirectory) is DirectoryInfo sources
+        && Path.Combine(sources.FullName, ModelsDirectoryName) is var models && Directory.Exists(models)
+            ? models : null;
+
+    /// <summary>
+    /// The directory of this application's sources (the one with
+    /// <c>AudioStudio.slnx</c>), if it runs from a build inside it.
+    /// </summary>
+    private static DirectoryInfo? SourceDirectory(string? baseDirectory = null)
     {
-        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        for (DirectoryInfo? dir = new(baseDirectory ?? AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
         {
             if (File.Exists(Path.Combine(dir.FullName, "AudioStudio.slnx")))
             {

@@ -129,7 +129,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _isRecording;
     [ObservableProperty] private string _recordingLabel;
     [ObservableProperty] private string _recordingText = "";
-    /// <summary>The memo box of a <c>false</c> or <c>other</c> mark is open.</summary>
+    /// <summary>The memo box of an <c>other</c> mark is open.</summary>
     [ObservableProperty] private bool _isMemoOpen;
     [ObservableProperty] private string _memoText = "";
     [ObservableProperty] private string _memoHint = "";
@@ -1090,6 +1090,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// Where the model file dialog starts: <c>models/</c> of the application's
+    /// sources whenever it exists, else the directory of the model loaded
+    /// (null leaves it to the dialog).
+    /// </summary>
+    public string? ModelPickerDirectory =>
+        AppSettings.ResolveModelsDirectory() ?? (ModelPath.Length > 0 ? Path.GetDirectoryName(ModelPath) : null);
+
     // ---- recording -------------------------------------------------------
 
     public string RecordingsDirectory => _settings.ResolveRecordingsDirectory();
@@ -1196,7 +1204,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>
     /// A mark of the user at the recording's current sample: the moment of
     /// the key press or click. A memo still open keeps what was typed. For
-    /// <c>false</c> and <c>other</c> the memo box opens for the new mark.
+    /// <c>other</c> the memo box opens for the new mark; <c>swallow</c> and
+    /// <c>false</c> are stored without text at once.
     /// </summary>
     public void AddMark(MarkKind kind)
     {

@@ -102,7 +102,7 @@
                   ToolTip.Tip="Mark: I swallowed now (1). Enabled while recording; written to the .marks.csv beside the WAV file at once" />
           <Button Content="Wrong (2)" Command="{Binding MarkFalseCommand}" IsEnabled="{Binding IsRecording}"
                   ToolTip.ShowOnDisabled="True"
-                  ToolTip.Tip="Mark false: the indication just shown was wrong, your note (2). A memo box opens for an optional text. Enabled while recording" />
+                  ToolTip.Tip="Mark false: the indication just shown was wrong, your note (2). Stored at once without text; a text can be added later in the mark editor of the opened file. Enabled while recording" />
           <Button Content="Other (3)" Command="{Binding MarkOtherCommand}" IsEnabled="{Binding IsRecording}"
                   ToolTip.ShowOnDisabled="True"
                   ToolTip.Tip="Mark other: anything else (3). A memo box opens for an optional text. Enabled while recording" />

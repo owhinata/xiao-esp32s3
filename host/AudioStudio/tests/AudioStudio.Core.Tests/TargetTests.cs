@@ -139,4 +139,15 @@ public sealed class TargetTests : IDisposable
         again.Target.Should().Be("unoq");
         again.Addresses.Should().HaveCount(2).And.Contain("unoq", "arduino@unoq.local");
     }
+
+    [Fact]
+    public void The_models_directory_is_found_beside_the_sources()
+    {
+        string build = Directory.CreateDirectory(Path.Combine(_dir.FullName, "src", "bin")).FullName;
+        AppSettings.ResolveModelsDirectory(build).Should().BeNull("no sources upwards");
+        File.WriteAllText(Path.Combine(_dir.FullName, "AudioStudio.slnx"), "");
+        AppSettings.ResolveModelsDirectory(build).Should().BeNull("sources without models/");
+        string expected = Directory.CreateDirectory(Path.Combine(_dir.FullName, "models")).FullName;
+        AppSettings.ResolveModelsDirectory(build).Should().Be(expected);
+    }
 }

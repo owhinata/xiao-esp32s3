@@ -267,7 +267,12 @@ start).
 an `.onnx` file a model of the contract further below. Without
 `--model` the application loads the model loaded last, or, when none was
 loaded before, `models/m4-0038.npz` (looked up from the application's
-directory upwards, so it is found for a build inside the repository).
+directory upwards, so it is found for a build inside the repository). The
+file dialog of **Load…** always starts in `models/` beside the
+application's sources (the directory with `AudioStudio.slnx`, found from
+the application's directory upwards), also after a model was loaded from
+elsewhere; when there is no such directory it starts in the directory of
+the model loaded, or where the system's dialog starts without one.
 
 #### The M4 swallow detector
 
@@ -493,7 +498,7 @@ While recording, the user leaves marks: timed notes beside the WAV file.
 | Button | Key | Kind | Meaning |
 | --- | --- | --- | --- |
 | **Swallow (1)** | 1 | `swallow` | I swallowed now (no text) |
-| **Wrong (2)** | 2 | `false` | The indication just shown was wrong: the user's note about the indication (optional text) |
+| **Wrong (2)** | 2 | `false` | The indication just shown was wrong: the user's note about the indication (no text; one can be added in the editor of the opened file) |
 | **Other (3)** | 3 | `other` | Anything else (optional text) |
 
 - The buttons are enabled only while recording. The keys work while the
@@ -502,11 +507,14 @@ While recording, the user leaves marks: timed notes beside the WAV file.
 - A mark's time is the moment of the key press or click: the number of
   samples written to the WAV file at that moment (the samples arrive in
   blocks, and the stream's delay to the PC is not taken off).
-- After **Wrong** or **Other** a memo box opens beside the buttons and takes
-  the focus. Enter stores its text; Escape leaves the mark without text. A
-  mark made while the box is open (with a button) keeps the earlier mark
-  with what was typed so far; the end of the recording does the same. The
-  box takes nothing from the recording, which goes on in the background.
+- **Swallow** and **Wrong** store the mark at once without text; the focus
+  stays where it is, so the next key works. After **Other** a memo box opens
+  beside the buttons and takes the focus. Enter stores its text; Escape
+  leaves the mark without text. A mark made while the box is open (with a
+  button) keeps the earlier mark with what was typed so far; the end of the
+  recording does the same. The box takes nothing from the recording, which
+  goes on in the background. A text for a `false` mark is added afterwards
+  in the editor of the opened file (see "Editing the marks of a file").
 - The detector's indications are kept as well, without a key: kind
   `indication`, at the time of the indication (the centre of its first
   positive window, as the list of indications shows it), with the highest

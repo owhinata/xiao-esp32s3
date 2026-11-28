@@ -118,13 +118,23 @@ public sealed class MarksTests : IDisposable
     {
         MarkLog log = new(LogPath, Rate);
         File.Exists(LogPath).Should().BeFalse("no mark, no file");
-        log.Add(16000, MarkKind.False);
+        log.Add(16000, MarkKind.Other);
         log.MemoMark.Should().Be(0);
         // As after a crash while the memo is typed: the mark is there, without text.
-        MarkFile.Read(LogPath).Should().Equal(new Mark(16000, MarkKind.False));
+        MarkFile.Read(LogPath).Should().Equal(new Mark(16000, MarkKind.Other));
         log.StoreMemo("it was a cough");
-        MarkFile.Read(LogPath).Should().Equal(new Mark(16000, MarkKind.False, null, "it was a cough"));
+        MarkFile.Read(LogPath).Should().Equal(new Mark(16000, MarkKind.Other, null, "it was a cough"));
         log.MemoMark.Should().BeNull();
+    }
+
+    [Fact]
+    public void A_false_mark_is_stored_at_once_without_a_memo()
+    {
+        MarkLog log = new(LogPath, Rate);
+        log.Add(16000, MarkKind.False);
+        log.MemoMark.Should().BeNull("a false mark takes no memo");
+        log.StoreMemo("not for it");
+        MarkFile.Read(LogPath).Should().Equal(new Mark(16000, MarkKind.False));
     }
 
     [Fact]
@@ -134,13 +144,16 @@ public sealed class MarksTests : IDisposable
         log.Add(32000, MarkKind.Other);
         log.Add(40000, MarkKind.Swallow, typedSoFar: "half a sen");
         log.MemoMark.Should().BeNull("a swallow mark takes no memo");
-        log.Add(48000, MarkKind.False);
+        log.Add(44000, MarkKind.Other);
+        log.Add(48000, MarkKind.False, typedSoFar: "a cou");
+        log.MemoMark.Should().BeNull("a false mark takes no memo");
         log.Add(56000, MarkKind.Other, typedSoFar: "");
-        log.MemoMark.Should().Be(3);
+        log.MemoMark.Should().Be(4);
         log.CancelMemo();
         MarkFile.Read(LogPath).Should().Equal(
             new Mark(32000, MarkKind.Other, null, "half a sen"),
             new Mark(40000, MarkKind.Swallow),
+            new Mark(44000, MarkKind.Other, null, "a cou"),
             new Mark(48000, MarkKind.False),
             new Mark(56000, MarkKind.Other));
     }
