@@ -16,7 +16,7 @@ messages and decision records are in Japanese.
 
 | Path | Contents |
 |---|---|
-| `analysis/` | the scripts, their tests, the mel matrices, `models/m4-0038.npz` (the M4 model), `models/m4-f200.npz`, `models/m4-f500.npz`, `models/m4-ms.npz` and `models/m4-heater-w10.npz` (experimental variants) |
+| `analysis/` | the scripts, their tests, the mel matrices, `models/m4-0038.npz` (the M4 model), `models/m4-f200.npz`, `models/m4-f500.npz`, `models/m4-ms.npz`, `models/m4-heater-w10.npz`, `models/m4-shift-d2e20.npz` and `models/m4-shift-d2e10.npz` (experimental variants) |
 | `tools/throat_check.py` | reading and checking a throat-microphone session (used by `analysis/features.py`) |
 | `docs/` | evaluation rules (`evaluation.md`), session format (`data-schema.md`), recording protocol, the decision records the code checks or implements (`decisions/`), the markers of the one-time evaluation-side scoring (`log/`) |
 | `data/` | the recordings (not in Git) |
@@ -59,7 +59,7 @@ starts a child interpreter with `-I`, which still writes
 
 ```
 cd model
-.venv/bin/python -B -m unittest discover -s analysis   # 416 tests, about 2 minutes
+.venv/bin/python -B -m unittest discover -s analysis   # 428 tests, about 2 minutes
 .venv/bin/python -B -m unittest discover -s tools      # 10 tests
 ```
 
@@ -237,6 +237,49 @@ of the constants `ALPHA`, `MARGIN`, `LIMIT`, `SPREAD`, `WARMUP`, `QUANT_STEP`,
   training data): swallows found, false indications, the mean probability
   of the positive windows, and the change of their 500-4000 Hz energy by
   the front-end (mean and lowest, dB). About 1 minute per case.
+
+### Shift augmentation and grid sensitivity
+
+`analysis/m4_shift.py` (through `m4_variant.py`) trains the CNN on windows
+off the 0.25 s grid and measures how much a model depends on where the
+grid falls relative to a swallow.
+
+```
+.venv/bin/python -B analysis/m4_variant.py data/raw --set mfe40 --cv --grid-cv --shift random:4
+.venv/bin/python -B analysis/m4_variant.py data/raw --set mfe40 --shift random:4 --final-model analysis/models/m4-shift-r4e20.npz
+.venv/bin/python -B analysis/m4_variant.py data/raw --grid analysis/models/m4-0038.npz --test $R [--test ...] [--grid-train]
+```
+
+- `--shift dense:K[:E]`: the training windows are those at the offsets
+  `0.25 s * p / K` (`p = 0 .. K-1`, `K` one of 1, 2, 4, 5, 8, 10) of the
+  grid, every offset once per epoch, for `E` epochs (default 20; `E = 20 / K`
+  keeps the plain fit's number of optimizer steps). `--shift random:K[:E]`:
+  per epoch one offset per grid position, drawn uniformly among that
+  position's usable offsets (the plain number of windows and steps per
+  epoch). Each window is labelled by the rule above applied to its own
+  centre. Network, optimiser (Adam 1e-3), batch 64 and the per-band
+  normalisation (from the 0.25 s grid's windows) are those of
+  `compare.cnn_fit`; the positive weight is negatives / positives over the
+  usable shifted windows. `dense:1` is `compare.cnn_fit` exactly. Validation
+  and scoring stay on the 0.25 s grid. With `--shift`, `--set mfe40
+  --final-model` is allowed; the model's config is the unchanged 0038 line
+  (it loads in AudioStudio as it is), so the augmentation is named by the
+  file name (`m4-shift-<name>.npz`) and the report only.
+- `--grid-cv` (with `--cv`): each fold's models (mean of the seeds) score
+  their validation sessions at window positions every 25 ms. Per swallow:
+  the highest probability of the windows whose centre is in `[t - 0.5,
+  t + 1.5]`, the span (positions there with p >= 0.85, times 25 ms) and in
+  how many of the 10 grid phases the post-processing (run over the whole
+  stream of that phase) finds it. Printed as aggregates (median and 10th
+  percentile of the span, share below 250 ms, share found in all 10 phases,
+  detection averaged over the phases), with the fraction of the windows
+  outside the swallows at or above 0.85 and the false indications per
+  minute averaged over the phases; all, meals, condition sessions.
+- `--grid M.npz ...` (no training): the same over the `--test` recordings
+  (whole recordings; per swallow, plus the indications inside the touches
+  of `sync_touches`), and with `--grid-train` over the training-side
+  sessions (in-sample for a model trained on them). The probabilities
+  come from PyTorch's forward of the saved weights.
 
 ## The evaluation side
 

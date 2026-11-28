@@ -247,11 +247,13 @@ def _load_recordings(specs, feature_set):
 
 
 def cv(root: Path, feature_set: str, fit=None, score=None, loader=None,
-       extras=(), tests=(), extra_weight: float = 1.0):
+       extras=(), tests=(), extra_weight: float = 1.0, fold_models=None):
     """The C4 x P2 cross-validation of m4_compare.run for one CNN set.
     extras (studio.Recording) join the training side of every fold (never
     the validation side; the folds stay those of the training-side
     sessions); tests (studio.Recording) are scored by each fold's models.
+    fold_models (a dict), if given, receives fold -> {"val": [names],
+    "models": {seed: model}} (m4_shift's cross-validated grid check).
     Returns (report lines, {"fixed": M4Row, "grid": M4Row})."""
     cfg = parse_config(variant_config(feature_set))
     t_all = time.perf_counter()
@@ -275,6 +277,10 @@ def cv(root: Path, feature_set: str, fit=None, score=None, loader=None,
                 f"{', '.join(sorted(vn))}、種 {seed}）"
             )
             m = trainer.plain(rest, seed, where)
+            if fold_models is not None:
+                fold_models.setdefault(
+                    gname, {"val": sorted(vn), "models": {}}
+                )["models"][seed] = m
             if gname not in folds:
                 folds.append(gname)
             scored.extend(trainer.scored(m, d, "外側") for d in val)
@@ -355,11 +361,13 @@ def cv(root: Path, feature_set: str, fit=None, score=None, loader=None,
 
 
 def final(root: Path, feature_set: str, out: Path, fit=None, score=None,
-          loader=None, extras=(), extra_weight: float = 1.0) -> list:
+          loader=None, extras=(), extra_weight: float = 1.0,
+          shift=None) -> list:
     """m4_compare.train_final with the variant's configuration; extras
-    (studio.Recording) are added to the training sessions."""
+    (studio.Recording) are added to the training sessions; shift
+    (m4_shift.ShiftSpec) names the training windows of fit."""
     x_data = [r.data for r in extras]
-    if feature_set == CNN_SET and not x_data:
+    if feature_set == CNN_SET and not x_data and shift is None:
         raise SystemExit(
             "mfe40 の最終モデルは m4_compare.py --final-model で作ります"
         )
@@ -379,6 +387,8 @@ def final(root: Path, feature_set: str, out: Path, fit=None, score=None,
         load,
     )
     out_lines = [f"## Final model, set={feature_set} (experimental)", ""]
+    if shift is not None:
+        out_lines.append(f"- training windows: {shift.describe()}")
     if x_data:
         out_lines.append(
             f"- extra training recordings: {', '.join(d.name for d in x_data)} "
@@ -843,11 +853,48 @@ def main(argv: Sequence[str] | None = None) -> None:
              "mains_spike constants (\"current\" = unchanged); repeatable; "
              "default one case with the current constants",
     )
+    ap.add_argument(
+        "--shift", help="training windows off the 0.25 s grid (m4_shift.py): "
+                        "dense:K[:E] or random:K[:E]",
+    )
+    ap.add_argument(
+        "--grid", type=Path, nargs="+",
+        help="grid sensitivity of these models over the --test recordings "
+             "(no training)",
+    )
+    ap.add_argument(
+        "--grid-train", action="store_true",
+        help="with --grid: also over the training-side sessions (in-sample)",
+    )
+    ap.add_argument(
+        "--grid-cv", action="store_true",
+        help="with --cv: grid sensitivity of each fold's models over its "
+             "validation sessions",
+    )
     ap.add_argument("--allow-dirty", action="store_true")
     a = ap.parse_args(argv)
-    if a.front_param is not None and a.front is None:
+    shift = None
+    if a.shift is not None:
+        import m4_shift
+
+        try:
+            shift = m4_shift.parse_shift(a.shift)
+        except ValueError as e:
+            ap.error(str(e))
+        if not a.set or not (a.cv or a.final_model) or a.extra_weight != 1.0:
+            ap.error("--shift は --set と --cv / --final-model と使う（--extra-weight なし）")
+    if a.grid_cv and not a.cv:
+        ap.error("--grid-cv は --cv と一緒に使う")
+    if a.grid_train and a.grid is None:
+        ap.error("--grid-train は --grid と一緒に使う")
+    if a.grid is not None:
+        if a.set or a.cv or a.final_model or a.extra or a.models or a.hum or a.front:
+            ap.error("--grid は --test・--grid-train とだけ使う")
+        if not a.test and not a.grid_train:
+            ap.error("--grid には --test か --grid-train が要る")
+    elif a.front_param is not None and a.front is None:
         ap.error("--front-param は --front と一緒に使う")
-    if a.front is not None:
+    elif a.front is not None:
         if a.set or a.cv or a.final_model or a.extra or a.models or a.hum:
             ap.error("--front は --test（と --front-param）とだけ使う")
         try:
@@ -862,7 +909,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             ap.error("--models は --test と一緒に、学習なしで使う")
     elif not a.set or not (a.cv or a.final_model):
         ap.error("--set と、--cv か --final-model（または --hum、--models）が要る")
-    elif a.set == CNN_SET and a.final_model and not a.extra:
+    elif a.set == CNN_SET and a.final_model and not a.extra and shift is None:
         ap.error("mfe40 の最終モデルは m4_compare.py --final-model で作る")
     if a.extra_weight <= 0:
         ap.error("--extra-weight > 0")
@@ -880,20 +927,41 @@ def main(argv: Sequence[str] | None = None) -> None:
     if a.models is not None:
         print("\n" + "\n".join(score_models(a.models, a.test)), flush=True)
         return
+    if a.grid is not None:
+        import m4_shift
+
+        print("\n" + "\n".join(m4_shift.grid_models(
+            a.root, a.grid, a.test, a.grid_train, mc.list_train, mc.is_meal
+        )), flush=True)
+        return
     print(f"- config: `{variant_config(a.set)}`")
     extras = _load_recordings(a.extra, a.set)
     tests = _load_recordings(a.test, a.set)
     loader = cached_loader(_loader(a.set))
+    fit = None
+    if shift is not None:
+        names = mc.list_train(a.root).train
+        grid_data, _, _ = loader(a.root, names)
+        store = m4_shift.build_store(a.root, names, a.set, shift)
+        fit = m4_shift.shift_fit(store)
+        print("\n".join(m4_shift.store_lines(store, grid_data)), flush=True)
     if a.cv:
+        fold_models = {} if a.grid_cv else None
         lines, _ = cv(
-            a.root, a.set, loader=loader, extras=extras, tests=tests,
-            extra_weight=a.extra_weight,
+            a.root, a.set, fit=fit, loader=loader, extras=extras, tests=tests,
+            extra_weight=a.extra_weight, fold_models=fold_models,
         )
         print("\n" + "\n".join(lines), flush=True)
+        if a.grid_cv:
+            import m4_shift
+
+            print("\n" + "\n".join(m4_shift.cv_grid_lines(
+                a.root, a.set, fold_models, shift
+            )), flush=True)
     if a.final_model:
         print("\n" + "\n".join(final(
-            a.root, a.set, a.final_model, loader=loader, extras=extras,
-            extra_weight=a.extra_weight,
+            a.root, a.set, a.final_model, fit=fit, loader=loader, extras=extras,
+            extra_weight=a.extra_weight, shift=shift,
         )), flush=True)
         if tests:
             print("\n" + "\n".join(score_models([a.final_model], a.test)))

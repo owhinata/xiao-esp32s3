@@ -45,6 +45,7 @@ leave the mains hum below their lower edge out. The recorded M4 configuration, i
 | File | What |
 |---|---|
 | `analysis/m4_variant.py` | The experimental entry point: the C4 x P2 cross-validation (`--cv`) and the final model (`--final-model`) of a variant with the otherwise identical 0038 configuration on the training side only, and the hum sensitivity check (`--hum`); `--allow-dirty`; AudioStudio recordings as extra training data (`--extra`, `--extra-weight`) and as scored recordings (`--test`, `--models`); the front-end check of `mains_spike.py` before an unchanged mfe40 model (`--front`, `--front-param`) |
+| `analysis/m4_shift.py`, `analysis/test_m4_shift.py` | shift augmentation of the training windows (`m4_variant.py --shift`) and the grid sensitivity check (`--grid`, `--grid-train`, `--grid-cv`); tests on synthetic data. `m4_variant.py` got the options, `cv(fold_models=)` and `final(shift=)` |
 | `analysis/studio.py`, `analysis/test_studio.py` | AudioStudio recordings (16 kHz WAV + marks) as sessions, labels by the application's reading of the marks; tests |
 | `analysis/mains_spike.py`, `analysis/test_mains_spike.py` | the front-end of the set `mfe40ms` (mains-synchronous burst limiter, bounded by the expected burst); tests on synthetic signals |
 | `analysis/test_m4_variant.py` | its tests (synthetic data) |
