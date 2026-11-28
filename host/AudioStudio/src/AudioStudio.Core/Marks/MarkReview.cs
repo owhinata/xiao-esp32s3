@@ -24,7 +24,8 @@ public sealed record MarkReviewResult(IReadOnlyList<ReviewedIndication> Indicati
 /// <summary>
 /// Reads the marks as the user's notes: an indication counts as a swallow
 /// unless the user marked it wrong; the user marks <c>swallow</c> only for
-/// a swallow the detector did not indicate.
+/// a swallow the detector did not indicate. <c>other</c> marks and setup
+/// rows are not read.
 /// <list type="bullet">
 /// <item>A <c>false</c> mark refers to the latest indication that starts at or
 /// before it and that no earlier <c>false</c> mark took; without one it is an

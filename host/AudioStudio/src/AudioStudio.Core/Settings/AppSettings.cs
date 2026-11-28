@@ -28,7 +28,16 @@ public sealed class AppSettings
     /// <summary>The ssh program; empty for <c>ssh</c> on the PATH. The environment variable AUDIOSTUDIO_SSH overrides it.</summary>
     public string SshPath { get; set; } = "";
     public string RecordingsDirectory { get; set; } = "";
-    public string RecordingLabel { get; set; } = "";
+    /// <summary>The tag a recording's file name ends with: <c>yyyyMMdd-HHmmss_&lt;tag&gt;.wav</c>.</summary>
+    public string RecordingTag { get; set; } = "";
+    /// <summary>
+    /// The tag of a settings file written while it was saved as
+    /// <c>RecordingLabel</c>: read once as <see cref="RecordingTag"/> when
+    /// that is empty, and not written again.
+    /// </summary>
+    [JsonPropertyName("RecordingLabel")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FormerRecordingLabel { get; set; }
     public double ShellPaneHeight { get; set; } = 190;
     public bool ShellPaneVisible { get; set; } = true;
     public double SpanSeconds { get; set; } = 5;
@@ -70,6 +79,11 @@ public sealed class AppSettings
             settings.Addresses.TryAdd(TargetProfile.DefaultName, settings.FormerBoardAddress);
         }
         settings.FormerBoardAddress = null;
+        if (settings.FormerRecordingLabel is string label && settings.RecordingTag.Length == 0)
+        {
+            settings.RecordingTag = label;
+        }
+        settings.FormerRecordingLabel = null;
         return settings;
     }
 

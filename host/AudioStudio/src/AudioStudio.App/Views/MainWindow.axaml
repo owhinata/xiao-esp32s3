@@ -93,8 +93,8 @@
           <controls:StateButton Content="Record" IsChecked="{Binding IsRecording, Mode=OneWay}"
                         Command="{Binding ToggleRecordCommand}"
                         ToolTip.Tip="Record the live stream to a WAV file in the recordings directory" />
-          <TextBox Width="120" Watermark="label" Text="{Binding RecordingLabel}" IsEnabled="{Binding !IsRecording}"
-                   ToolTip.Tip="Goes into the file name: yyyyMMdd-HHmmss_label.wav" />
+          <TextBox Width="120" Watermark="tag" Text="{Binding RecordingTag}" IsEnabled="{Binding !IsRecording}"
+                   ToolTip.Tip="A tag for the file name: yyyyMMdd-HHmmss_tag.wav" />
           <TextBlock Classes="label" Text="{Binding RecordingText}" FontFamily="monospace" FontSize="12" />
           <!-- Marks: the time is the moment of the press; the shortcuts work while no text box has the focus -->
           <Button Content="Swallow (1)" Command="{Binding MarkSwallowCommand}" IsEnabled="{Binding IsRecording}"

@@ -59,7 +59,7 @@ starts a child interpreter with `-I`, which still writes
 
 ```
 cd model
-.venv/bin/python -B -m unittest discover -s analysis   # 428 tests, about 2 minutes
+.venv/bin/python -B -m unittest discover -s analysis   # 429 tests, about 2 minutes
 .venv/bin/python -B -m unittest discover -s tools      # 10 tests
 ```
 
@@ -149,7 +149,8 @@ WAV and its `<name>.marks.csv`) as a session. Copy the recording's two
 files into `data/studio/<name>/` (not in Git). Labels follow the
 application's reading of the marks (`MarkReview.cs`): an indication without
 a `false` mark, and every `swallow` mark, is a swallow (a `swallow` mark
-near a hit is the same swallow); the window labels are those of a
+near a hit is the same swallow); `other` marks and `setup` rows (the
+detector setup the application ran) give no label; the window labels are those of a
 throat-microphone session. Windows are 1.0 s every 0.25 s from the start of
 the range, all inside it; the features come from the 16 kHz samples (no
 48 kHz step). A spec `DIR@A:B` takes only the seconds `[A, B)`.

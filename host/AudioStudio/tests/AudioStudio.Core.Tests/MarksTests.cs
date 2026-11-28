@@ -169,6 +169,49 @@ public sealed class MarksTests : IDisposable
         File.Exists(Path.Combine(_dir, "none.marks.csv")).Should().BeFalse();
     }
 
+    [Fact]
+    public void A_setup_row_is_written_at_once_and_only_when_the_setup_changes()
+    {
+        MarkLog log = new(LogPath, Rate);
+        string a = DetectorSetup.Format("/x/models/m4-0038.npz", false, 50);
+        log.AddSetup(0, a).Should().Be(0);
+        MarkFile.Read(LogPath).Should().Equal(new Mark(0, MarkKind.Setup, null, "model=m4-0038.npz spike_filter=off mains=50"));
+        log.AddSetup(16000, a).Should().BeNull("nothing changed");
+        log.Add(20000, MarkKind.Other);
+        log.AddSetup(24000, DetectorSetup.Format(null, true, 60)).Should().Be(2);
+        log.MemoMark.Should().Be(1, "a setup row leaves the memo open");
+        log.AddSetup(24000, a).Should().Be(3);
+        log.Finish("typed");
+        MarkFile.Read(LogPath).Should().Equal(
+            new Mark(0, MarkKind.Setup, null, "model=m4-0038.npz spike_filter=off mains=50"),
+            new Mark(20000, MarkKind.Other, null, "typed"),
+            new Mark(24000, MarkKind.Setup, null, "model=- spike_filter=on mains=60"),
+            new Mark(24000, MarkKind.Setup, null, "model=m4-0038.npz spike_filter=off mains=50"));
+        File.ReadAllText(LogPath).Should().Contain("\n0,0.000,setup,,model=m4-0038.npz spike_filter=off mains=50\n");
+        log.Invoking(l => l.Add(1, MarkKind.Setup)).Should().Throw<ArgumentException>();
+    }
+
+    [Fact]
+    public void The_setup_text_escapes_what_would_split_a_field()
+    {
+        DetectorSetup.Format("/a b/my model=2%.npz", true, 50)
+            .Should().Be("model=my%20model%3D2%25.npz spike_filter=on mains=50");
+        DetectorSetup.Format("m4,ä\tx.onnx", false, 50).Should().Be("model=m4,ä%09x.onnx spike_filter=off mains=50");
+        // A comma in the file name is quoted by the CSV and read back.
+        string setup = DetectorSetup.Format("m4,x.npz", false, 50);
+        MarkFile.Parse(MarkFile.Format([new Mark(0, MarkKind.Setup, null, setup)], Rate)).Single().Text.Should().Be(setup);
+    }
+
+    [Fact]
+    public void Setup_rows_are_not_counted()
+    {
+        Mark setup = new(Rate, MarkKind.Setup, null, "model=- spike_filter=off mains=50");
+        MarkReviewResult r = MarkReview.Review([setup, I(1), setup, F(2), S(10), setup], Rate);
+        r.Indications.Single().MarkedFalse.Should().Be(F(2));
+        r.MissedSwallows.Should().Equal(S(10));
+        r.UnattachedFalse.Should().BeEmpty();
+    }
+
     private static M4Window W(long k, double p, bool positive, bool rise) =>
         new(k * M4Model.HopSamples, new M4Step(k, p, true, positive, positive ? LedStepper.Green : LedStepper.Yellow), rise, false);
 

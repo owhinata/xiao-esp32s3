@@ -123,6 +123,49 @@ public sealed class MarkEditorTests : IDisposable
         File.ReadAllText(FilePath).Should().Be(before);
     }
 
+    private static readonly Mark[] s_withSetup =
+    [
+        new(0, MarkKind.Setup, null, "model=m4-0038.npz spike_filter=off mains=50"),
+        new(16000, MarkKind.Indication, 0.9),
+        new(48000, MarkKind.Setup, null, "model=- spike_filter=off mains=50"),
+        new(48000, MarkKind.Setup, null, "model=m4-f200.npz spike_filter=on mains=50"),
+        new(80000, MarkKind.Indication, 0.8),
+    ];
+
+    [Fact]
+    public void A_setup_row_is_not_edited_moved_deleted_or_added()
+    {
+        MarkFile.Write(FilePath, s_withSetup, Rate);
+        MarkEditor editor = new(FilePath, Rate, MarkFile.Read(FilePath));
+        string before = File.ReadAllText(FilePath);
+        editor.Invoking(e => e.Edit(0, MarkKind.Other, "x")).Should().Throw<InvalidOperationException>();
+        editor.Invoking(e => e.Edit(0, MarkKind.Setup, "model=-")).Should().Throw<InvalidOperationException>();
+        editor.Invoking(e => e.Move(2, 20000)).Should().Throw<InvalidOperationException>();
+        editor.Invoking(e => e.Delete(3)).Should().Throw<InvalidOperationException>();
+        editor.Invoking(e => e.Add(1000, MarkKind.Setup, "model=-")).Should().Throw<ArgumentException>();
+        editor.Invoking(e => e.MarkWrong(0)).Should().Throw<InvalidOperationException>();
+        editor.Marks.Should().Equal(s_withSetup);
+        File.ReadAllText(FilePath).Should().Be(before);
+    }
+
+    [Fact]
+    public void Setup_rows_survive_every_change_in_their_order()
+    {
+        MarkFile.Write(FilePath, s_withSetup, Rate);
+        MarkEditor editor = new(FilePath, Rate, MarkFile.Read(FilePath));
+        int swallow = editor.Add(48000, MarkKind.Swallow)!.Value;
+        swallow.Should().Be(4, "after the rows at the same sample");
+        editor.Edit(swallow, MarkKind.Other, "a, b").Should().BeTrue();
+        int moved = editor.Move(swallow, 0)!.Value;
+        moved.Should().Be(1, "after the setup row at sample 0");
+        int f = editor.MarkWrong(2)!.Value;
+        editor.Delete(moved).Should().BeTrue();
+        editor.Delete(f - 1).Should().BeTrue();
+        OnDisk().Should().Equal(s_withSetup);
+        editor.Marks.Should().Equal(s_withSetup);
+        File.Exists(FilePath).Should().BeTrue("setup rows are left");
+    }
+
     [Fact]
     public void Mark_wrong_adds_a_false_mark_that_the_review_attaches_to_the_indication()
     {

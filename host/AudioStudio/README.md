@@ -47,10 +47,11 @@ Arguments (all optional):
 | `--mains <50\|60>` | The mains frequency the spike filter follows (otherwise as last time; 50 at first) |
 
 The target, the address of each target, the view settings, the recording
-label, the model and its settings, the spike filter and its mains frequency
+tag, the model and its settings, the spike filter and its mains frequency
 (`SpikeFilter`, `MainsHz`; the frequency has no control in the window), and
 the height of the shell pane are saved to `~/.config/AudioStudio/settings.json` on exit (the `BoardAddress` of
-an older settings file is taken as the XIAO's address). Three settings exist
+an older settings file is taken as the XIAO's address, its `RecordingLabel`
+as the recording tag, `RecordingTag`). Three settings exist
 only there: `RecordingsDirectory` (empty: `host/AudioStudio/recordings/` for
 a build inside the repository, `~/AudioStudio/recordings/` otherwise),
 `RepositoryDirectory` (where to find `build/xiao_esp32s3_threadx.bin`; empty:
@@ -226,7 +227,7 @@ python3 -B -m unittest discover -s tools/unoq -p 'test_*.py'
    Drag the bar above the shell pane to change its height; **Shell pane** at
    the bottom right hides and shows it.
 4. **Record** writes the live stream to a WAV file until it is pressed again
-   (see "Recordings" below). The text in **label** goes into the file name.
+   (see "Recordings" below). The text in **tag** goes into the file name.
    Recording goes on whatever the views show. While recording, **Swallow
    (1)**, **Wrong (2)** and **Other (3)** leave marks in the recording
    (see "Marks" below).
@@ -482,7 +483,7 @@ that fulfils the contract (energy and slope of the signal; classes
 ### Recordings
 
 - Format: WAV, 16-bit PCM, mono, at the stream's rate (16000 Hz).
-- Name: `yyyyMMdd-HHmmss.wav`, or `yyyyMMdd-HHmmss_<label>.wav` with a label
+- Name: `yyyyMMdd-HHmmss.wav`, or `yyyyMMdd-HHmmss_<tag>.wav` with a tag
   (letters, digits, `.`, `-` and `_` are kept; anything else becomes `-`).
   An existing name gets `-2`, `-3`, ... appended.
 - Lost samples are written as zeros, so the file keeps the stream's timing
@@ -503,7 +504,7 @@ While recording, the user leaves marks: timed notes beside the WAV file.
 
 - The buttons are enabled only while recording. The keys work while the
   window has the focus and no text box has it (shell input, address,
-  label, memo, volume); with a text box focused they do nothing.
+  tag, memo, volume); with a text box focused they do nothing.
 - A mark's time is the moment of the key press or click: the number of
   samples written to the WAV file at that moment (the samples arrive in
   blocks, and the stream's delay to the PC is not taken off).
@@ -520,27 +521,50 @@ While recording, the user leaves marks: timed notes beside the WAV file.
   positive window, as the list of indications shows it), with the highest
   probability of its positive windows, so the notes can be read against
   what was shown. They are the indications of the detector as it ran, so
-  they depend on the model and on the **Spike filter** switch at the time;
-  the file does not say which were used. Switching either during a
+  they depend on the model and on the **Spike filter** switch at the time
+  (the `setup` rows below say which). Switching either during a
   recording ends an open indication there. An indication that started before the recording is left
   out. Only the M4 detector gives indications; with an ONNX model no
   `indication` rows are written (its classes have no indication).
+- The detector setup is kept as well: kind `setup`, a row at the start of
+  the recording and one each time the setup changes during it (a model
+  loaded, replaced or unloaded, a model that failed to load, **Spike
+  filter** switched), at the samples written at that moment (as for a
+  user's mark); a change that leaves the setup as it was writes no row.
+  The text is one line of space-separated `key=value` fields, always these
+  three in this order:
+
+  ```
+  model=m4-0038.npz spike_filter=on mains=50
+  ```
+
+  `model` is the file name of the model loaded (no directory), `-` when
+  none is; in it `%`, `=`, white space and control characters are written
+  as `%XX` of their UTF-8 bytes, so no value holds a space. `spike_filter`
+  is the switch (`on`, `off`; it acts on the M4 detector only) and `mains`
+  the mains frequency in Hz that the filter follows (written also while it
+  is off). The indications from a `setup` row up to the next one are those
+  of its setup; the new detector starts at the newest complete window, so
+  its first indication can lie a little before the row (an indication's
+  time is the centre of a window that was already complete).
 - **On disk at once**: each mark is written when it is made, without its
   text; the text follows when it is stored. Each time, the whole file is
   written to `<name>.marks.csv.tmp`, flushed to the disk and renamed over
   `<name>.marks.csv`, so the file is always complete and sorted, also when
   the application ends abnormally (an indication is written when it starts
-  and again, with its highest probability, when it ends). A recording with
-  neither marks nor indications has no marks file.
+  and again, with its highest probability, when it ends). With the `setup`
+  row at its start, every recording has a marks file.
 - The file: `<name>.marks.csv` beside `<name>.wav`, UTF-8, the header line
   and one row per mark sorted by the sample index. Columns: the sample
   index in the WAV file, the time in seconds (3 decimals; the sample index is
   what counts when the file is read), the kind, the probability (4
   decimals; only for `indication`) and the text (CSV quoting when it holds a
-  comma, a quote or a line break):
+  comma, a quote or a line break). Rows at the same sample index keep the
+  order they were written in:
 
   ```csv
   sample,seconds,kind,probability,text
+  0,0.000,setup,,model=m4-0038.npz spike_filter=off mains=50
   16000,1.000,swallow,,
   52000,3.250,indication,0.9731,
   60800,3.800,false,,"coughed, did not swallow"
@@ -550,10 +574,11 @@ While recording, the user leaves marks: timed notes beside the WAV file.
   show each mark as a dashed vertical line across the waveform, the
   spectrogram and the model's strip, coloured by kind, with its letter at the
   top (S `swallow` magenta, F `false` red, O `other` white, I `indication`
-  green). During a recording the live view shows them the same way. The
-  **Marks** section on the right lists them (time, kind, probability,
-  "marked wrong" for an indication with a `false` mark, text); clicking one
-  moves the view of a file there.
+  green); `setup` rows have no line. During a recording the live view shows
+  them the same way. The **Marks** section on the right lists all rows,
+  `setup` rows too (time, kind, probability, "marked wrong" for an
+  indication with a `false` mark, text); clicking one moves the view of a
+  file there.
 - **Counts**: the **Marks** section also counts the marks as the user's
   notes about the indications (they are notes about the indications, not a
   medical judgement):
@@ -570,7 +595,7 @@ While recording, the user leaves marks: timed notes beside the WAV file.
     otherwise it is a **missed swallow**.
 
   The pairing is derived when the marks are read; the file holds only the
-  rows above.
+  rows above. `other` marks and `setup` rows are not counted.
 
 #### Editing the marks of a file
 
@@ -597,6 +622,10 @@ picked.
   pairing above attaches it to that indication, and selects it with the
   focus in the text box for an optional text. When the indication has a
   `false` mark already, **Mark wrong** selects that one instead.
+- A selected `setup` row (from the list) is shown, not changed: like an
+  indication it is not edited, moved or deleted, and none is added by hand.
+  Every write of the file keeps the `setup` rows as they are, in their
+  order.
 - With a position picked, **Swallow (1)**, **Wrong (2)** and **Other (3)**
   under the editor add a mark there; the keys 1, 2 and 3 do the same when
   no text box is focused and no recording is in progress (during a
@@ -604,8 +633,9 @@ picked.
   `false` and `other` the text box takes the focus.
 - Every change is written at once, the whole file sorted, the same way as
   during a recording (temporary file, flush, rename). A WAV file without a
-  marks file gets one with its first mark; when the last mark is deleted,
-  the marks file is removed. A change that cannot be written is not made:
+  marks file gets one with its first mark; when the last row is deleted
+  (only in a file without indications and `setup` rows), the marks file
+  is removed. A change that cannot be written is not made:
   the status message says so, and the list stays as the file on disk. The
   list and the counts follow each change.
 
@@ -639,11 +669,11 @@ firmware.
 
 | Path | Role |
 | --- | --- |
-| `src/AudioStudio.Core` | The target profiles (`Targets/`), the audio stream protocol, its sources (TCP, a command over ssh) and client, the ssh connection (`Ssh/`), the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, the spike filter before it, and its runner), the OTA client, the shell (Telnet or ssh), the reading of the board's state as its profile describes it, board discovery, the settings, the marks of a recording (`Marks/`: the file, the log written as marks come, the live-to-WAV timeline, the indications of the detector, the counts, the editing of an opened file's marks) |
+| `src/AudioStudio.Core` | The target profiles (`Targets/`), the audio stream protocol, its sources (TCP, a command over ssh) and client, the ssh connection (`Ssh/`), the live ring and WAV files, the spectrogram (FFT) and levels, the ONNX model contract and its runner, the M4 swallow detector (the `.npy` / `.npz` reader, features, CNN, post-processing, LED, the spike filter before it, and its runner), the OTA client, the shell (Telnet or ssh), the reading of the board's state as its profile describes it, board discovery, the settings, the marks of a recording (`Marks/`: the file, the log written as marks come, the live-to-WAV timeline, the indications of the detector, the text of the detector setup, the counts, the editing of an opened file's marks) |
 | `src/AudioStudio.App` | The Avalonia user interface (MVVM): the waveform, spectrogram, class strip, probability trace and marks controls, the view model, the window |
 | `models/` | The M4 swallow detector's weights and mel matrix |
 | `targets/` | The target profiles: `xiao-esp32s3.json`, `unoq.json` |
-| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host, microphone, volume and mute, hum filter and high-pass filter with the XIAO's profile, the profiles and their checks, the ssh transport with a fake ssh (the stream, exit code 75, a refused key, the shell and its queries, no process left behind), the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams, the spike filter and the detector behind it against the Python front-end's values (file and live, the stream's samples unchanged), the marks (file round trip and quoting, sorting, the time and sample index, a mark during memo entry, indications with their highest probability, the counts, editing a file's marks: add, edit, move, delete, mark wrong, the indications kept, the file removed with the last mark, a write that fails) |
+| `tests/AudioStudio.Core.Tests` | xUnit tests: the stream parser (every split point), the client against a stand-in server, WAV writing and reading, the FFT and the spectrogram's levels and axis, the OTA client against a stand-in of the board's OTA service, the Telnet prompt handling and the quiet queries, the parsing of the board's replies on its USB host, microphone, volume and mute, hum filter and high-pass filter with the XIAO's profile, the profiles and their checks, the ssh transport with a fake ssh (the stream, exit code 75, a refused key, the shell and its queries, no process left behind), the model contract with the test model, the M4 detector against its Python code's values (`Fixtures/`) and its windows, gaps and new streams, the spike filter and the detector behind it against the Python front-end's values (file and live, the stream's samples unchanged), the marks (file round trip and quoting, sorting, the time and sample index, a mark during memo entry, indications with their highest probability, setup rows written only on a change and their text, the counts, editing a file's marks: add, edit, move, delete, mark wrong, the indications and setup rows kept, the file removed with the last row, a write that fails), the settings (the former keys `BoardAddress` and `RecordingLabel`) |
 | `tools/` | `make_test_model.py`, `make_m4_fixtures.py`, `make_icon.py`, `install_desktop.sh` |
 | `tools/unoq/` | `audio_stream.py` (runs on the UNO Q), `deploy.sh`, `make_unoq_fixtures.py`, `test_audio_stream.py` |
 

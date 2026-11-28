@@ -8,10 +8,13 @@ namespace AudioStudio.Core.Marks;
 /// after each step. A mark is written the moment it is made, without its
 /// text; the memo typed for it afterwards is written when it is stored.
 /// Without any mark no file is written. Not thread-safe: one thread uses it.
+/// The application's rows (indications, setup rows) are added with their
+/// own methods.
 /// </summary>
 public sealed class MarkLog
 {
     private readonly List<Mark> _marks = new();
+    private string? _lastSetup;
 
     public MarkLog(string path, int sampleRate)
     {
@@ -42,9 +45,9 @@ public sealed class MarkLog
     /// </summary>
     public int Add(long sample, MarkKind kind, string typedSoFar = "")
     {
-        if (kind == MarkKind.Indication)
+        if (!MarkFile.IsUserKind(kind))
         {
-            throw new ArgumentException("An indication is added with AddIndication.", nameof(kind));
+            throw new ArgumentException("Indications and setup rows are added with AddIndication and AddSetup.", nameof(kind));
         }
         if (MemoMark is int open)
         {
@@ -87,6 +90,24 @@ public sealed class MarkLog
     public int AddIndication(long sample, double probability)
     {
         _marks.Add(new Mark(sample, MarkKind.Indication, probability));
+        Changed(save: true);
+        return _marks.Count - 1;
+    }
+
+    /// <summary>
+    /// The detector setup (<see cref="DetectorSetup"/>) from
+    /// <paramref name="sample"/> on, written at once. Nothing is added when
+    /// it is the text of the last setup row; returns the new row's handle,
+    /// or null then.
+    /// </summary>
+    public int? AddSetup(long sample, string setup)
+    {
+        if (setup == _lastSetup)
+        {
+            return null;
+        }
+        _lastSetup = setup;
+        _marks.Add(new Mark(sample, MarkKind.Setup, null, setup));
         Changed(save: true);
         return _marks.Count - 1;
     }

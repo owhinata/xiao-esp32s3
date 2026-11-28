@@ -54,6 +54,39 @@ class ReviewTest(unittest.TestCase):
         self.assertEqual(r["swallows"], [2.0])
 
 
+class SetupRowTest(unittest.TestCase):
+    def test_setup_rows_are_read_and_give_no_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            plain = d / "plain.marks.csv"
+            plain.write_text(
+                "sample,seconds,kind,probability,text\n"
+                "16000,1.000,indication,0.9000,\n"
+                "32000,2.000,false,,\n"
+                "64000,4.000,swallow,,\n",
+                encoding="utf-8",
+            )
+            setup = d / "setup.marks.csv"
+            setup.write_text(
+                "sample,seconds,kind,probability,text\n"
+                "0,0.000,setup,,model=m4-0038.npz spike_filter=off mains=50\n"
+                "16000,1.000,indication,0.9000,\n"
+                "24000,1.500,setup,,model=- spike_filter=off mains=50\n"
+                "24000,1.500,setup,,\"model=m4,x.npz spike_filter=on mains=50\"\n"
+                "32000,2.000,false,,\n"
+                "64000,4.000,swallow,,\n",
+                encoding="utf-8",
+            )
+            marks = studio.read_marks(setup)
+            self.assertEqual(
+                [k for _, k in marks],
+                ["setup", "indication", "setup", "setup", "false", "swallow"],
+            )
+            self.assertEqual(studio.review(marks), studio.review(studio.read_marks(plain)))
+            self.assertEqual(studio.review(marks)["false"], [1.0])
+            self.assertEqual(studio.review(marks)["swallows"], [4.0])
+
+
 class LoadTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

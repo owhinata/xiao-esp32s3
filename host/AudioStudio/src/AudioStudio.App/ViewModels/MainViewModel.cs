@@ -127,7 +127,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(IsHighPassOn), nameof(CanToggleHighPass), nameof(HighPassTip))]
     private HighPassState _highPass;
     [ObservableProperty] private bool _isRecording;
-    [ObservableProperty] private string _recordingLabel;
+    [ObservableProperty] private string _recordingTag;
     [ObservableProperty] private string _recordingText = "";
     /// <summary>The memo box of an <c>other</c> mark is open.</summary>
     [ObservableProperty] private bool _isMemoOpen;
@@ -256,7 +256,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _logFrequency = _settings.LogFrequency;
         _minDb = _settings.MinDb;
         _maxDb = _settings.MaxDb;
-        _recordingLabel = _settings.RecordingLabel;
+        _recordingTag = _settings.RecordingTag;
         _modelPath = _settings.ModelPath;
         _modelHop = _settings.ModelHopSamples;
         _modelWindow = _settings.ModelWindowSamples;
@@ -344,7 +344,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     partial void OnMinDbChanged(double value) => _settings.MinDb = value;
     partial void OnMaxDbChanged(double value) => _settings.MaxDb = value;
     partial void OnIsShellPaneVisibleChanged(bool value) => _settings.ShellPaneVisible = value;
-    partial void OnRecordingLabelChanged(string value) => _settings.RecordingLabel = value;
+    partial void OnRecordingTagChanged(string value) => _settings.RecordingTag = value;
 
     /// <summary>Moves the view in the file by a number of spans (the wheel), or zooms.</summary>
     public void Scroll(double spans)
@@ -1115,10 +1115,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             string directory = RecordingsDirectory;
             Directory.CreateDirectory(directory);
             string stem = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-            string label = LabelForFileName(RecordingLabel);
-            if (label.Length > 0)
+            string tag = TagForFileName(RecordingTag);
+            if (tag.Length > 0)
             {
-                stem += "_" + label;
+                stem += "_" + tag;
             }
             string path = Path.Combine(directory, stem + ".wav");
             for (int n = 2; File.Exists(path); n++)
@@ -1137,6 +1137,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _tracker = new IndicationTracker(marks, timeline);
             _trackedRunner = null;
             IsRecording = true;
+            NoteSetup();
             ShowMarks();
             Message = $"Recording to {path}" + (_stream is null ? " (the audio stream is not connected)" : "");
         }
@@ -1146,9 +1147,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    /// <summary>The label as a part of a file name: letters, digits, '.', '-' and '_'; anything else becomes '-'.</summary>
-    public static string LabelForFileName(string label) =>
-        UnsafeInName().Replace(label.Trim(), "-").Trim('-', '.');
+    /// <summary>The tag as a part of a file name: letters, digits, '.', '-' and '_'; anything else becomes '-'.</summary>
+    public static string TagForFileName(string tag) =>
+        UnsafeInName().Replace(tag.Trim(), "-").Trim('-', '.');
 
     [GeneratedRegex("[^A-Za-z0-9._-]+")]
     private static partial Regex UnsafeInName();
@@ -1292,6 +1293,29 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// The detector setup as a setup row of the recording in progress, at
+    /// the samples written so far (as a user's mark); nothing when it is the
+    /// setup of the last row.
+    /// </summary>
+    private void NoteSetup()
+    {
+        long sample;
+        lock (_recordLock)
+        {
+            if (_writer is null)
+            {
+                return;
+            }
+            sample = _writer.Samples;
+        }
+        if (_marks is MarkLog log &&
+            log.AddSetup(sample, DetectorSetup.Format(_m4?.Path ?? _model?.Path, IsSpikeFilterOn, _settings.MainsHz)) is not null)
+        {
+            ShowMarks();
+        }
+    }
+
     /// <summary>The marks to draw: their positions in the view's source, and their kinds.</summary>
     public List<(long Position, MarkKind Kind)> MarksInView()
     {
@@ -1393,7 +1417,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void ShowMarkEditor(MarkReviewResult review)
     {
         Mark? m = _editor is not null && _selectedIndex is int i ? _editor.Marks[i] : null;
-        IsUserMarkSelected = m is { Kind: not MarkKind.Indication };
+        IsUserMarkSelected = m is not null && MarkFile.IsUserKind(m.Kind);
         IsIndicationSelected = m is { Kind: MarkKind.Indication };
         HasPick = _pickedSample is not null;
         _loadingEditor = true;
@@ -1729,7 +1753,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>Loads an ONNX model (.onnx) or the M4 swallow detector (.npz with the mel matrix beside it).</summary>
     public void LoadModel(string path)
     {
-        UnloadModel();
+        DropModel();
         bool m4 = Path.GetExtension(path).Equals(".npz", StringComparison.OrdinalIgnoreCase);
         try
         {
@@ -1746,6 +1770,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         catch (Exception e) when (e is ModelContractException or IOException or UnauthorizedAccessException)
         {
             ModelText = e.Message;
+            NoteSetup();
             return;
         }
         IsM4Model = m4;
@@ -1753,11 +1778,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _settings.ModelPath = path;
         MakeLiveClassifier();
         AnalyzeFile();
+        NoteSetup();
         Message = $"Model loaded: {path}";
     }
 
     [RelayCommand]
     private void UnloadModel()
+    {
+        DropModel();
+        NoteSetup();
+    }
+
+    /// <summary>Stops and drops the model loaded and its runs; the setup row is the caller's.</summary>
+    private void DropModel()
     {
         AudioModel? model = _model;
         Task idle = ModelIdle();
@@ -1834,6 +1867,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             MakeLiveClassifier();
             AnalyzeFile();
         }
+        NoteSetup();
         Message = IsSpikeFilterOn
             ? string.Create(CultureInfo.InvariantCulture, $"Spike filter on ({_settings.MainsHz:0} Hz mains) before the swallow detector")
             : "Spike filter off";

@@ -4,7 +4,9 @@
 A recording is a directory under data/studio/ holding one 16 kHz mono 16-bit
 WAV file <name>.wav and, beside it, <name>.marks.csv (host/AudioStudio
 README, "Marks": rows sample,seconds,kind,probability,text). Copy it there
-from host/AudioStudio/recordings/; data/ is not in Git.
+from host/AudioStudio/recordings/; data/ is not in Git. Rows of kind `setup`
+(the detector setup the application ran, in the text) and `other` are read
+but give no label.
 
 Labels follow the application's reading of the marks (MarkReview.cs):
   - a `false` mark refers to the latest indication that starts at or before
@@ -43,7 +45,7 @@ HOP_SAMPLES = int(round(evaluate.HOP_S * SR))  # 4000
 WINDOW_SAMPLES = features.WINDOW_SAMPLES  # 16000
 SWALLOW_BEFORE_S = 2.0  # MarkReview.SwallowBefore
 SWALLOW_AFTER_S = 3.0  # MarkReview.SwallowAfter
-KINDS = ("swallow", "false", "other", "indication")
+KINDS = ("swallow", "false", "other", "indication", "setup")
 
 
 @dataclass(frozen=True)

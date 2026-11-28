@@ -10,7 +10,8 @@ namespace AudioStudio.App.Controls;
 /// <summary>
 /// The marks of a recording over the views: a thin vertical line per mark
 /// from the top to the bottom, coloured by kind, with the kind's letter at
-/// the top (S swallow, F false, O other, I indication). The selected mark
+/// the top (S swallow, F false, O other, I indication); setup rows are not
+/// drawn and not hit (the list of marks shows them). The selected mark
 /// is drawn solid and thicker with its letter in a box, the picked
 /// position as a solid yellow line. It lies over the other views and takes
 /// no input (the window turns clicks into marks and positions with
@@ -77,8 +78,8 @@ public sealed class MarksControl : Control
         double nearest = tolerance;
         for (int i = 0; i < _marks.Count; i++)
         {
-            long position = _marks[i].Position;
-            if (position < _from || position > _to)
+            (long position, MarkKind kind) = _marks[i];
+            if (kind == MarkKind.Setup || position < _from || position > _to)
             {
                 continue;
             }
@@ -116,7 +117,7 @@ public sealed class MarksControl : Control
             for (int i = 0; i < _marks.Count; i++)
             {
                 (long position, MarkKind kind) = _marks[i];
-                if (position < _from || position > _to)
+                if (kind == MarkKind.Setup || position < _from || position > _to)
                 {
                     continue;
                 }

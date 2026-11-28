@@ -14,11 +14,14 @@ public enum MarkKind
     Other,
     /// <summary>A swallow indication of the detector, at its start, with its highest probability.</summary>
     Indication,
+    /// <summary>The detector setup from here on, as <see cref="DetectorSetup"/> writes it in the text.</summary>
+    Setup,
 }
 
 /// <summary>One timed note of a recording.</summary>
 /// <param name="Sample">The sample index in the WAV file.</param>
 /// <param name="Probability">The indication's highest probability; null for the other kinds.</param>
+/// <param name="Text">The user's text; for a setup row the setup.</param>
 public sealed record Mark(long Sample, MarkKind Kind, double? Probability = null, string Text = "")
 {
     public double Seconds(int sampleRate) => Sample / (double)sampleRate;
@@ -32,7 +35,7 @@ public sealed class MarkFileException(string message) : Exception(message);
 /// UTF-8, the header line <see cref="Header"/> and one row per mark sorted by
 /// the sample index: sample, seconds (3 decimals), kind, probability (empty
 /// unless an indication) and text, quoted as CSV when it holds a comma, a
-/// quote or a line break.
+/// quote or a line break. Rows at the same sample index keep their order.
 /// </summary>
 public static class MarkFile
 {
@@ -47,8 +50,15 @@ public static class MarkFile
         MarkKind.Swallow => "swallow",
         MarkKind.False => "false",
         MarkKind.Other => "other",
-        _ => "indication",
+        MarkKind.Indication => "indication",
+        _ => "setup",
     };
+
+    /// <summary>
+    /// The kinds the user makes and edits: <c>swallow</c>, <c>false</c> and
+    /// <c>other</c>. Indications and setup rows are written by the application.
+    /// </summary>
+    public static bool IsUserKind(MarkKind kind) => kind is MarkKind.Swallow or MarkKind.False or MarkKind.Other;
 
     public static MarkKind? ParseKind(string name) => name switch
     {
@@ -56,6 +66,7 @@ public static class MarkFile
         "false" => MarkKind.False,
         "other" => MarkKind.Other,
         "indication" => MarkKind.Indication,
+        "setup" => MarkKind.Setup,
         _ => null,
     };
 

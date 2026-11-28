@@ -141,6 +141,21 @@ public sealed class TargetTests : IDisposable
     }
 
     [Fact]
+    public void Settings_take_the_recording_tag_saved_under_its_former_key()
+    {
+        string path = Path.Combine(_dir.FullName, "settings.json");
+        File.WriteAllText(path, """{ "RecordingLabel": "meal", "SpanSeconds": 10 }""");
+        AppSettings settings = AppSettings.Load(path);
+        settings.RecordingTag.Should().Be("meal");
+        settings.Save(path);
+        string saved = File.ReadAllText(path);
+        saved.Should().NotContain("RecordingLabel").And.Contain("\"RecordingTag\": \"meal\"");
+        AppSettings.Load(path).RecordingTag.Should().Be("meal");
+        File.WriteAllText(path, """{ "RecordingTag": "new", "RecordingLabel": "old" }""");
+        AppSettings.Load(path).RecordingTag.Should().Be("new", "the new key wins");
+    }
+
+    [Fact]
     public void The_models_directory_is_found_beside_the_sources()
     {
         string build = Directory.CreateDirectory(Path.Combine(_dir.FullName, "src", "bin")).FullName;

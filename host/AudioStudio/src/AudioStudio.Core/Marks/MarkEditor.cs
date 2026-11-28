@@ -6,13 +6,16 @@ namespace AudioStudio.Core.Marks;
 /// The marks are kept sorted by sample index (ties in the order they came)
 /// and the methods take and give indices into <see cref="Marks"/>. Every
 /// change is written at once as the whole file (see
-/// <see cref="MarkFile.Write"/>); when the last mark goes, the file is
+/// <see cref="MarkFile.Write"/>); when the last row goes, the file is
 /// removed. A change whose write fails is not made: the marks stay as they
 /// are on disk and <see cref="Error"/> says why.
 /// <para>
-/// Indications are the record of what the detector showed: their time,
-/// probability, kind and text are not edited and they are not deleted (an
-/// attempt throws <see cref="InvalidOperationException"/>). The user's note
+/// Indications are the record of what the detector showed, and setup rows
+/// of which detector setup showed it: their time, probability, kind and
+/// text are not edited, they are not deleted and none is added (an attempt
+/// throws <see cref="InvalidOperationException"/> or
+/// <see cref="ArgumentException"/>); every rewrite keeps them as they are,
+/// in their order. The user's note
 /// that one was wrong is a <c>false</c> mark at its sample
 /// (<see cref="MarkWrong"/>), which <see cref="MarkReview"/> attaches to it.
 /// </para>
@@ -115,18 +118,18 @@ public sealed class MarkEditor
 
     private static void RequireUserKind(MarkKind kind)
     {
-        if (kind == MarkKind.Indication)
+        if (!MarkFile.IsUserKind(kind))
         {
-            throw new ArgumentException("Indications come from the detector; they are not made by hand.", nameof(kind));
+            throw new ArgumentException("Indications and setup rows come from the application; they are not made by hand.", nameof(kind));
         }
     }
 
     private Mark UserMark(int index)
     {
         Mark mark = _marks[index];
-        if (mark.Kind == MarkKind.Indication)
+        if (!MarkFile.IsUserKind(mark.Kind))
         {
-            throw new InvalidOperationException("An indication is the record of what the detector showed; it is not edited or deleted.");
+            throw new InvalidOperationException("An indication or a setup row is the record of what the detector showed; it is not edited or deleted.");
         }
         return mark;
     }
